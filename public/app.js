@@ -198,6 +198,7 @@ function handleSessionEnded(reason, detail) {
 
 function applyRemoteText(filePath, text) {
   if (filePath !== local.selectedFile) return;
+  if (text === local.editorContent) return;
   local.applyingRemoteEdit = true;
   local.editorContent = text;
   if (local.codeEditor) local.codeEditor.applyRemoteText(text);
@@ -243,6 +244,7 @@ function handleCollabMessage(payload) {
   }
 
   if (payload.type === "file_updated") {
+    if (payload.userId && payload.userId === local.userId) return;
     applyRemoteText(payload.filePath, payload.newText || "");
     return;
   }
