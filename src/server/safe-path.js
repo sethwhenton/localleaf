@@ -37,7 +37,12 @@ function normalizeRelativePath(relativePath) {
     throw new Error("A file path is required.");
   }
 
-  const unixPath = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const normalizedInput = relativePath.replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\//.test(normalizedInput)) {
+    throw new Error("Absolute or invalid paths are not allowed.");
+  }
+
+  const unixPath = normalizedInput.replace(/^\/+/, "");
   if (path.isAbsolute(unixPath) || unixPath.includes("\0")) {
     throw new Error("Absolute or invalid paths are not allowed.");
   }
