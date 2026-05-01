@@ -22,6 +22,7 @@
   "build": {
     "appId": "dev.localleaf.host",
     "productName": "LocalLeaf Host",
+    "afterPack": "scripts/after-pack.js",
     "directories": {
       "output": "release"
     },
@@ -48,6 +49,9 @@
       "target": "nsis",
       "icon": "build/icon.ico",
       "signAndEditExecutable": false,
+      "signExts": [
+        "!.exe"
+      ],
       "verifyUpdateCodeSignature": false,
       "forceCodeSigning": false
     },

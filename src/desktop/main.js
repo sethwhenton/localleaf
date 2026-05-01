@@ -1,9 +1,15 @@
 const path = require("node:path");
-const { app, BrowserWindow, Menu, nativeTheme, shell } = require("electron");
+const { app, BrowserWindow, Menu, nativeImage, nativeTheme, shell } = require("electron");
 const { createLocalLeafServer } = require("../server/index");
 
 let hostServer;
 let mainWindow;
+
+function iconPath() {
+  return process.platform === "win32"
+    ? path.join(__dirname, "../../build/icon.ico")
+    : path.join(__dirname, "../../public/assets/localleaf-icon.png");
+}
 
 async function startHostServer() {
   hostServer = createLocalLeafServer({ port: 4317 });
@@ -12,13 +18,14 @@ async function startHostServer() {
 }
 
 function createWindow(url) {
+  const windowIcon = nativeImage.createFromPath(iconPath());
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 820,
     minWidth: 900,
     minHeight: 640,
     title: "LocalLeaf Host",
-    icon: path.join(__dirname, "../../public/assets/localleaf-icon.png"),
+    icon: windowIcon,
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
     titleBarStyle: "hidden",
@@ -46,6 +53,7 @@ function createWindow(url) {
 }
 
 app.whenReady().then(async () => {
+  app.setAppUserModelId("dev.localleaf.host");
   nativeTheme.themeSource = "light";
   Menu.setApplicationMenu(null);
   const url = await startHostServer();
