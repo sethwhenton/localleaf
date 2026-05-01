@@ -7,6 +7,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { URL } = require("node:url");
 const { spawn, spawnSync } = require("node:child_process");
+const AdmZip = require("adm-zip");
 const { WebSocketServer } = require("ws");
 const {
   detectMainFile,
@@ -354,24 +355,46 @@ function chooseExtractedProjectRoot(extractRoot) {
   return extractRoot;
 }
 
+function assertInsideDirectory(root, target) {
+  const relative = path.relative(root, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("ZIP contains a file outside the project folder.");
+  }
+}
+
+function extractZipBuffer(zipBuffer, extractRoot) {
+  const zip = new AdmZip(zipBuffer);
+  for (const entry of zip.getEntries()) {
+    const entryName = entry.entryName.replace(/\\/g, "/");
+    if (!entryName || entryName.startsWith("/") || /^[a-zA-Z]:\//.test(entryName)) {
+      throw new Error("ZIP contains an unsafe absolute path.");
+    }
+
+    const target = path.resolve(extractRoot, entryName);
+    assertInsideDirectory(extractRoot, target);
+
+    if (entry.isDirectory) {
+      fs.mkdirSync(target, { recursive: true });
+      continue;
+    }
+
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, entry.getData());
+  }
+}
+
 function importZipProject(zipBuffer, filename) {
   const importsRoot = path.join(getUserProjectsDir(), "Imported");
   const projectRoot = uniqueDirectory(importsRoot, sanitizeProjectName(filename || "Imported Project"));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-zip-"));
-  const zipPath = path.join(tempRoot, "project.zip");
   const extractRoot = path.join(tempRoot, "extract");
   fs.mkdirSync(extractRoot, { recursive: true });
-  fs.writeFileSync(zipPath, zipBuffer);
 
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Expand-Archive", "-LiteralPath", zipPath, "-DestinationPath", extractRoot, "-Force"],
-    { encoding: "utf8", windowsHide: true }
-  );
-
-  if (result.status !== 0) {
+  try {
+    extractZipBuffer(zipBuffer, extractRoot);
+  } catch (error) {
     fs.rmSync(tempRoot, { recursive: true, force: true });
-    throw new Error(result.stderr || result.stdout || "Could not extract ZIP project.");
+    throw new Error(error.message || "Could not extract ZIP project.");
   }
 
   const extractedProject = chooseExtractedProjectRoot(extractRoot);
@@ -384,10 +407,6 @@ function importZipProject(zipBuffer, filename) {
   }
 
   return projectRoot;
-}
-
-function powershellQuote(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
 function safeDownloadName(name, extension) {
@@ -406,23 +425,34 @@ function attachmentHeaders(filename, contentType) {
   };
 }
 
+function addDirectoryToZip(zip, directory, baseDirectory = directory) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    const relativePath = path.relative(baseDirectory, fullPath).replace(/\\/g, "/");
+
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+
+    if (entry.isDirectory()) {
+      addDirectoryToZip(zip, fullPath, baseDirectory);
+    } else if (entry.isFile()) {
+      zip.addFile(relativePath, fs.readFileSync(fullPath));
+    }
+  }
+}
+
 function createProjectZip(projectRoot, projectName) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-export-"));
   const zipPath = path.join(tempRoot, safeDownloadName(projectName, ".zip"));
-  const command = [
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem;",
-    `if (Test-Path -LiteralPath ${powershellQuote(zipPath)}) { Remove-Item -LiteralPath ${powershellQuote(zipPath)} -Force }`,
-    `[System.IO.Compression.ZipFile]::CreateFromDirectory(${powershellQuote(projectRoot)}, ${powershellQuote(zipPath)})`
-  ].join(" ");
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-    { encoding: "utf8", windowsHide: true }
-  );
 
-  if (result.status !== 0) {
+  try {
+    const zip = new AdmZip();
+    addDirectoryToZip(zip, projectRoot);
+    zip.writeZip(zipPath);
+  } catch (error) {
     fs.rmSync(tempRoot, { recursive: true, force: true });
-    throw new Error(result.stderr || result.stdout || "Could not create project ZIP.");
+    throw new Error(error.message || "Could not create project ZIP.");
   }
 
   return { tempRoot, zipPath };

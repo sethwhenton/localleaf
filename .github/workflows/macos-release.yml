@@ -1,0 +1,82 @@
+name: Build macOS Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Apple Silicon
+            arch: arm64
+            runner: macos-15
+            package_script: package:mac:arm64
+            asset_name: LocalLeaf-Host-mac-arm64.dmg
+          - label: Intel
+            arch: x64
+            runner: macos-13
+            package_script: package:mac:x64
+            asset_name: LocalLeaf-Host-mac-x64.dmg
+
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      LOCALLEAF_TARGET_PLATFORM: darwin
+      LOCALLEAF_TARGET_ARCH: ${{ matrix.arch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create macOS icon
+        run: |
+          chmod +x scripts/create-mac-icon.sh
+          scripts/create-mac-icon.sh
+
+      - name: Download bundled binaries
+        run: npm run prepare:binaries
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build macOS app
+        run: npm run ${{ matrix.package_script }}
+
+      - name: Normalize DMG filename
+        run: |
+          DMG="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          if [ -z "$DMG" ]; then
+            echo "No DMG was produced"
+            exit 1
+          fi
+          cp "$DMG" "release/${{ matrix.asset_name }}"
+          ls -lh release
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: release/${{ matrix.asset_name }}
+
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "LocalLeaf release $TAG"
+          gh release upload "$TAG" "release/${{ matrix.asset_name }}" --clobber

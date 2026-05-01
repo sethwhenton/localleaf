@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const AdmZip = require("adm-zip");
 const WebSocket = require("ws");
 const { createLocalLeafServer } = require("../src/server/index");
 
@@ -364,12 +364,9 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
     const zipRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-zip-source-"));
     fs.writeFileSync(path.join(zipRoot, "main.tex"), "\\documentclass{article}\\begin{document}Zip Project\\end{document}", "utf8");
     const zipPath = path.join(os.tmpdir(), `localleaf-${Date.now()}.zip`);
-    const zipResult = spawnSync(
-      "powershell.exe",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Compress-Archive", "-LiteralPath", path.join(zipRoot, "main.tex"), "-DestinationPath", zipPath, "-Force"],
-      { encoding: "utf8" }
-    );
-    assert.equal(zipResult.status, 0, zipResult.stderr || zipResult.stdout);
+    const zip = new AdmZip();
+    zip.addLocalFile(path.join(zipRoot, "main.tex"));
+    zip.writeZip(zipPath);
     const imported = await rawRequest(baseUrl, "/api/project/import-zip", {
       method: "POST",
       headers: {

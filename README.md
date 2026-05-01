@@ -8,8 +8,10 @@ The host runs this app locally, opens a LaTeX project, starts a session, and sha
 
 - Landing page: https://sethwhenton.github.io/localleaf/
 - Latest Windows installer: https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup-0.1.0.exe
+- Latest macOS installer, Apple Silicon: https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg
+- Latest macOS installer, Intel: https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg
 
-## Run
+## Run Locally
 
 ```powershell
 node src/server/index.js
@@ -37,11 +39,11 @@ node --test tests/*.test.js
 
 - Live editing uses server-sent events plus debounced saves.
 - LocalLeaf imports real `.zip` LaTeX projects and stores imported projects under the host user's Documents folder.
-- The Windows installer bundles Tectonic for lightweight PDF compilation.
-- LocalLeaf tries `latexmk`, bundled `tectonic.exe`, system `tectonic`, `pdflatex`, `xelatex`, and `lualatex` for PDF compilation.
+- The Windows and macOS installers bundle Tectonic for lightweight PDF compilation.
+- LocalLeaf tries `latexmk`, bundled Tectonic, system `tectonic`, `pdflatex`, `xelatex`, and `lualatex` for PDF compilation.
 - If no compiler is available, LocalLeaf shows compiler guidance and a readable HTML preview fallback.
 - LocalLeaf races available tunnel providers and uses the first verified public URL for invite links.
-- If `bin/cloudflared.exe` or a PATH `cloudflared` install is available, Cloudflare Quick Tunnel is included as one tunnel provider.
+- If bundled `cloudflared` or a PATH `cloudflared` install is available, Cloudflare Quick Tunnel is included as one tunnel provider.
 
 ## Packaging
 
