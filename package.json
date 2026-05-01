@@ -9,9 +9,9 @@
     "dev:desktop": "electron .",
     "prepare:binaries": "node scripts/prepare-binaries.js",
     "install:tectonic": "powershell -ExecutionPolicy Bypass -File scripts/install-tectonic.ps1",
-    "package:win": "electron-builder --win nsis --x64",
-    "package:mac:x64": "electron-builder --mac dmg zip --x64",
-    "package:mac:arm64": "electron-builder --mac dmg zip --arm64",
+    "package:win": "electron-builder --win nsis --x64 --publish never",
+    "package:mac:x64": "electron-builder --mac dmg zip --x64 --publish never",
+    "package:mac:arm64": "electron-builder --mac dmg zip --arm64 --publish never",
     "test": "node --test tests/*.test.js"
   },
   "keywords": [
