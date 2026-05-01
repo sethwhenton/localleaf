@@ -25,9 +25,12 @@ const local = {
   saveStatus: "Saved",
   pendingSave: false,
   savePromise: null,
+  codeEditor: null,
+  visualEditor: null,
+  editorMode: localStorage.getItem("localleaf.editorMode") === "visual" ? "visual" : "code",
+  editorSuggestions: null,
   collapsedFolders: new Set(),
   imagesCollapsed: true,
-  openTabs: [],
   fileFilter: "",
   focusFileSearch: false,
   sidebarWidth: Number(localStorage.getItem("localleaf.sidebarWidth") || 280),
@@ -39,6 +42,8 @@ const local = {
   resizingRightRail: false,
   resizingLogs: false,
   sidebarVisible: localStorage.getItem("localleaf.sidebarVisible") !== "0",
+  sourcePaneVisible: localStorage.getItem("localleaf.sourcePaneVisible") !== "0",
+  previewPaneVisible: localStorage.getItem("localleaf.previewPaneVisible") !== "0",
   rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0",
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
   sessionEndedReason: "The host has ended the session.",
@@ -158,6 +163,23 @@ function closeCollab() {
   }
 }
 
+function destroyCodeEditor() {
+  if (!local.codeEditor) return;
+  local.codeEditor.destroy();
+  local.codeEditor = null;
+}
+
+function destroyVisualEditor() {
+  if (!local.visualEditor) return;
+  local.visualEditor.destroy();
+  local.visualEditor = null;
+}
+
+function destroyEditorSurfaces() {
+  destroyCodeEditor();
+  destroyVisualEditor();
+}
+
 function endedViewParams() {
   const extra = {};
   if (local.guestToken) extra.token = local.guestToken;
@@ -178,14 +200,18 @@ function applyRemoteText(filePath, text) {
   if (filePath !== local.selectedFile) return;
   local.applyingRemoteEdit = true;
   local.editorContent = text;
-  const textarea = document.querySelector("#editorText");
-  if (textarea) {
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    textarea.value = text;
-    const nextStart = Math.min(start, text.length);
-    const nextEnd = Math.min(end, text.length);
-    textarea.setSelectionRange(nextStart, nextEnd);
+  if (local.codeEditor) local.codeEditor.applyRemoteText(text);
+  else if (local.visualEditor) local.visualEditor.applyRemoteText(text);
+  else {
+    const textarea = document.querySelector("#editorText");
+    if (textarea && "value" in textarea) {
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      textarea.value = text;
+      const nextStart = Math.min(start, text.length);
+      const nextEnd = Math.min(end, text.length);
+      textarea.setSelectionRange(nextStart, nextEnd);
+    }
   }
   const status = document.querySelector(".editor-subtitle");
   local.saveStatus = "Synced";
@@ -200,7 +226,7 @@ function handleCollabMessage(payload) {
     local.collabPresence = payload.presence || [];
     if (!local.selectedFile && payload.filePath) {
       local.selectedFile = payload.filePath;
-      ensureOpenTab(payload.filePath);
+      expandToFile(payload.filePath);
     }
     if (payload.filePath === local.selectedFile && typeof payload.newText === "string") {
       applyRemoteText(payload.filePath, payload.newText);
@@ -283,6 +309,30 @@ function icon(name) {
 
 function uiGlyph(name) {
   return `<span class="ui-glyph ui-glyph-${name}" aria-hidden="true"></span>`;
+}
+
+function editorToolIcon(name) {
+  const attrs = `class="tool-icon tool-icon-${name}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"`;
+  const icons = {
+    undo: `<svg ${attrs}><path d="M9 8H5V4" /><path d="M5.5 8.5A8 8 0 1 1 7 18" /></svg>`,
+    redo: `<svg ${attrs}><path d="M15 8h4V4" /><path d="M18.5 8.5A8 8 0 1 0 17 18" /></svg>`,
+    monospace: `<svg ${attrs}><path d="M8 8 4 12l4 4" /><path d="m16 8 4 4-4 4" /><path d="m13.5 6-3 12" /></svg>`,
+    symbol: `<svg ${attrs}><path d="M7 18h10" /><path d="M8 18c2.6-2.4 3-4.4 3-7 0-2.7-1.3-4-3.2-4C6 7 5 8.2 5 10" /><path d="M16 18c-2.6-2.4-3-4.4-3-7 0-2.7 1.3-4 3.2-4C18 7 19 8.2 19 10" /></svg>`,
+    link: `<svg ${attrs}><path d="M10 13a5 5 0 0 0 7.1 0l1.2-1.2a5 5 0 0 0-7.1-7.1L10.5 5.4" /><path d="M14 11a5 5 0 0 0-7.1 0l-1.2 1.2a5 5 0 0 0 7.1 7.1l.7-.7" /></svg>`,
+    ref: `<svg ${attrs}><path d="M7 4h10v16l-5-3-5 3V4Z" /><path d="M10 8h4" /><path d="M10 11h4" /></svg>`,
+    cite: `<svg ${attrs}><path d="M8 10h4v7H5v-4c0-3.3 1.7-5.3 5-6" /><path d="M17 10h2v7h-7v-4c0-3.3 1.7-5.3 5-6" /></svg>`,
+    comment: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`,
+    figure: `<svg ${attrs}><rect x="4" y="5" width="16" height="14" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m6.5 17 4.2-4.2 2.5 2.5 2-2L19 17" /></svg>`,
+    table: `<svg ${attrs}><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10h16" /><path d="M4 15h16" /><path d="M10 5v14" /><path d="M15 5v14" /></svg>`,
+    bulletList: `<svg ${attrs}><path d="M9 7h11" /><path d="M9 12h11" /><path d="M9 17h11" /><circle cx="5" cy="7" r="1.2" /><circle cx="5" cy="12" r="1.2" /><circle cx="5" cy="17" r="1.2" /></svg>`,
+    numberedList: `<svg ${attrs}><path d="M10 7h10" /><path d="M10 12h10" /><path d="M10 17h10" /><path d="M4 6h1.5v4" /><path d="M4 10h3" /><path d="M4 14h3l-3 4h3" /></svg>`,
+    outdent: `<svg ${attrs}><path d="M10 7h10" /><path d="M10 12h10" /><path d="M10 17h10" /><path d="m7 9-4 3 4 3" /></svg>`,
+    indent: `<svg ${attrs}><path d="M4 7h10" /><path d="M4 12h10" /><path d="M4 17h10" /><path d="m17 9 4 3-4 3" /></svg>`,
+    complete: `<svg ${attrs}><path d="M14 4 9 20" /><path d="M17 6h3" /><path d="M18.5 4.5v3" /><path d="M4 17h3" /><path d="M5.5 15.5v3" /></svg>`,
+    files: `<svg ${attrs}><path d="M4 6.5h6l2 2h8v9.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6.5Z" /><path d="M4 10h16" /></svg>`,
+    chat: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`
+  };
+  return icons[name] || "";
 }
 
 function hostRailMarkup(active = "") {
@@ -677,26 +727,6 @@ function expandToFile(filePath) {
   }
 }
 
-function ensureOpenTab(filePath) {
-  if (!filePath) return;
-  const item = fileMeta(filePath);
-  if (!item || (!isEditableFile(item) && !isImageAsset(item))) return;
-  if (!local.openTabs.includes(filePath)) {
-    local.openTabs.push(filePath);
-  }
-  local.openTabs = local.openTabs.filter((path) => fileMeta(path)).slice(-8);
-  expandToFile(filePath);
-}
-
-function closeOpenTab(filePath) {
-  const closingIndex = local.openTabs.indexOf(filePath);
-  local.openTabs = local.openTabs.filter((path) => path !== filePath);
-  if (local.selectedFile !== filePath) return;
-
-  const nextFile = local.openTabs[closingIndex] || local.openTabs[closingIndex - 1] || local.appState.project.mainFile;
-  local.selectedFile = nextFile;
-}
-
 function filteredFilesForTree(files) {
   const query = local.fileFilter.trim().toLowerCase();
   const nonImages = files.filter((item) => {
@@ -843,25 +873,6 @@ function renderImageGroup(files, selectedFile) {
   `;
 }
 
-function renderOpenTabs(selectedFile) {
-  const tabs = local.openTabs.filter((path) => fileMeta(path));
-  if (!tabs.includes(selectedFile) && fileMeta(selectedFile)) {
-    tabs.push(selectedFile);
-  }
-  local.openTabs = tabs.slice(-8);
-
-  return local.openTabs.map((path) => {
-    const item = fileMeta(path);
-    const label = item?.name || path;
-    return `
-      <button class="tab ${path === selectedFile ? "active" : ""}" data-tab="${escapeHtml(path)}">
-        <span>${escapeHtml(label)}${path === local.appState.project.mainFile ? " (main)" : ""}</span>
-        <i class="tab-close" data-close-tab="${escapeHtml(path)}" title="Close tab">x</i>
-      </button>
-    `;
-  }).join("");
-}
-
 function selectedFileState(file = local.selectedFile) {
   const state = local.appState;
   const textFiles = state.project.files.filter((item) => item.type === "text");
@@ -875,13 +886,192 @@ function selectedFileState(file = local.selectedFile) {
     outline: outlineFromContent(local.editorContent),
     isMainFile,
     canEditSelected,
-    canSetMain: canEditSelected && file.endsWith(".tex") && !isMainFile
+    canSetMain: canEditSelected && String(file || "").endsWith(".tex") && !isMainFile
   };
+}
+
+function latexEscapeText(value) {
+  return String(value || "")
+    .replace(/\\/g, "\\textbackslash{}")
+    .replace(/([#$%&_{}])/g, "\\$1")
+    .replace(/\^/g, "\\^{}")
+    .replace(/~/g, "\\~{}");
+}
+
+function latexUnescapeText(value) {
+  return String(value || "")
+    .replace(/\\textbackslash\{\}/g, "\\")
+    .replace(/\\([#$%&_{}])/g, "$1")
+    .replace(/\\\^\{\}/g, "^")
+    .replace(/\\~\{\}/g, "~");
+}
+
+function visualInlineHtml(text) {
+  let html = escapeHtml(latexUnescapeText(text));
+  html = html.replace(/\\textbf\{([^{}]*)\}/g, "<strong data-latex-inline=\"textbf\">$1</strong>");
+  html = html.replace(/\\(?:textit|emph)\{([^{}]*)\}/g, "<em data-latex-inline=\"textit\">$1</em>");
+  html = html.replace(/\\texttt\{([^{}]*)\}/g, "<code data-latex-inline=\"texttt\">$1</code>");
+  html = html.replace(/\\(?:cite|citep|citet|parencite|textcite)\{([^{}]*)\}/g, "<span class=\"visual-chip\" data-latex-raw=\"\\\\cite{$1}\">cite:$1</span>");
+  html = html.replace(/\\(?:ref|eqref|autoref|pageref)\{([^{}]*)\}/g, "<span class=\"visual-chip\" data-latex-raw=\"\\\\ref{$1}\">ref:$1</span>");
+  return html;
+}
+
+function inlineNodeToLatex(node) {
+  if (node.nodeType === Node.TEXT_NODE) return latexEscapeText(node.nodeValue);
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const raw = node.getAttribute("data-latex-raw");
+  if (raw) return raw;
+  const children = [...node.childNodes].map(inlineNodeToLatex).join("");
+  const inline = node.getAttribute("data-latex-inline");
+  if (inline) return `\\${inline}{${children}}`;
+  if (node.tagName === "STRONG" || node.tagName === "B") return `\\textbf{${children}}`;
+  if (node.tagName === "EM" || node.tagName === "I") return `\\textit{${children}}`;
+  if (node.tagName === "CODE") return `\\texttt{${children}}`;
+  if (node.tagName === "BR") return "\n";
+  return children;
+}
+
+function blockContentToLatex(element) {
+  return [...element.childNodes].map(inlineNodeToLatex).join("").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function parseVisualLatex(content) {
+  const blocks = [];
+  const lines = String(content || "").replace(/\r\n/g, "\n").split("\n");
+  let paragraph = [];
+  let raw = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push({ type: "paragraph", text: paragraph.join("\n").trim() });
+    paragraph = [];
+  };
+
+  const flushRaw = () => {
+    if (!raw.length) return;
+    blocks.push({ type: "raw", text: raw.join("\n") });
+    raw = [];
+  };
+
+  const isPlainTextLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^\\(?:textbf|textit|emph|texttt|cite|citep|citet|parencite|textcite|ref|eqref|autoref|pageref)\{/.test(trimmed)) return true;
+    return !trimmed.startsWith("\\") && !trimmed.startsWith("%");
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const heading = trimmed.match(/^\\(chapter|section|subsection|subsubsection|paragraph)\*?\{([^}]*)\}\s*$/);
+    if (heading) {
+      flushParagraph();
+      flushRaw();
+      blocks.push({ type: "heading", level: heading[1], text: latexUnescapeText(heading[2]) });
+      continue;
+    }
+
+    if (!trimmed) {
+      flushParagraph();
+      flushRaw();
+      blocks.push({ type: "blank" });
+      continue;
+    }
+
+    if (isPlainTextLine(line)) {
+      flushRaw();
+      paragraph.push(line.trim());
+      continue;
+    }
+
+    flushParagraph();
+    raw.push(line);
+  }
+
+  flushParagraph();
+  flushRaw();
+  return blocks.length ? blocks : [{ type: "paragraph", text: "" }];
+}
+
+function visualBlockMarkup(block, index) {
+  if (block.type === "heading") {
+    return `
+      <section class="visual-block visual-heading-block" data-visual-type="heading" data-heading-level="${escapeHtml(block.level)}">
+        <label>${escapeHtml(block.level)}</label>
+        <div class="visual-heading-input" contenteditable="true" spellcheck="true">${escapeHtml(block.text)}</div>
+      </section>
+    `;
+  }
+  if (block.type === "paragraph") {
+    return `
+      <section class="visual-block visual-paragraph-block" data-visual-type="paragraph">
+        <div class="visual-paragraph-input" contenteditable="true" spellcheck="true">${visualInlineHtml(block.text)}</div>
+      </section>
+    `;
+  }
+  if (block.type === "blank") {
+    return `<div class="visual-block visual-blank-block" data-visual-type="blank" aria-label="Blank line"></div>`;
+  }
+  return `
+    <section class="visual-block visual-raw-block" data-visual-type="raw">
+      <div class="visual-raw-head"><span>LaTeX block</span><small>advanced source</small></div>
+      <textarea class="visual-raw-input" spellcheck="false" aria-label="Raw LaTeX block ${index + 1}">${escapeHtml(block.text)}</textarea>
+    </section>
+  `;
+}
+
+function visualLatexMarkup(content) {
+  return parseVisualLatex(content).map(visualBlockMarkup).join("");
+}
+
+function visualDomToLatex(host) {
+  const blocks = [];
+  host.querySelectorAll(".visual-block").forEach((block) => {
+    const type = block.dataset.visualType;
+    if (type === "heading") {
+      const level = block.dataset.headingLevel || "section";
+      const text = block.querySelector(".visual-heading-input")?.textContent || "";
+      blocks.push(`\\${level}{${latexEscapeText(text.trim())}}`);
+    } else if (type === "paragraph") {
+      const input = block.querySelector(".visual-paragraph-input");
+      blocks.push(blockContentToLatex(input || block));
+    } else if (type === "raw") {
+      blocks.push(block.querySelector(".visual-raw-input")?.value || "");
+    } else if (type === "blank") {
+      blocks.push("");
+    }
+  });
+  return blocks.join("\n").replace(/\n{4,}/g, "\n\n\n");
+}
+
+function editorBreadcrumbMarkup(file, selection) {
+  const parts = String(file || "").split("/").filter(Boolean);
+  const section = selection.canEditSelected
+    ? selection.outline.find((item) => item && item !== "No sections found")
+    : "";
+  const crumbs = parts.map((part, index) => {
+    const isFile = index === parts.length - 1;
+    return `<span class="${isFile ? "active" : ""}">${escapeHtml(part)}${isFile && file === local.appState.project.mainFile ? " (main)" : ""}</span>`;
+  });
+  if (section) crumbs.push(`<span>${escapeHtml(section)}</span>`);
+  return crumbs.length ? crumbs.join(`<i aria-hidden="true"></i>`) : `<span>No file selected</span>`;
 }
 
 function editorSurfaceMarkup(file, selectedMeta) {
   if (isEditableFile(selectedMeta)) {
-    return `<textarea class="editor-textarea" id="editorText" spellcheck="false">${escapeHtml(local.editorContent)}</textarea>`;
+    if (local.editorMode === "visual") {
+      return `
+        <div class="editor-visual-mount" id="editorText" data-file="${escapeHtml(file)}">
+          <div class="visual-editor-intro">
+            <strong>Visual Editor</strong>
+            <span>Simple text and headings are editable here. Complex LaTeX stays in source blocks.</span>
+          </div>
+          <div class="visual-editor-document" id="visualEditorDocument">
+            ${visualLatexMarkup(local.editorContent)}
+          </div>
+        </div>
+      `;
+    }
+    return `<div class="editor-code-mount" id="editorText" data-file="${escapeHtml(file)}"></div>`;
   }
   if (isPdfAsset(selectedMeta)) {
     return `<div class="asset-preview"><iframe title="PDF asset preview" src="${authUrl(`/api/asset?path=${encodeURIComponent(file)}`)}"></iframe><span>${escapeHtml(file)}</span></div>`;
@@ -890,6 +1080,53 @@ function editorSurfaceMarkup(file, selectedMeta) {
     return `<div class="asset-preview"><img src="${authUrl(`/api/asset?path=${encodeURIComponent(file)}`)}" alt="${escapeHtml(selectedMeta.name)}" /><span>${escapeHtml(file)}</span></div>`;
   }
   return `<div class="asset-preview asset-unsupported"><strong>Preview unavailable</strong><span>${escapeHtml(file || "No file selected")}</span></div>`;
+}
+
+function editorFormatToolbarMarkup() {
+  const tool = (command, label, title, extra = "") =>
+    `<button class="editor-tool-button ${extra}" data-editor-command="${command}" title="${title}" aria-label="${title}">${label}</button>`;
+  return `
+    <div class="editor-format-row" role="toolbar" aria-label="LaTeX editor tools">
+      <button class="editor-files-tab-button" id="showFilesPanelInline" title="Show files" aria-label="Show files">
+        ${editorToolIcon("files")}
+        <span>Files</span>
+      </button>
+      ${tool("undo", editorToolIcon("undo"), "Undo")}
+      ${tool("redo", editorToolIcon("redo"), "Redo")}
+      <select class="editor-style-select" id="editorStyleSelect" title="Insert section command" aria-label="Insert section command">
+        <option value="normal">Normal text</option>
+        <option value="chapter">Chapter</option>
+        <option value="section">Section</option>
+        <option value="subsection">Subsection</option>
+        <option value="subsubsection">Subsubsection</option>
+        <option value="paragraph">Paragraph</option>
+      </select>
+      ${tool("bold", "<strong>B</strong>", "Bold")}
+      ${tool("italic", "<em>I</em>", "Italic")}
+      ${tool("monospace", editorToolIcon("monospace"), "Monospace")}
+      ${tool("symbol", editorToolIcon("symbol"), "Insert symbol")}
+      ${tool("link", editorToolIcon("link"), "Insert link")}
+      ${tool("ref", editorToolIcon("ref"), "Insert reference")}
+      ${tool("cite", editorToolIcon("cite"), "Insert citation")}
+      ${tool("comment", editorToolIcon("comment"), "Toggle comment")}
+      ${tool("figure", editorToolIcon("figure"), "Insert figure")}
+      ${tool("table", editorToolIcon("table"), "Insert table")}
+      ${tool("bulletList", editorToolIcon("bulletList"), "Insert bullet list")}
+      ${tool("numberedList", editorToolIcon("numberedList"), "Insert numbered list")}
+      ${tool("outdent", editorToolIcon("outdent"), "Outdent")}
+      ${tool("indent", editorToolIcon("indent"), "Indent")}
+      ${tool("complete", editorToolIcon("complete"), "Open command autocomplete", "accent-tool")}
+      <div class="editor-mode-toggle" role="tablist" aria-label="Editor mode">
+        <button class="editor-mode-pill ${local.editorMode === "code" ? "active" : ""}" data-editor-mode="code" role="tab" aria-selected="${local.editorMode === "code"}">Code Editor</button>
+        <button class="editor-mode-pill ${local.editorMode === "visual" ? "active" : ""}" data-editor-mode="visual" role="tab" aria-selected="${local.editorMode === "visual"}">Visual Editor</button>
+      </div>
+      <span class="format-row-spacer"></span>
+      <button class="editor-chat-tab-button" id="showChatRailInline" title="Show chat" aria-label="Show chat">
+        ${editorToolIcon("chat")}
+        <span>Chat</span>
+      </button>
+    </div>
+  `;
 }
 
 function compiledPreviewMarkup() {
@@ -904,6 +1141,8 @@ function editorShellClasses() {
   return [
     "editor-shell",
     local.sidebarVisible ? "" : "sidebar-collapsed",
+    local.sourcePaneVisible ? "" : "source-collapsed",
+    local.previewPaneVisible ? "" : "preview-collapsed",
     local.rightRailVisible ? "" : "right-rail-collapsed",
     local.logsVisible ? "" : "logs-hidden"
   ].filter(Boolean).join(" ");
@@ -1018,7 +1257,7 @@ async function selectProjectFile(filePath) {
   if (!item || (!isEditableFile(item) && !isImageAsset(item))) return;
   await saveCurrentFile();
   local.selectedFile = filePath;
-  ensureOpenTab(filePath);
+  expandToFile(filePath);
   local.saveStatus = "Saved";
   if (isEditableFile(item)) {
     await loadSelectedFile();
@@ -1042,33 +1281,39 @@ function editorView() {
 
   return `
     <section class="${editorShellClasses()}" style="${editorInlineStyle()}">
-      <header class="editor-topbar">
-        <div class="toolbar-actions">
-          <button class="icon-button editor-back-button" id="backToProject" title="Back" aria-label="Back">
-            <span class="chevron-left" aria-hidden="true"></span>
-          </button>
-          <button class="btn editor-save-button" id="saveButton" ${selection.canEditSelected ? "" : "disabled"}>
-            <span class="save-glyph" aria-hidden="true"></span>
-            <span>Save</span>
-          </button>
-          <a class="btn editor-download-button" id="downloadZipButton" href="${authUrl("/api/export/zip")}" download title="Download the full project as a ZIP" aria-label="Download the full project as a ZIP">
-            ${icon("download")}
-            <span>ZIP</span>
-          </a>
+      <header class="editor-topbar editor-topbar-v11">
+        <div class="editor-primary-row">
+          <div class="toolbar-actions">
+            <button class="icon-button editor-back-button" id="backToProject" title="Back" aria-label="Back">
+              <span class="chevron-left" aria-hidden="true"></span>
+            </button>
+            <button class="btn editor-save-button" id="saveButton" ${selection.canEditSelected ? "" : "disabled"}>
+              <span class="save-glyph" aria-hidden="true"></span>
+              <span>Save</span>
+            </button>
+            <a class="btn editor-download-button" id="downloadZipButton" href="${authUrl("/api/export/zip")}" download title="Download the full project as a ZIP" aria-label="Download the full project as a ZIP">
+              ${icon("download")}
+              <span>ZIP</span>
+            </a>
+          </div>
+          <div class="editor-title-block">
+            <h1>${escapeHtml(state.project.name)}</h1>
+            <span class="editor-subtitle">${escapeHtml(local.saveStatus)}</span>
+          </div>
+          <div class="toolbar-actions editor-run-actions">
+            <span class="main-file-pill">Main: ${escapeHtml(state.project.mainFile || "none")}</span>
+            <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling ? "disabled" : ""}>
+              <span class="compile-spinner"></span>
+              <span>${isCompiling ? "Compiling..." : "Recompile"}</span>
+            </button>
+            <button class="btn" id="exportButton" style="height:32px">Export</button>
+            <button class="btn" id="setMainFile" style="height:32px" ${selection.canSetMain ? "" : "disabled"}>Set Main</button>
+            ${layoutToggleMarkup("toggleSourcePane", local.sourcePaneVisible, "editor", "Show or hide editor")}
+            ${layoutToggleMarkup("togglePreviewPane", local.previewPaneVisible, "preview", "Show or hide PDF preview")}
+            ${layoutToggleMarkup("toggleLogs", local.logsVisible, "bottom", "Show or hide logs")}
+          </div>
         </div>
-        <h1>${escapeHtml(state.project.name)} <span class="editor-subtitle">${escapeHtml(local.saveStatus)}</span></h1>
-        <div class="toolbar-actions">
-          <span class="main-file-pill">Main: ${escapeHtml(state.project.mainFile || "none")}</span>
-          <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling ? "disabled" : ""}>
-            <span class="compile-spinner"></span>
-            <span>${isCompiling ? "Compiling..." : "Recompile"}</span>
-          </button>
-          <button class="btn" id="exportButton" style="height:32px">Export</button>
-          <button class="btn" id="setMainFile" style="height:32px" ${selection.canSetMain ? "" : "disabled"}>Set Main</button>
-          ${layoutToggleMarkup("toggleSidebar", local.sidebarVisible, "sidebar", "Show or hide files")}
-          ${layoutToggleMarkup("toggleRightRail", local.rightRailVisible, "right", "Show or hide chat")}
-          ${layoutToggleMarkup("toggleLogs", local.logsVisible, "bottom", "Show or hide logs")}
-        </div>
+        ${editorFormatToolbarMarkup()}
       </header>
 
       <div class="editor-grid">
@@ -1077,6 +1322,7 @@ function editorView() {
             <div class="files-title">
               <strong>Files</strong>
               <span>${selection.textFiles.length} editable</span>
+              <button class="icon-button files-hide-button" id="hideFilesPanel" title="Hide files panel" aria-label="Hide files panel">${layoutGlyph("sidebar")}</button>
             </div>
             <div class="file-actions">
               <button class="mini-button" id="newFile" title="New file">+</button>
@@ -1105,11 +1351,11 @@ function editorView() {
         <div class="sidebar-resizer" id="sidebarResizer" title="Resize file sidebar"></div>
 
         <section class="code-panel">
-          <div class="pane-head source-head">
-            <div class="tab-strip">
-              ${renderOpenTabs(file)}
-            </div>
-            <span class="editor-help">Source tabs</span>
+          <div class="pane-head source-head source-breadcrumb-head">
+            <nav class="editor-breadcrumb" aria-label="Current file">
+              ${editorBreadcrumbMarkup(file, selection)}
+            </nav>
+            <span class="editor-help">Tree selected</span>
           </div>
           ${editorSurface}
         </section>
@@ -1164,10 +1410,6 @@ function editorView() {
         <div class="log-tabs"><button class="active">Logs</button></div>
         <pre class="logs">${escapeHtml(logs)}</pre>
       </footer>
-      <button class="chat-restore-button" id="showChatRail" title="Show chat" aria-label="Show chat">
-        <span class="chat-restore-glyph" aria-hidden="true"></span>
-        <span>Chat</span>
-      </button>
     </section>
   `;
 }
@@ -1182,9 +1424,8 @@ async function loadState() {
     local.selectedFile = local.appState.project.mainFile;
   }
   if (local.selectedFile) {
-    ensureOpenTab(local.selectedFile);
+    expandToFile(local.selectedFile);
   }
-  local.openTabs = local.openTabs.filter((path) => fileMeta(path));
 }
 
 async function loadSelectedFile() {
@@ -1231,8 +1472,7 @@ async function openProjectPrompt() {
   try {
     local.appState = await api("/api/project/open", { method: "POST", body: { path: input } });
     local.selectedFile = local.appState.project.mainFile;
-    local.openTabs = [];
-    ensureOpenTab(local.selectedFile);
+    expandToFile(local.selectedFile);
     await loadSelectedFile();
     setView("project");
   } catch (error) {
@@ -1269,8 +1509,7 @@ async function importZipProject() {
         rawBody: buffer
       });
       local.selectedFile = local.appState.project.mainFile;
-      local.openTabs = [];
-      ensureOpenTab(local.selectedFile);
+      expandToFile(local.selectedFile);
       await loadSelectedFile();
       local.saveStatus = "Imported";
       setView("project");
@@ -1315,15 +1554,147 @@ function bindSession() {
   });
 }
 
-function markEditorChanged(textarea) {
+function markEditorChanged(source) {
   if (local.applyingRemoteEdit) return;
-  local.editorContent = textarea.value;
+  local.editorContent = typeof source === "string" ? source : source?.value || "";
   local.saveStatus = "Unsaved";
   const status = document.querySelector(".editor-subtitle");
   if (status) status.textContent = local.saveStatus;
   sendCollab("edit", { filePath: local.selectedFile, newText: local.editorContent });
   clearTimeout(local.saveTimer);
   local.saveTimer = setTimeout(saveCurrentFile, 450);
+}
+
+async function refreshEditorSuggestions() {
+  if (!local.appState) return;
+  try {
+    local.editorSuggestions = await api("/api/editor/suggestions");
+    local.codeEditor?.setSuggestions(local.editorSuggestions);
+  } catch {
+    local.editorSuggestions = local.editorSuggestions || {};
+  }
+}
+
+function currentEditorText() {
+  if (local.codeEditor) return local.codeEditor.getText();
+  if (local.visualEditor) return local.visualEditor.getText();
+  return local.editorContent;
+}
+
+function mountCodeEditor() {
+  const host = document.querySelector("#editorText.editor-code-mount");
+  if (!host) return;
+  if (!window.LocalLeafEditor) {
+    host.innerHTML = `<textarea class="editor-textarea editor-fallback-textarea" spellcheck="false">${escapeHtml(local.editorContent)}</textarea>`;
+    return;
+  }
+  if (local.codeEditor?.host === host) return;
+  destroyCodeEditor();
+  local.codeEditor = window.LocalLeafEditor.mount({
+    parent: host,
+    value: local.editorContent,
+    filePath: local.selectedFile,
+    suggestions: local.editorSuggestions || {},
+    onChange: (text) => markEditorChanged(text),
+    onSave: saveCurrentFile,
+    onCompile: compile,
+    onFocus: () => {
+      local.editingNow = true;
+    },
+    onBlur: () => {
+      local.editingNow = false;
+    }
+  });
+  refreshEditorSuggestions();
+}
+
+function mountVisualEditor() {
+  const host = document.querySelector("#editorText.editor-visual-mount");
+  if (!host) return;
+  if (local.visualEditor?.host === host) return;
+  destroyCodeEditor();
+  const documentNode = host.querySelector("#visualEditorDocument");
+  const getText = () => visualDomToLatex(documentNode);
+  const handleInput = () => markEditorChanged(getText());
+  const handleFocusIn = () => {
+    local.editingNow = true;
+  };
+  const handleFocusOut = () => {
+    local.editingNow = false;
+  };
+  documentNode?.addEventListener("input", handleInput);
+  documentNode?.addEventListener("focusin", handleFocusIn);
+  documentNode?.addEventListener("focusout", handleFocusOut);
+  host.querySelectorAll(".visual-raw-input").forEach((input) => {
+    input.addEventListener("input", handleInput);
+  });
+
+  local.visualEditor = {
+    host,
+    destroy() {
+      documentNode?.removeEventListener("input", handleInput);
+      documentNode?.removeEventListener("focusin", handleFocusIn);
+      documentNode?.removeEventListener("focusout", handleFocusOut);
+      local.visualEditor = null;
+    },
+    getText,
+    applyRemoteText(text) {
+      if (!documentNode) return;
+      documentNode.innerHTML = visualLatexMarkup(text);
+      host.querySelectorAll(".visual-raw-input").forEach((input) => {
+        input.addEventListener("input", handleInput);
+      });
+    },
+    exec(command, value) {
+      return execVisualCommand(command, value);
+    }
+  };
+}
+
+function execVisualCommand(command, value) {
+  const active = document.activeElement;
+  const insertText = (text) => {
+    if (active && (active.isContentEditable || active.tagName === "TEXTAREA")) {
+      document.execCommand("insertText", false, text);
+      markEditorChanged(currentEditorText());
+      return true;
+    }
+    return false;
+  };
+
+  if (command === "bold") document.execCommand("bold");
+  else if (command === "italic") document.execCommand("italic");
+  else if (command === "monospace") document.execCommand("insertHTML", false, "<code data-latex-inline=\"texttt\">text</code>");
+  else if (command === "style" && value && value !== "normal") insertText(`\\${value}{Title}`);
+  else if (command === "link") insertText("\\href{}{text}");
+  else if (command === "ref") insertText("\\ref{}");
+  else if (command === "cite") insertText("\\cite{}");
+  else if (command === "figure") insertText("\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{}\n  \\caption{}\n  \\label{fig:}\n\\end{figure}");
+  else if (command === "table") insertText("\\begin{table}[h]\n  \\centering\n  \\begin{tabular}{ll}\n    \\hline\n    Column & Value \\\\\n    \\hline\n  \\end{tabular}\n  \\caption{}\n  \\label{tab:}\n\\end{table}");
+  else if (command === "bulletList") insertText("\\begin{itemize}\n  \\item \n\\end{itemize}");
+  else if (command === "numberedList") insertText("\\begin{enumerate}\n  \\item \n\\end{enumerate}");
+  else if (command === "symbol") insertText("\\alpha");
+  else if (command === "comment") insertText("% ");
+  else if (command === "complete") {
+    setEditorMode("code");
+    return true;
+  }
+  else return false;
+  markEditorChanged(currentEditorText());
+  return true;
+}
+
+function mountActiveEditor() {
+  if (local.editorMode === "visual") mountVisualEditor();
+  else mountCodeEditor();
+}
+
+function setEditorMode(mode) {
+  if (!["code", "visual"].includes(mode) || local.editorMode === mode) return;
+  local.editorContent = currentEditorText();
+  local.editorMode = mode;
+  localStorage.setItem("localleaf.editorMode", mode);
+  updateEditorSourceUi();
 }
 
 function copyTextWithSelection(text) {
@@ -1468,11 +1839,14 @@ function bindEditor() {
   document.querySelector("#renameFile")?.addEventListener("click", renameSelectedFile);
   document.querySelector("#deleteFile")?.addEventListener("click", deleteSelectedFile);
   document.querySelector("#setMainFile")?.addEventListener("click", setMainFile);
-  document.querySelector("#toggleSidebar")?.addEventListener("click", () => toggleLayoutPane("sidebar"));
-  document.querySelector("#toggleRightRail")?.addEventListener("click", () => toggleLayoutPane("right"));
+  document.querySelector("#toggleSourcePane")?.addEventListener("click", () => toggleLayoutPane("source"));
+  document.querySelector("#togglePreviewPane")?.addEventListener("click", () => toggleLayoutPane("preview"));
   document.querySelector("#toggleLogs")?.addEventListener("click", () => toggleLayoutPane("logs"));
+  document.querySelector("#hideFilesPanel")?.addEventListener("click", () => setSidebarVisible(false));
+  document.querySelector("#showFilesPanelInline")?.addEventListener("click", () => setSidebarVisible(true));
   document.querySelector("#hideChatRail")?.addEventListener("click", () => setRightRailVisible(false));
   document.querySelector("#showChatRail")?.addEventListener("click", () => setRightRailVisible(true));
+  document.querySelector("#showChatRailInline")?.addEventListener("click", () => setRightRailVisible(true));
   document.querySelector("#shareInviteFromChat")?.addEventListener("click", (event) => copyInvite(event.currentTarget));
   document.querySelector("#sidebarResizer")?.addEventListener("pointerdown", (event) => {
     event.preventDefault();
@@ -1515,20 +1889,6 @@ function bindEditor() {
     local.imagesCollapsed = !local.imagesCollapsed;
     updateSidebarUi();
   });
-  document.querySelectorAll("[data-tab]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await selectProjectFile(button.dataset.tab);
-    });
-  });
-  document.querySelectorAll("[data-close-tab]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await saveCurrentFile();
-      closeOpenTab(button.dataset.closeTab);
-      await loadSelectedFile();
-      updateEditorSourceUi();
-    });
-  });
   document.querySelector("#fileSearch")?.addEventListener("input", (event) => {
     local.fileFilter = event.target.value;
     local.focusFileSearch = true;
@@ -1539,34 +1899,8 @@ function bindEditor() {
     updateSidebarUi();
   });
 
-  const textarea = document.querySelector("#editorText");
-  textarea?.addEventListener("focus", () => {
-    local.editingNow = true;
-  });
-  textarea?.addEventListener("blur", () => {
-    local.editingNow = false;
-  });
-  textarea?.addEventListener("input", () => {
-    markEditorChanged(textarea);
-  });
-  textarea?.addEventListener("keydown", async (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      await saveCurrentFile();
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      await compile();
-    }
-    if (event.key === "Tab") {
-      event.preventDefault();
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      textarea.value = `${textarea.value.slice(0, start)}  ${textarea.value.slice(end)}`;
-      textarea.selectionStart = textarea.selectionEnd = start + 2;
-      markEditorChanged(textarea);
-    }
-  });
+  bindEditorToolbar();
+  mountActiveEditor();
 
   document.querySelector("#chatForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1584,6 +1918,7 @@ function bindSidebarControls() {
   document.querySelector("#uploadFile")?.addEventListener("click", uploadProjectFile);
   document.querySelector("#renameFile")?.addEventListener("click", renameSelectedFile);
   document.querySelector("#deleteFile")?.addEventListener("click", deleteSelectedFile);
+  document.querySelector("#hideFilesPanel")?.addEventListener("click", () => setSidebarVisible(false));
   document.querySelectorAll(".file-button").forEach((button) => {
     button.addEventListener("click", async () => {
       await selectProjectFile(button.dataset.file);
@@ -1612,58 +1947,38 @@ function bindSidebarControls() {
   });
 }
 
-function bindSourceControls() {
-  document.querySelector("#saveButton")?.addEventListener("click", saveCurrentFile);
-  document.querySelector("#setMainFile")?.addEventListener("click", setMainFile);
-  document.querySelectorAll("[data-tab]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await selectProjectFile(button.dataset.tab);
+function bindEditorToolbar() {
+  document.querySelectorAll("[data-editor-mode]").forEach((button) => {
+    button.addEventListener("click", () => setEditorMode(button.dataset.editorMode));
+  });
+  document.querySelectorAll("[data-editor-command]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (local.codeEditor) local.codeEditor.exec(button.dataset.editorCommand);
+      else local.visualEditor?.exec(button.dataset.editorCommand);
     });
   });
-  document.querySelectorAll("[data-close-tab]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await saveCurrentFile();
-      closeOpenTab(button.dataset.closeTab);
-      await loadSelectedFile();
-      updateEditorSourceUi();
-    });
+  const styleSelect = document.querySelector("#editorStyleSelect");
+  styleSelect?.addEventListener("change", () => {
+    if (local.codeEditor) local.codeEditor.exec("style", styleSelect.value);
+    else local.visualEditor?.exec("style", styleSelect.value);
+    styleSelect.value = "normal";
   });
+}
 
-  const textarea = document.querySelector("#editorText");
-  textarea?.addEventListener("focus", () => {
-    local.editingNow = true;
-  });
-  textarea?.addEventListener("blur", () => {
-    local.editingNow = false;
-  });
-  textarea?.addEventListener("input", () => {
-    markEditorChanged(textarea);
-  });
-  textarea?.addEventListener("keydown", async (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      await saveCurrentFile();
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      await compile();
-    }
-    if (event.key === "Tab") {
-      event.preventDefault();
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      textarea.value = `${textarea.value.slice(0, start)}  ${textarea.value.slice(end)}`;
-      textarea.selectionStart = textarea.selectionEnd = start + 2;
-      markEditorChanged(textarea);
-    }
-  });
+function bindSourceControls() {
+  mountActiveEditor();
 }
 
 function toggleLayoutPane(pane) {
   if (pane === "sidebar") {
     local.sidebarVisible = !local.sidebarVisible;
     localStorage.setItem("localleaf.sidebarVisible", local.sidebarVisible ? "1" : "0");
+  } else if (pane === "source") {
+    local.sourcePaneVisible = !local.sourcePaneVisible;
+    localStorage.setItem("localleaf.sourcePaneVisible", local.sourcePaneVisible ? "1" : "0");
+  } else if (pane === "preview") {
+    local.previewPaneVisible = !local.previewPaneVisible;
+    localStorage.setItem("localleaf.previewPaneVisible", local.previewPaneVisible ? "1" : "0");
   } else if (pane === "right") {
     local.rightRailVisible = !local.rightRailVisible;
     localStorage.setItem("localleaf.rightRailVisible", local.rightRailVisible ? "1" : "0");
@@ -1671,6 +1986,12 @@ function toggleLayoutPane(pane) {
     local.logsVisible = !local.logsVisible;
     localStorage.setItem("localleaf.logsVisible", local.logsVisible ? "1" : "0");
   }
+  applyEditorLayoutState();
+}
+
+function setSidebarVisible(visible) {
+  local.sidebarVisible = visible;
+  localStorage.setItem("localleaf.sidebarVisible", visible ? "1" : "0");
   applyEditorLayoutState();
 }
 
@@ -1684,10 +2005,12 @@ function applyEditorLayoutState() {
   const shell = document.querySelector(".editor-shell");
   if (!shell) return;
   shell.classList.toggle("sidebar-collapsed", !local.sidebarVisible);
+  shell.classList.toggle("source-collapsed", !local.sourcePaneVisible);
+  shell.classList.toggle("preview-collapsed", !local.previewPaneVisible);
   shell.classList.toggle("right-rail-collapsed", !local.rightRailVisible);
   shell.classList.toggle("logs-hidden", !local.logsVisible);
-  document.querySelector("#toggleSidebar")?.classList.toggle("active", local.sidebarVisible);
-  document.querySelector("#toggleRightRail")?.classList.toggle("active", local.rightRailVisible);
+  document.querySelector("#toggleSourcePane")?.classList.toggle("active", local.sourcePaneVisible);
+  document.querySelector("#togglePreviewPane")?.classList.toggle("active", local.previewPaneVisible);
   document.querySelector("#toggleLogs")?.classList.toggle("active", local.logsVisible);
 }
 
@@ -1711,12 +2034,18 @@ function updateEditorSourceUi() {
   const state = local.appState;
   const file = local.selectedFile || state.project.mainFile;
   const selection = selectedFileState(file);
-  const tabStrip = document.querySelector(".tab-strip");
-  if (tabStrip) tabStrip.innerHTML = renderOpenTabs(file);
+  const breadcrumb = document.querySelector(".editor-breadcrumb");
+  if (breadcrumb) breadcrumb.innerHTML = editorBreadcrumbMarkup(file, selection);
+  document.querySelectorAll("[data-editor-mode]").forEach((button) => {
+    const active = button.dataset.editorMode === local.editorMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
 
   const codePanel = document.querySelector(".code-panel");
-  const oldSurface = codePanel?.querySelector("#editorText, .asset-preview");
+  const oldSurface = codePanel?.querySelector(".editor-code-mount, .editor-visual-mount, #editorText, .asset-preview");
   if (oldSurface) {
+    destroyEditorSurfaces();
     oldSurface.outerHTML = editorSurfaceMarkup(file, selection.selectedMeta);
   }
 
@@ -1891,6 +2220,7 @@ function settleEditorUi() {
 async function saveCurrentFile() {
   if (!local.selectedFile) return;
   if (!isEditableFile(fileMeta(local.selectedFile))) return;
+  local.editorContent = currentEditorText();
   if (local.saving) {
     local.pendingSave = true;
     return local.savePromise;
@@ -1911,6 +2241,7 @@ async function saveCurrentFile() {
       });
       sendCollab("save", { filePath: local.selectedFile });
       local.saveStatus = "Saved";
+      refreshEditorSuggestions();
     } catch (error) {
       local.saveStatus = "Save failed";
       alert(error.message);
@@ -1942,7 +2273,7 @@ async function createFile() {
     });
     await loadState();
     local.selectedFile = result.path;
-    ensureOpenTab(result.path);
+    expandToFile(result.path);
     await loadSelectedFile();
     local.saveStatus = "Created";
     render();
@@ -1988,7 +2319,7 @@ async function uploadProjectFile() {
       });
       await loadState();
       local.selectedFile = result.path;
-      ensureOpenTab(result.path);
+      expandToFile(result.path);
       await loadSelectedFile();
       local.saveStatus = "Uploaded";
       render();
@@ -2012,9 +2343,8 @@ async function renameSelectedFile() {
       }
     });
     await loadState();
-    local.openTabs = local.openTabs.map((path) => (path === local.selectedFile ? result.path : path));
     local.selectedFile = result.path;
-    ensureOpenTab(result.path);
+    expandToFile(result.path);
     await loadSelectedFile();
     local.saveStatus = "Renamed";
     render();
@@ -2033,9 +2363,8 @@ async function deleteSelectedFile() {
       body: { path: local.selectedFile }
     });
     await loadState();
-    closeOpenTab(local.selectedFile);
-    local.selectedFile = local.selectedFile || local.appState.project.mainFile || local.appState.project.files.find((file) => file.type === "text" || file.type === "image")?.path;
-    ensureOpenTab(local.selectedFile);
+    local.selectedFile = local.appState.project.mainFile || local.appState.project.files.find((file) => file.type === "text" || file.type === "image")?.path;
+    expandToFile(local.selectedFile);
     await loadSelectedFile();
     local.saveStatus = "Deleted";
     render();
@@ -2076,6 +2405,7 @@ async function render() {
   }
 
   const current = route();
+  destroyEditorSurfaces();
   app.className = `app-shell app-shell-${current.view}`;
   if (current.view === "join") {
     app.innerHTML = joinView(current.code);
@@ -2143,8 +2473,12 @@ function connectEvents() {
     const update = JSON.parse(event.data);
     if (update.path === local.selectedFile && update.user !== local.userName && !local.editingNow) {
       local.editorContent = update.content;
-      const textarea = document.querySelector("#editorText");
-      if (textarea) textarea.value = update.content;
+      if (local.codeEditor) local.codeEditor.applyRemoteText(update.content);
+      else if (local.visualEditor) local.visualEditor.applyRemoteText(update.content);
+      else {
+        const textarea = document.querySelector("#editorText");
+        if (textarea && "value" in textarea) textarea.value = update.content;
+      }
     }
   });
   events.addEventListener("compile", (event) => {

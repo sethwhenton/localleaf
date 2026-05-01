@@ -18,6 +18,7 @@ const {
   resolveProjectPath
 } = require("./safe-path");
 const { compileProject, commandExists, detectCompiler } = require("./compiler");
+const { collectProjectEditorSuggestions } = require("./editor-suggestions");
 
 let localtunnelClient = null;
 try {
@@ -1423,6 +1424,15 @@ function createLocalLeafServer(options = {}) {
     if (request.method === "GET" && url.pathname === "/api/state") {
       const isHost = isHostRequest(request);
       jsonResponse(response, 200, publicState(state, { isHost, canRead: isHost || Boolean(getTokenUser(state, request, url)) }));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/editor/suggestions") {
+      if (!canReadProject(state, request, url)) {
+        deny(response, "Join approval is required before reading project suggestions.");
+        return;
+      }
+      jsonResponse(response, 200, collectProjectEditorSuggestions(state.project.root, state.project.files));
       return;
     }
 

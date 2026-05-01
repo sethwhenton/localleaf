@@ -1,6 +1,9 @@
 name: Build macOS Release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:

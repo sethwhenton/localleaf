@@ -258,6 +258,12 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
     const joinStatus = await request(baseUrl, `/api/join-status?id=${encodeURIComponent(join.requestId)}`);
     assert.ok(joinStatus.token);
 
+    const suggestions = await request(baseUrl, `/api/editor/suggestions?token=${encodeURIComponent(joinStatus.token)}`);
+    assert.ok(Array.isArray(suggestions.labels));
+    assert.ok(Array.isArray(suggestions.citations));
+    assert.ok(Array.isArray(suggestions.macros));
+    assert.ok(Array.isArray(suggestions.environments));
+
     const hostWs = new WebSocket(`ws://localhost:${port}/collab`);
     const guestWs = new WebSocket(`ws://localhost:${port}/collab?token=${encodeURIComponent(joinStatus.token)}`);
     const hostSync = waitForWsMessage(hostWs, "sync_state");
