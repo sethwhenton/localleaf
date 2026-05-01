@@ -1,0 +1,12 @@
+node_modules/
+.localleaf-build/
+release/
+artifacts-*.png
+bin/*.exe
+*.log
+*.aux
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+dist/
+out/

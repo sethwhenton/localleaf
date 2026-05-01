@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">LocalLeaf logo</title>
+  <desc id="desc">An orange document outline with a folded corner and a leaf in front.</desc>
+  <defs>
+    <linearGradient id="leaf" x1="55" y1="205" x2="179" y2="91" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff5a00"/>
+      <stop offset="1" stop-color="#ff7a00"/>
+    </linearGradient>
+  </defs>
+  <path
+    d="M75 36h91l39 40v129c0 10-8 18-18 18H75c-10 0-18-8-18-18V54c0-10 8-18 18-18Z"
+    fill="none"
+    stroke="#ff6a00"
+    stroke-width="9"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M166 36v34c0 7 6 13 13 13h31"
+    fill="none"
+    stroke="#ff6a00"
+    stroke-width="9"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M40 195c-3-49 29-89 85-105 27-8 58-8 85-6 2 31-4 63-22 86-27 35-74 47-118 34"
+    fill="url(#leaf)"
+  />
+  <path
+    d="M31 221c32-63 82-100 152-119"
+    fill="none"
+    stroke="#fff"
+    stroke-width="9"
+    stroke-linecap="round"
+  />
+  <path
+    d="M31 221c31-64 80-101 150-119"
+    fill="none"
+    stroke="#ff6a00"
+    stroke-width="7"
+    stroke-linecap="round"
+    opacity=".98"
+    transform="translate(-4 9)"
+  />
+</svg>

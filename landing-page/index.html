@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="LocalLeaf is a free Overleaf-like LaTeX editor hosted from your own computer. Invite collaborators with a session link and keep your files local."
+    />
+    <title>LocalLeaf - Overleaf-like LaTeX collaboration hosted by you</title>
+    <link rel="icon" href="./assets/localleaf-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header" data-blur-header>
+        <a class="brand" href="#top" aria-label="LocalLeaf home">
+          <img src="./assets/localleaf-logo-mark.svg" alt="" />
+          <span>LocalLeaf</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary navigation">
+          <a href="#features">Features</a>
+          <a href="#how">How it Works</a>
+          <a href="#why">Why LocalLeaf</a>
+          <a href="#faq">FAQs</a>
+        </nav>
+        <a class="download-button small" href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup-0.1.0.exe" download>
+          <span class="download-icon" aria-hidden="true"></span>
+          Download for Windows
+        </a>
+      </header>
+
+      <main id="top">
+        <section class="hero section-grid">
+          <div class="hero-copy reveal">
+            <p class="privacy-badge"><span class="shield-icon" aria-hidden="true"></span> Private. Local. Fast.</p>
+            <h1>The Overleaf-like editor hosted by <span>you.</span></h1>
+            <p class="hero-lede">
+              LocalLeaf lets students collaborate on LaTeX projects in real time from one host computer.
+              No accounts, no monthly server, no cloud storage.
+            </p>
+            <div class="proof-row" aria-label="LocalLeaf highlights">
+              <span><i class="mini-icon free" aria-hidden="true"></i>100% Free</span>
+              <span><i class="mini-icon login" aria-hidden="true"></i>No Login</span>
+              <span><i class="mini-icon local" aria-hidden="true"></i>Your Data Stays Local</span>
+            </div>
+            <div class="hero-actions">
+              <a class="download-button" href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup-0.1.0.exe" download>
+                <span class="download-icon" aria-hidden="true"></span>
+                Download LocalLeaf for Windows
+              </a>
+              <a class="secondary-link" href="#how">See how it works</a>
+            </div>
+            <p class="system-note">Windows 10 / 11, 64-bit</p>
+          </div>
+
+          <div class="product-shot reveal delay-1" data-tilt-card>
+            <div class="window-bar">
+              <span></span><span></span><span></span>
+              <strong>LocalLeaf Host</strong>
+            </div>
+            <img src="./assets/session-live.png" alt="LocalLeaf session management screen with invite link and user list" />
+          </div>
+        </section>
+
+        <section class="feature-band" id="features">
+          <div class="section-title reveal">
+            <h2>Everything you need. Nothing you don't.</h2>
+            <p>Designed for quick group reports, thesis drafts, lab notes, and class projects.</p>
+          </div>
+          <div class="feature-list">
+            <article class="feature-item reveal">
+              <span class="feature-icon monitor" aria-hidden="true"></span>
+              <h3>Real-time Collaboration</h3>
+              <p>Edit together in the browser. Changes appear instantly for approved collaborators.</p>
+            </article>
+            <article class="feature-item reveal delay-1">
+              <span class="feature-icon shield" aria-hidden="true"></span>
+              <h3>100% Local & Private</h3>
+              <p>The host computer keeps the files. Sessions end when the host stops.</p>
+            </article>
+            <article class="feature-item reveal delay-2">
+              <span class="feature-icon rocket" aria-hidden="true"></span>
+              <h3>Fast & Lightweight</h3>
+              <p>Runs as a simple Windows app with a browser-based editor for collaborators.</p>
+            </article>
+            <article class="feature-item reveal delay-3">
+              <span class="feature-icon link" aria-hidden="true"></span>
+              <h3>Share in One Click</h3>
+              <p>Start a session, copy the invite link, and approve friends as they join.</p>
+            </article>
+            <article class="feature-item reveal delay-4">
+              <span class="feature-icon code" aria-hidden="true"></span>
+              <h3>LaTeX, Simplified</h3>
+              <p>Open a project, edit files, compile, preview, chat, and export ZIP or PDF.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="product-section" id="why">
+          <div class="editor-preview reveal">
+            <div class="window-bar">
+              <span></span><span></span><span></span>
+              <strong>Browser Editor</strong>
+            </div>
+            <img src="./assets/editor-preview.png" alt="LocalLeaf browser editor showing files, LaTeX source, PDF preview, chat, and logs" />
+          </div>
+          <div class="product-copy reveal delay-1">
+            <p class="eyebrow">Built for student groups</p>
+            <h2>Feels like Overleaf, powered by one laptop.</h2>
+            <p>
+              LocalLeaf gives the host a simple control center and gives collaborators an Overleaf-style editor in the browser.
+              The host stays in control of approvals, project files, compiler output, and session shutdown.
+            </p>
+            <div class="mini-metrics">
+              <div><strong>5</strong><span>suggested collaborators</span></div>
+              <div><strong>0</strong><span>accounts required</span></div>
+              <div><strong>1</strong><span>invite link</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="how-section" id="how">
+          <div class="section-title reveal">
+            <h2>How LocalLeaf works</h2>
+            <p>A simple session flow, with the host computer doing the work.</p>
+          </div>
+          <div class="steps">
+            <article class="step reveal">
+              <span>1</span>
+              <div class="step-icon folder" aria-hidden="true"></div>
+              <h3>Open a Project</h3>
+              <p>Choose an existing LaTeX folder or import a ZIP project.</p>
+            </article>
+            <article class="step reveal delay-1">
+              <span>2</span>
+              <div class="step-icon screen" aria-hidden="true"></div>
+              <h3>Host a Session</h3>
+              <p>LocalLeaf starts the local server, compiler, and tunnel.</p>
+            </article>
+            <article class="step reveal delay-2">
+              <span>3</span>
+              <div class="step-icon people" aria-hidden="true"></div>
+              <h3>Invite Others</h3>
+              <p>Send the temporary link and approve join requests.</p>
+            </article>
+            <article class="step reveal delay-3">
+              <span>4</span>
+              <div class="step-icon pencil" aria-hidden="true"></div>
+              <h3>Edit Together</h3>
+              <p>Everyone edits, chats, compiles, and previews from the browser.</p>
+            </article>
+            <article class="step reveal delay-4">
+              <span>5</span>
+              <div class="step-icon save" aria-hidden="true"></div>
+              <h3>All Local. Always.</h3>
+              <p>When the host stops, the session closes and files stay on the host PC.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="free-section">
+          <div class="section-title reveal">
+            <h2>Free. Forever.</h2>
+            <p>LocalLeaf is meant to remove the monthly hosting headache for student teams.</p>
+          </div>
+          <div class="promise-grid">
+            <article class="promise reveal">
+              <span class="promise-icon gift" aria-hidden="true"></span>
+              <h3>100% Free</h3>
+              <p>Download it, host from your computer, and collaborate without hidden fees.</p>
+            </article>
+            <article class="promise reveal delay-1">
+              <span class="promise-icon no-user" aria-hidden="true"></span>
+              <h3>No Account Needed</h3>
+              <p>Friends join with a browser link after the host approves them.</p>
+            </article>
+            <article class="promise reveal delay-2">
+              <span class="promise-icon lock" aria-hidden="true"></span>
+              <h3>Your Data, Your Rules</h3>
+              <p>Projects live on the host computer, not on a third-party document cloud.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="faq-section" id="faq">
+          <div class="faq-copy reveal">
+            <p class="eyebrow">Quick answers</p>
+            <h2>FAQs</h2>
+            <p>LocalLeaf is intentionally small: install, host, invite, edit, stop.</p>
+          </div>
+          <div class="faq-list">
+            <details class="reveal" open>
+              <summary>Do collaborators install anything?</summary>
+              <p>No. Collaborators join through a browser link after the host approves them.</p>
+            </details>
+            <details class="reveal delay-1">
+              <summary>What happens when the host closes the app?</summary>
+              <p>The session ends. The project remains saved on the host computer.</p>
+            </details>
+            <details class="reveal delay-2">
+              <summary>Can it compile real LaTeX projects?</summary>
+              <p>Yes. The app bundles Tectonic and can compile supported LaTeX projects locally.</p>
+            </details>
+          </div>
+        </section>
+
+        <section class="final-cta reveal">
+          <img src="./assets/localleaf-logo-mark.svg" alt="" />
+          <h2>Write together. Hosted by you.</h2>
+          <p>Start a project, share a link, and keep control of your work.</p>
+          <a class="download-button" href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup-0.1.0.exe" download>
+            <span class="download-icon" aria-hidden="true"></span>
+            Download for Windows
+          </a>
+        </section>
+      </main>
+    </div>
+
+    <script src="./script.js"></script>
+  </body>
+</html>
