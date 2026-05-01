@@ -9,6 +9,7 @@ const ROOT = path.resolve(__dirname, "..");
 const BIN_DIR = path.join(ROOT, "bin");
 const platform = process.env.LOCALLEAF_TARGET_PLATFORM || process.platform;
 const arch = process.env.LOCALLEAF_TARGET_ARCH || process.arch;
+const githubToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
 
 const TARGETS = {
   "darwin:arm64": {
@@ -30,8 +31,13 @@ const TARGETS = {
 
 function requestJson(url) {
   return new Promise((resolve, reject) => {
+    const headers = { "user-agent": "LocalLeaf-build" };
+    if (githubToken) {
+      headers.authorization = `Bearer ${githubToken}`;
+    }
+
     https
-      .get(url, { headers: { "user-agent": "LocalLeaf-build" } }, (response) => {
+      .get(url, { headers }, (response) => {
         if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
           requestJson(response.headers.location).then(resolve, reject);
           return;
@@ -55,8 +61,13 @@ function requestJson(url) {
 function download(url, target) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(target);
+    const headers = { "user-agent": "LocalLeaf-build" };
+    if (githubToken) {
+      headers.authorization = `Bearer ${githubToken}`;
+    }
+
     https
-      .get(url, { headers: { "user-agent": "LocalLeaf-build" } }, (response) => {
+      .get(url, { headers }, (response) => {
         if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
           file.close();
           fs.rmSync(target, { force: true });

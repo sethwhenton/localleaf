@@ -21,7 +21,7 @@ jobs:
             asset_name: LocalLeaf-Host-mac-arm64.dmg
           - label: Intel
             arch: x64
-            runner: macos-13
+            runner: macos-15
             package_script: package:mac:x64
             asset_name: LocalLeaf-Host-mac-x64.dmg
 
@@ -49,6 +49,8 @@ jobs:
           scripts/create-mac-icon.sh
 
       - name: Download bundled binaries
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run prepare:binaries
 
       - name: Run tests
