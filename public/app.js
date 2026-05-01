@@ -2136,6 +2136,18 @@ function updateCompileUi(options = {}) {
   }
 }
 
+function shouldApplyCompileUpdate(nextCompile) {
+  const currentCompile = local.appState?.compile;
+  if (!currentCompile) return true;
+  const currentVersion = Number(currentCompile.version || 0);
+  const nextVersion = Number(nextCompile?.version || 0);
+  if (nextVersion < currentVersion) return false;
+  if (nextVersion === currentVersion && currentCompile.status !== "running" && nextCompile?.status === "running") {
+    return false;
+  }
+  return true;
+}
+
 window.addEventListener("pointermove", (event) => {
   if (local.resizingSidebar) {
     const grid = document.querySelector(".editor-grid");
@@ -2394,10 +2406,13 @@ async function compile() {
   await saveCurrentFile();
   local.appState.compile.status = "running";
   updateCompileUi();
-  local.appState.compile = await api("/api/compile", {
+  const nextCompile = await api("/api/compile", {
     method: "POST",
     body: { requestedBy: local.userName }
   });
+  if (shouldApplyCompileUpdate(nextCompile)) {
+    local.appState.compile = nextCompile;
+  }
   updateCompileUi({ refreshPreview: true });
 }
 
@@ -2485,7 +2500,9 @@ function connectEvents() {
   });
   events.addEventListener("compile", (event) => {
     if (!local.appState) return;
-    local.appState.compile = JSON.parse(event.data);
+    const nextCompile = JSON.parse(event.data);
+    if (!shouldApplyCompileUpdate(nextCompile)) return;
+    local.appState.compile = nextCompile;
     if (route().view === "editor") {
       updateCompileUi({ refreshPreview: local.appState.compile.status !== "running" });
     }
