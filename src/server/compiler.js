@@ -248,6 +248,12 @@ async function compileProject(projectRoot, mainFile, onData) {
   const includedFiles = readIncludedFiles(projectRoot);
   const previewHtml = renderLatexPreview(source, includedFiles);
   const pdfPath = expectedPdfPath(projectRoot, mainFile);
+  const previousPdfBackup = path.join(
+    projectRoot,
+    `.localleaf-last-good-${path.basename(mainFile, ".tex")}-${Date.now()}.pdf`
+  );
+  const hadPreviousPdf = fs.existsSync(pdfPath);
+  let restoredPreviousPdf = false;
 
   if (!compiler.available) {
     const forced = process.env.LOCALLEAF_FORCE_PREVIEW === "1";
@@ -265,6 +271,14 @@ async function compileProject(projectRoot, mainFile, onData) {
       previewHtml,
       pdfPath: null
     };
+  }
+
+  if (hadPreviousPdf) {
+    try {
+      fs.copyFileSync(pdfPath, previousPdfBackup);
+    } catch {
+      // The next compile can still proceed; a backup just lets us keep the preview stable on failure.
+    }
   }
 
   try {
@@ -307,8 +321,21 @@ async function compileProject(projectRoot, mainFile, onData) {
     logs.push(`[LocalLeaf] ${result.engine} did not produce a PDF.`);
   }
 
+  if (!producedPdf && fs.existsSync(previousPdfBackup)) {
+    try {
+      fs.copyFileSync(previousPdfBackup, pdfPath);
+      producedPdf = pdfPath;
+      restoredPreviousPdf = true;
+      logs.push("[LocalLeaf] Compile failed. Keeping the last successful PDF preview visible.");
+    } catch {
+      logs.push("[LocalLeaf] Compile failed and the previous PDF preview could not be restored.");
+    }
+  }
+
+  fs.rmSync(previousPdfBackup, { force: true });
+
   return {
-    ok: Boolean(producedPdf),
+    ok: Boolean(producedPdf) && !restoredPreviousPdf,
     engine,
     mode: producedPdf ? "pdf" : "html",
     logs: [
