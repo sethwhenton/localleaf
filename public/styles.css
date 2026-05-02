@@ -1555,7 +1555,6 @@ button:disabled {
   position: absolute;
   z-index: 20;
   top: 88px;
-  right: 14px;
   width: min(720px, calc(100% - 28px));
   border: 1px solid rgba(222, 215, 208, 0.92);
   border-radius: 8px;
@@ -1564,6 +1563,8 @@ button:disabled {
 }
 
 .editor-search-popover {
+  top: auto;
+  left: 0;
   display: grid;
   grid-template-columns: minmax(260px, 1fr) auto;
   gap: 12px;
@@ -1633,7 +1634,8 @@ button:disabled {
 }
 
 .editor-table-popover {
-  right: 190px;
+  top: auto;
+  left: 0;
   width: 220px;
   padding: 12px;
   display: grid;

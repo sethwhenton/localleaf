@@ -2335,7 +2335,28 @@ function refreshEditorToolbarPanels() {
   topbar.querySelector(".editor-search-popover")?.remove();
   topbar.querySelector(".editor-table-popover")?.remove();
   topbar.insertAdjacentHTML("beforeend", editorSearchPanelMarkup() + tablePickerMarkup());
+  positionToolbarPopover(".editor-search-popover", "#editorSearchToggle", "center");
+  positionToolbarPopover(".editor-table-popover", "#editorTableButton", "start");
   bindEditorToolbarPanels();
+}
+
+function positionToolbarPopover(popoverSelector, anchorSelector, align = "start") {
+  const topbar = document.querySelector(".editor-topbar");
+  const popover = document.querySelector(popoverSelector);
+  const anchor = document.querySelector(anchorSelector);
+  if (!topbar || !popover || !anchor) return;
+  const topbarRect = topbar.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  const popoverWidth = popover.offsetWidth || 220;
+  const preferredLeft = align === "center"
+    ? anchorRect.left - topbarRect.left + (anchorRect.width / 2) - (popoverWidth / 2)
+    : anchorRect.left - topbarRect.left;
+  const left = Math.max(8, Math.min(
+    topbarRect.width - popoverWidth - 8,
+    preferredLeft
+  ));
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(anchorRect.bottom - topbarRect.top + 8)}px`;
 }
 
 function visualInsertionTarget(documentNode) {
@@ -2673,6 +2694,8 @@ function bindEditorToolbar() {
   });
   document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
   document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
+  positionToolbarPopover(".editor-search-popover", "#editorSearchToggle", "center");
+  positionToolbarPopover(".editor-table-popover", "#editorTableButton", "start");
   bindEditorToolbarPanels();
 }
 
