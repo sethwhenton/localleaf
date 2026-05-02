@@ -426,6 +426,64 @@ function attachmentHeaders(filename, contentType) {
   };
 }
 
+function streamFileResponse(request, response, filePath, contentType, extraHeaders = {}) {
+  const { size } = fs.statSync(filePath);
+  const commonHeaders = {
+    "content-type": contentType,
+    "cache-control": "no-store",
+    "accept-ranges": "bytes",
+    ...extraHeaders
+  };
+  const range = request.headers.range;
+
+  if (!range) {
+    response.writeHead(200, {
+      ...commonHeaders,
+      "content-length": size
+    });
+    fs.createReadStream(filePath).pipe(response);
+    return;
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(range));
+  let start;
+  let end;
+  if (match) {
+    if (match[1] === "" && match[2] !== "") {
+      const suffixLength = Number(match[2]);
+      start = Math.max(size - suffixLength, 0);
+      end = size - 1;
+    } else {
+      start = Number(match[1]);
+      end = match[2] === "" ? size - 1 : Number(match[2]);
+    }
+  }
+
+  if (
+    !match ||
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    start < 0 ||
+    end < start ||
+    start >= size
+  ) {
+    response.writeHead(416, {
+      ...commonHeaders,
+      "content-range": `bytes */${size}`
+    });
+    response.end();
+    return;
+  }
+
+  end = Math.min(end, size - 1);
+  response.writeHead(206, {
+    ...commonHeaders,
+    "content-length": end - start + 1,
+    "content-range": `bytes ${start}-${end}/${size}`
+  });
+  fs.createReadStream(filePath, { start, end }).pipe(response);
+}
+
 function addDirectoryToZip(zip, directory, baseDirectory = directory) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const fullPath = path.join(directory, entry.name);
@@ -1466,11 +1524,7 @@ function createLocalLeafServer(options = {}) {
         return;
       }
       const ext = path.extname(fullPath).toLowerCase();
-      response.writeHead(200, {
-        "content-type": MIME_TYPES[ext] || "application/octet-stream",
-        "cache-control": "no-store"
-      });
-      fs.createReadStream(fullPath).pipe(response);
+      streamFileResponse(request, response, fullPath, MIME_TYPES[ext] || "application/octet-stream");
       return;
     }
 
@@ -1918,11 +1972,9 @@ function createLocalLeafServer(options = {}) {
         return;
       }
       if (state.compile.pdfPath && fs.existsSync(state.compile.pdfPath)) {
-        response.writeHead(200, {
-          "content-type": "application/pdf",
-          "cache-control": "no-store"
+        streamFileResponse(request, response, state.compile.pdfPath, "application/pdf", {
+          "content-disposition": `inline; filename="${safeDownloadName(state.project.name, ".pdf")}"`
         });
-        fs.createReadStream(state.compile.pdfPath).pipe(response);
         return;
       }
       textResponse(response, 404, "No PDF is available yet.");
@@ -1935,8 +1987,13 @@ function createLocalLeafServer(options = {}) {
         return;
       }
       if (state.compile.pdfPath && fs.existsSync(state.compile.pdfPath)) {
-        response.writeHead(200, attachmentHeaders(safeDownloadName(state.project.name, ".pdf"), "application/pdf"));
-        fs.createReadStream(state.compile.pdfPath).pipe(response);
+        streamFileResponse(
+          request,
+          response,
+          state.compile.pdfPath,
+          "application/pdf",
+          attachmentHeaders(safeDownloadName(state.project.name, ".pdf"), "application/pdf")
+        );
         return;
       }
       textResponse(response, 404, "No compiled PDF is available yet. Recompile the project first.");

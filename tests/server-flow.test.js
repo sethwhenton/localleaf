@@ -210,6 +210,49 @@ test("races tunnel providers and keeps the first verified link", async () => {
   }
 });
 
+test("serves compiled PDFs with byte-range support for embedded viewers", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-pdf-range-test-"));
+  fs.writeFileSync(path.join(tempRoot, "main.tex"), "\\documentclass{article}\\begin{document}PDF\\end{document}", "utf8");
+  const pdfBytes = Buffer.from("%PDF-1.4\nLocalLeaf PDF preview bytes\n%%EOF\n", "utf8");
+  const pdfPath = path.join(tempRoot, "main.pdf");
+  fs.writeFileSync(pdfPath, pdfBytes);
+
+  const app = createLocalLeafServer({ port: 0, projectRoot: tempRoot, autoStartTunnel: false });
+  app.server.listen(0);
+  await once(app.server, "listening");
+  const port = app.server.address().port;
+  app.state.port = port;
+  app.state.compile = {
+    ...app.state.compile,
+    status: "success",
+    mode: "pdf",
+    pdfPath,
+    version: 1
+  };
+  const baseUrl = `http://localhost:${port}`;
+
+  try {
+    const fullPdf = await binaryRequest(baseUrl, "/api/pdf");
+    assert.equal(fullPdf.response.status, 200);
+    assert.equal(fullPdf.response.headers.get("content-type"), "application/pdf");
+    assert.equal(fullPdf.response.headers.get("accept-ranges"), "bytes");
+    assert.equal(fullPdf.response.headers.get("content-length"), String(pdfBytes.length));
+    assert.match(fullPdf.response.headers.get("content-disposition"), /^inline; filename=".+\.pdf"$/);
+    assert.equal(fullPdf.buffer.toString("utf8"), pdfBytes.toString("utf8"));
+
+    const rangePdf = await binaryRequest(baseUrl, "/api/pdf", {
+      headers: { range: "bytes=0-7" }
+    });
+    assert.equal(rangePdf.response.status, 206);
+    assert.equal(rangePdf.response.headers.get("content-range"), `bytes 0-7/${pdfBytes.length}`);
+    assert.equal(rangePdf.response.headers.get("content-length"), "8");
+    assert.equal(rangePdf.buffer.toString("utf8"), pdfBytes.subarray(0, 8).toString("utf8"));
+  } finally {
+    await app.stop();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("supports the host, join, edit, compile, chat, import, stop flow", async () => {
   const previousForcePreview = process.env.LOCALLEAF_FORCE_PREVIEW;
   const previousProjectsDir = process.env.LOCALLEAF_PROJECTS_DIR;

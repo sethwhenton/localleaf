@@ -37,6 +37,7 @@ function createWindow(url) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      plugins: true,
       sandbox: true
     }
   });
