@@ -3632,6 +3632,7 @@ button:disabled {
 }
 
 .log-tabs {
+  grid-column: 1;
   grid-row: 2;
   border-right: 1px solid var(--line);
   padding: 10px 16px;
@@ -3686,8 +3687,80 @@ button:disabled {
   color: #6f6760;
 }
 
-.logs {
+.log-output {
+  grid-column: 2;
   grid-row: 2;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background:
+    linear-gradient(90deg, rgba(255, 103, 0, 0.03), transparent 26%),
+    #fff;
+}
+
+.log-pinned {
+  display: grid;
+  gap: 8px;
+  padding: 10px 14px 0;
+}
+
+.log-pinned:empty {
+  display: none;
+}
+
+.pinned-log-group {
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  box-shadow: 0 8px 22px rgba(37, 24, 13, 0.05);
+}
+
+.pinned-log-group.error {
+  border-color: rgba(220, 38, 38, 0.22);
+  background: linear-gradient(180deg, #fff5f5, #fff);
+}
+
+.pinned-log-group.warning {
+  border-color: rgba(255, 103, 0, 0.22);
+  background: linear-gradient(180deg, #fff8f1, #fff);
+}
+
+.pinned-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.pinned-log-head strong {
+  color: var(--text);
+}
+
+.pinned-log-head span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.pinned-log-head button {
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 103, 0, 0.26);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--orange-dark);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.pinned-log-head button:hover {
+  background: #fff4e8;
+}
+
+.logs {
   min-height: 0;
   margin: 0;
   padding: 10px 14px;
@@ -3695,9 +3768,6 @@ button:disabled {
   font:
     12px/1.55 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   color: #423a33;
-  background:
-    linear-gradient(90deg, rgba(255, 103, 0, 0.03), transparent 26%),
-    #fff;
 }
 
 .log-empty {
@@ -3735,6 +3805,11 @@ button:disabled {
   border-color: rgba(0, 132, 73, 0.16);
   background: #f0faf5;
   color: #006d3b;
+}
+
+.log-line.pinned {
+  margin-bottom: 0;
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .log-level {

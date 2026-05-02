@@ -58,6 +58,9 @@ const local = {
   tablePickerOpen: false,
   visualInsertAfterBlock: null,
   pendingPreviewScroll: null,
+  pinnedCompileErrors: [],
+  pinnedCompileWarnings: [],
+  clearedWarningVersion: null,
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
 };
@@ -1610,6 +1613,71 @@ function compileLogsMarkup(lines = []) {
   }).join("");
 }
 
+function compileIssueLines(compile = {}) {
+  const logs = compile.logs || [];
+  const issues = { errors: [], warnings: [] };
+  for (const line of logs) {
+    const level = compileLogLevel(line);
+    if (level === "error") issues.errors.push(line);
+    else if (level === "warning") issues.warnings.push(line);
+  }
+  if (!issues.errors.length && compile.status === "failed") {
+    issues.errors.push(logs.findLast((line) => String(line || "").trim()) || "Compile failed.");
+  }
+  return {
+    errors: [...new Set(issues.errors)].slice(-12),
+    warnings: [...new Set(issues.warnings)].slice(-12)
+  };
+}
+
+function syncPinnedCompileIssues(compile = {}) {
+  if (!compile || compile.status === "running") return;
+  const issues = compileIssueLines(compile);
+  local.pinnedCompileErrors = issues.errors;
+  if (!issues.warnings.length) {
+    local.pinnedCompileWarnings = [];
+    local.clearedWarningVersion = null;
+  } else if (local.clearedWarningVersion !== compile.version) {
+    local.pinnedCompileWarnings = issues.warnings;
+  }
+}
+
+function pinnedLogLineMarkup(line, level) {
+  const label = level === "error" ? "Error" : "Warning";
+  return `
+    <div class="log-line ${level} pinned">
+      <span class="log-level">${label}</span>
+      <span class="log-text">${escapeHtml(line)}</span>
+    </div>
+  `;
+}
+
+function compilePinnedIssuesMarkup() {
+  const hasErrors = local.pinnedCompileErrors.length > 0;
+  const hasWarnings = local.pinnedCompileWarnings.length > 0;
+  if (!hasErrors && !hasWarnings) return "";
+  return `
+    ${hasErrors ? `
+      <section class="pinned-log-group error" aria-label="Pinned compile errors">
+        <div class="pinned-log-head">
+          <strong>Pinned errors</strong>
+          <span>Fix these to clear them</span>
+        </div>
+        ${local.pinnedCompileErrors.map((line) => pinnedLogLineMarkup(line, "error")).join("")}
+      </section>
+    ` : ""}
+    ${hasWarnings ? `
+      <section class="pinned-log-group warning" aria-label="Pinned compile warnings">
+        <div class="pinned-log-head">
+          <strong>Warnings</strong>
+          <button type="button" id="clearPinnedWarnings">Clear</button>
+        </div>
+        ${local.pinnedCompileWarnings.map((line) => pinnedLogLineMarkup(line, "warning")).join("")}
+      </section>
+    ` : ""}
+  `;
+}
+
 function updatePdfZoomUi() {
   const label = document.querySelector("#pdfZoomValue");
   if (label) label.textContent = `${Math.round(local.pdfScale * 100)}%`;
@@ -1801,6 +1869,7 @@ function editorView() {
   const state = local.appState;
   const file = local.selectedFile || state.project.mainFile || state.project.files.find((item) => item.type === "text" || item.type === "image")?.path || "";
   const compileLogs = state.compile.logs || [];
+  syncPinnedCompileIssues(state.compile);
   const selection = selectedFileState(file);
   const isCompiling = state.compile.status === "running";
   const editorSurface = editorSurfaceMarkup(file, selection.selectedMeta);
@@ -1939,7 +2008,10 @@ function editorView() {
           <button class="active">Logs</button>
           ${compileLogSummaryMarkup(compileLogs)}
         </div>
-        <div class="logs" aria-live="polite">${compileLogsMarkup(compileLogs)}</div>
+        <div class="log-output">
+          <div class="log-pinned">${compilePinnedIssuesMarkup()}</div>
+          <div class="logs" aria-live="polite">${compileLogsMarkup(compileLogs)}</div>
+        </div>
       </footer>
     </section>
   `;
@@ -2669,6 +2741,13 @@ function bindEditor() {
   if (route().view !== "editor") return;
   if (isLiveSession()) connectCollab();
   else closeCollab();
+  document.querySelector(".log-dock")?.addEventListener("click", (event) => {
+    if (!event.target.closest?.("#clearPinnedWarnings")) return;
+    local.clearedWarningVersion = local.appState?.compile?.version ?? null;
+    local.pinnedCompileWarnings = [];
+    const pinned = document.querySelector(".log-pinned");
+    if (pinned) pinned.innerHTML = compilePinnedIssuesMarkup();
+  });
   document.querySelector("#backToProject")?.addEventListener("click", () => {
     if (local.appState.session.status === "live") setView("session");
     else setView("project");
@@ -3037,6 +3116,7 @@ function updateCompileUi(options = {}) {
   if (!local.appState) return;
   const compile = local.appState.compile;
   const isCompiling = compile.status === "running";
+  syncPinnedCompileIssues(compile);
   const button = document.querySelector("#compileButton");
   if (button) {
     button.disabled = isCompiling;
@@ -3053,6 +3133,8 @@ function updateCompileUi(options = {}) {
 
   const logs = document.querySelector(".logs");
   if (logs) logs.innerHTML = compileLogsMarkup(compile.logs || []);
+  const pinnedLogs = document.querySelector(".log-pinned");
+  if (pinnedLogs) pinnedLogs.innerHTML = compilePinnedIssuesMarkup();
   const logTabs = document.querySelector(".log-tabs");
   if (logTabs) {
     logTabs.innerHTML = `<button class="active">Logs</button>${compileLogSummaryMarkup(compile.logs || [])}`;
