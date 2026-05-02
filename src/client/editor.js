@@ -442,6 +442,87 @@ function createEditor(parent, options = {}) {
     return wrapSelection(command, "}", "title");
   }
 
+  function createSearchRegex(query, options = {}) {
+    if (!query) return null;
+    const source = options.regex
+      ? query
+      : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const wrapped = options.wholeWord ? `\\b(?:${source})\\b` : source;
+    try {
+      return new RegExp(wrapped, options.matchCase ? "g" : "gi");
+    } catch {
+      return null;
+    }
+  }
+
+  function searchMatches(query, options = {}) {
+    const regex = createSearchRegex(query, options);
+    if (!regex) return [];
+    const text = getText();
+    const matches = [];
+    let match;
+    while ((match = regex.exec(text))) {
+      const value = match[0];
+      if (!value) {
+        regex.lastIndex += 1;
+        continue;
+      }
+      matches.push({ from: match.index, to: match.index + value.length, text: value });
+    }
+    return matches;
+  }
+
+  function selectMatch(match) {
+    if (!match) return false;
+    view.dispatch({
+      selection: EditorSelection.range(match.from, match.to),
+      scrollIntoView: true
+    });
+    view.focus();
+    return true;
+  }
+
+  function findSearch(query, options = {}) {
+    const matches = searchMatches(query, options);
+    if (!matches.length) return { found: false, total: 0 };
+    const direction = options.direction === "prev" ? "prev" : "next";
+    const selection = view.state.selection.main;
+    const current = direction === "prev" ? selection.from : selection.to;
+    const match = direction === "prev"
+      ? [...matches].reverse().find((item) => item.to < current) || matches[matches.length - 1]
+      : matches.find((item) => item.from >= current) || matches[0];
+    selectMatch(match);
+    return { found: true, total: matches.length, index: matches.indexOf(match) + 1 };
+  }
+
+  function replaceSearch(query, replacement, options = {}) {
+    const matches = searchMatches(query, options);
+    if (!matches.length) return { found: false, total: 0 };
+    const selection = view.state.selection.main;
+    const selectedMatch = matches.find((item) => item.from === selection.from && item.to === selection.to);
+    const match = selectedMatch || matches.find((item) => item.from >= selection.to) || matches[0];
+    view.dispatch({
+      changes: { from: match.from, to: match.to, insert: replacement },
+      selection: EditorSelection.cursor(match.from + String(replacement).length),
+      scrollIntoView: true,
+      userEvent: "input"
+    });
+    view.focus();
+    return { found: true, total: matches.length };
+  }
+
+  function replaceAllSearch(query, replacement, options = {}) {
+    const matches = searchMatches(query, options);
+    if (!matches.length) return { count: 0 };
+    view.dispatch({
+      changes: matches.map((match) => ({ from: match.from, to: match.to, insert: replacement })),
+      scrollIntoView: true,
+      userEvent: "input"
+    });
+    view.focus();
+    return { count: matches.length };
+  }
+
   function exec(command, value) {
     const commands = {
       undo: () => runAndFocus(undo),
@@ -543,6 +624,9 @@ function createEditor(parent, options = {}) {
         { key: "Mod-s", run: () => (options.onSave?.(), true) },
         { key: "Mod-Enter", run: () => (options.onCompile?.(), true) },
         { key: "Enter", run: insertVisibleLineBreak },
+        { key: "Mod-z", run: () => exec("undo") },
+        { key: "Mod-y", run: () => exec("redo") },
+        { key: "Shift-Mod-z", run: () => exec("redo") },
         { key: "Mod-b", run: () => exec("bold") },
         { key: "Mod-i", run: () => exec("italic") },
         { key: "Mod-/", run: () => exec("comment") },
@@ -578,6 +662,15 @@ function createEditor(parent, options = {}) {
     },
     setSuggestions(nextSuggestions) {
       suggestions = normalizeSuggestions(nextSuggestions);
+    },
+    find(query, options) {
+      return findSearch(query, options);
+    },
+    replace(query, replacement, options) {
+      return replaceSearch(query, replacement, options);
+    },
+    replaceAll(query, replacement, options) {
+      return replaceAllSearch(query, replacement, options);
     },
     exec
   };

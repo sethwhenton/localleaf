@@ -47,6 +47,16 @@ const local = {
   rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0",
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
   pdfScale: Number(localStorage.getItem("localleaf.pdfScale") || 1),
+  searchOpen: false,
+  searchQuery: "",
+  searchReplace: "",
+  searchMatchCase: false,
+  searchWholeWord: false,
+  searchRegex: false,
+  searchStatus: "",
+  visualSearchIndex: 0,
+  tablePickerOpen: false,
+  visualInsertAfterBlock: null,
   pendingPreviewScroll: null,
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
@@ -333,6 +343,7 @@ function editorToolIcon(name) {
     outdent: `<svg ${attrs}><path d="M10 7h10" /><path d="M10 12h10" /><path d="M10 17h10" /><path d="m7 9-4 3 4 3" /></svg>`,
     indent: `<svg ${attrs}><path d="M4 7h10" /><path d="M4 12h10" /><path d="M4 17h10" /><path d="m17 9 4 3-4 3" /></svg>`,
     complete: `<svg ${attrs}><path d="M14 4 9 20" /><path d="M17 6h3" /><path d="M18.5 4.5v3" /><path d="M4 17h3" /><path d="M5.5 15.5v3" /></svg>`,
+    search: `<svg ${attrs}><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>`,
     files: `<svg ${attrs}><path d="M4 6.5h6l2 2h8v9.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6.5Z" /><path d="M4 10h16" /></svg>`,
     chat: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`
   };
@@ -940,8 +951,8 @@ function latexEnvironmentBalance(lines) {
   let balance = 0;
   for (const line of lines) {
     const source = stripLatexComments(line);
-    const beginMatches = source.match(/\\begin\{[^{}]+\}/g) || [];
-    const endMatches = source.match(/\\end\{[^{}]+\}/g) || [];
+    const beginMatches = [...source.matchAll(/\\begin\{([^{}]+)\}/g)].filter((match) => match[1] !== "document");
+    const endMatches = [...source.matchAll(/\\end\{([^{}]+)\}/g)].filter((match) => match[1] !== "document");
     balance += beginMatches.length - endMatches.length;
   }
   return balance;
@@ -995,6 +1006,116 @@ function blockContentToLatex(element) {
     .trim();
 }
 
+function splitLatexCells(row) {
+  const cells = [];
+  let current = "";
+  let escaped = false;
+  for (const char of row) {
+    if (char === "&" && !escaped) {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+    escaped = char === "\\" && !escaped;
+    if (char !== "\\") escaped = false;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function parseLatexTableBlock(text) {
+  const source = String(text || "");
+  const tabular = source.match(/\\begin\{tabular\}\{([^}]*)\}([\s\S]*?)\\end\{tabular\}/);
+  if (!tabular) return null;
+  const caption = source.match(/\\caption(?:\[[^\]]*\])?\{([^{}]*)\}/);
+  const label = source.match(/\\label\{([^{}]*)\}/);
+  const tableBody = tabular[2]
+    .replace(/\\hline/g, "")
+    .replace(/\\toprule|\\midrule|\\bottomrule/g, "");
+  const rows = tableBody
+    .split(/\\\\/)
+    .map((row) => row.replace(/%.*$/gm, "").trim())
+    .filter(Boolean)
+    .map((row) => splitLatexCells(row).map((cell) => latexUnescapeText(cell)));
+  const colCount = Math.max(1, ...rows.map((row) => row.length), (tabular[1].match(/[lcrpmbX]/g) || []).length);
+  const normalizedRows = (rows.length ? rows : [Array.from({ length: colCount }, () => "")])
+    .map((row) => Array.from({ length: colCount }, (_, index) => row[index] || ""));
+  return {
+    type: "table",
+    rows: normalizedRows,
+    caption: latexUnescapeText(caption?.[1] || ""),
+    label: label?.[1] || "tab:placeholder",
+    colSpec: tabular[1] || "l".repeat(colCount),
+    borders: /\\hline|\\toprule|\\midrule|\\bottomrule/.test(source) ? "borders" : "none"
+  };
+}
+
+function parseLatexFigureBlock(text) {
+  const source = String(text || "");
+  if (!/\\begin\{figure\}/.test(source) || !/\\end\{figure\}/.test(source)) return null;
+  const image = source.match(/\\includegraphics(?:\[[^\]]*\])?\{([^{}]*)\}/);
+  const caption = source.match(/\\caption(?:\[[^\]]*\])?\{([^{}]*)\}/);
+  const label = source.match(/\\label\{([^{}]*)\}/);
+  if (!image && !caption && !label) return null;
+  return {
+    type: "figure",
+    image: latexUnescapeText(image?.[1] || ""),
+    caption: latexUnescapeText(caption?.[1] || ""),
+    label: label?.[1] || "fig:placeholder"
+  };
+}
+
+function visualTableToLatex(block) {
+  const rows = [...block.querySelectorAll(".visual-table-grid tr")].map((row) =>
+    [...row.querySelectorAll("td, th")].map((cell) => latexEscapeText(cell.textContent.trim()))
+  ).filter((row) => row.some(Boolean));
+  const colCount = Math.max(1, ...rows.map((row) => row.length));
+  const colSpec = "l".repeat(colCount);
+  const borders = block.dataset.tableBorders !== "none";
+  const bodyRows = (rows.length ? rows : [Array.from({ length: colCount }, () => "")])
+    .map((row) => `    ${Array.from({ length: colCount }, (_, index) => row[index] || "").join(" & ")} \\\\`);
+  const caption = latexEscapeText(block.querySelector(".visual-table-caption")?.textContent.trim() || "Caption");
+  const label = latexEscapeText(block.querySelector(".visual-table-label")?.textContent.trim() || "tab:placeholder");
+  return [
+    "\\begin{table}[h]",
+    "  \\centering",
+    `  \\begin{tabular}{${colSpec}}`,
+    borders ? "    \\hline" : "",
+    ...bodyRows,
+    borders ? "    \\hline" : "",
+    "  \\end{tabular}",
+    `  \\caption{${caption}}`,
+    `  \\label{${label}}`,
+    "\\end{table}"
+  ].filter(Boolean).join("\n");
+}
+
+function visualFigureToLatex(block) {
+  const image = latexEscapeText(block.querySelector(".visual-figure-image")?.textContent.trim() || "image.png");
+  const caption = latexEscapeText(block.querySelector(".visual-figure-caption")?.textContent.trim() || "Caption");
+  const label = latexEscapeText(block.querySelector(".visual-figure-label")?.textContent.trim() || "fig:placeholder");
+  return [
+    "\\begin{figure}[h]",
+    "  \\centering",
+    `  \\includegraphics[width=0.8\\linewidth]{${image}}`,
+    `  \\caption{${caption}}`,
+    `  \\label{${label}}`,
+    "\\end{figure}"
+  ].join("\n");
+}
+
+function keepVisualInsertionsInsideDocument(source) {
+  const latex = String(source || "");
+  const marker = "\\end{document}";
+  const index = latex.indexOf(marker);
+  if (index < 0) return latex;
+  const before = latex.slice(0, index).trimEnd();
+  const after = latex.slice(index + marker.length).trim();
+  if (!after) return latex;
+  return `${before}\n\n${after}\n\n${marker}`;
+}
+
 function parseVisualLatex(content) {
   const blocks = [];
   const lines = String(content || "").replace(/\r\n/g, "\n").split("\n");
@@ -1011,7 +1132,12 @@ function parseVisualLatex(content) {
 
   const flushRaw = () => {
     if (!raw.length) return;
-    blocks.push({ type: "raw", text: raw.join("\n"), line: rawStartLine });
+    const rawText = raw.join("\n");
+    const table = parseLatexTableBlock(rawText);
+    const figure = table ? null : parseLatexFigureBlock(rawText);
+    if (table) blocks.push({ ...table, line: rawStartLine });
+    else if (figure) blocks.push({ ...figure, line: rawStartLine });
+    else blocks.push({ type: "raw", text: rawText, line: rawStartLine });
     raw = [];
   };
 
@@ -1089,7 +1215,56 @@ function visualBlockMarkup(block, index) {
     `;
   }
   if (block.type === "blank") {
-    return `<div class="visual-block visual-blank-block" data-visual-type="blank" aria-label="Blank line">${visualLineNumberMarkup(block)}<span class="visual-blank-marker"></span></div>`;
+    return `
+      <section class="visual-block visual-paragraph-block visual-blank-block" data-visual-type="paragraph" aria-label="Blank line">
+        ${visualLineNumberMarkup(block)}
+        <div class="visual-block-body">
+          <div class="visual-paragraph-input" contenteditable="true" spellcheck="true"></div>
+        </div>
+      </section>
+    `;
+  }
+  if (block.type === "table") {
+    const rows = block.rows || [["", ""]];
+    return `
+      <section class="visual-block visual-table-block" data-visual-type="table" data-table-borders="${escapeHtml(block.borders || "borders")}">
+        ${visualLineNumberMarkup(block)}
+        <div class="visual-block-body visual-table-shell">
+          <div class="visual-object-toolbar">
+            <select class="visual-table-caption-position" title="Caption position" aria-label="Caption position">
+              <option value="below" selected>Caption below</option>
+              <option value="above">Caption above</option>
+            </select>
+            <select class="visual-table-borders" title="Table borders" aria-label="Table borders">
+              <option value="borders" ${(block.borders || "borders") === "borders" ? "selected" : ""}>Borders</option>
+              <option value="none" ${(block.borders || "borders") === "none" ? "selected" : ""}>No borders</option>
+            </select>
+            <button type="button" class="mini-button visual-table-add-row" title="Add row">+ Row</button>
+            <button type="button" class="mini-button visual-table-add-column" title="Add column">+ Col</button>
+          </div>
+          <table class="visual-table-grid">
+            <tbody>
+              ${rows.map((row) => `<tr>${row.map((cell) => `<td contenteditable="true" spellcheck="true">${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}
+            </tbody>
+          </table>
+          <div class="visual-table-caption" contenteditable="true" spellcheck="true">${escapeHtml(block.caption || "Caption")}</div>
+          <div class="visual-table-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "tab:placeholder")}</div>
+        </div>
+      </section>
+    `;
+  }
+  if (block.type === "figure") {
+    return `
+      <section class="visual-block visual-figure-block" data-visual-type="figure">
+        ${visualLineNumberMarkup(block)}
+        <div class="visual-block-body visual-figure-shell">
+          <button type="button" class="visual-object-edit-button" title="Edit figure source" aria-label="Edit figure source">${editorToolIcon("monospace")}</button>
+          <div class="visual-figure-image" contenteditable="true" spellcheck="false">${escapeHtml(block.image || "image.png")}</div>
+          <div class="visual-figure-caption" contenteditable="true" spellcheck="true">${escapeHtml(block.caption || "Caption")}</div>
+          <div class="visual-figure-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "fig:placeholder")}</div>
+        </div>
+      </section>
+    `;
   }
   return `
     <section class="visual-block visual-raw-block" data-visual-type="raw">
@@ -1121,9 +1296,13 @@ function visualDomToLatex(host) {
       blocks.push(block.querySelector(".visual-raw-input")?.value || "");
     } else if (type === "blank") {
       blocks.push("");
+    } else if (type === "table") {
+      blocks.push(visualTableToLatex(block));
+    } else if (type === "figure") {
+      blocks.push(visualFigureToLatex(block));
     }
   });
-  return blocks.join("\n").replace(/\n{4,}/g, "\n\n\n");
+  return keepVisualInsertionsInsideDocument(blocks.join("\n").replace(/\n{4,}/g, "\n\n\n"));
 }
 
 function editorBreadcrumbMarkup(file, selection) {
@@ -1166,8 +1345,8 @@ function editorSurfaceMarkup(file, selectedMeta) {
 }
 
 function editorFormatToolbarMarkup() {
-  const tool = (command, label, title, extra = "") =>
-    `<button class="editor-tool-button ${extra}" data-editor-command="${command}" title="${title}" aria-label="${title}">${label}</button>`;
+  const tool = (command, label, title, extra = "", id = "") =>
+    `<button class="editor-tool-button ${extra}" ${id ? `id="${id}"` : ""} data-editor-command="${command}" title="${title}" aria-label="${title}">${label}</button>`;
   return `
     <div class="editor-format-row" role="toolbar" aria-label="LaTeX editor tools">
       <button class="editor-files-tab-button" id="showFilesPanelInline" title="Show files" aria-label="Show files">
@@ -1193,7 +1372,7 @@ function editorFormatToolbarMarkup() {
       ${tool("cite", editorToolIcon("cite"), "Insert citation")}
       ${tool("comment", editorToolIcon("comment"), "Toggle comment")}
       ${tool("figure", editorToolIcon("figure"), "Insert figure")}
-      ${tool("table", editorToolIcon("table"), "Insert table")}
+      ${tool("table", editorToolIcon("table"), "Insert table", "", "editorTableButton")}
       ${tool("bulletList", editorToolIcon("bulletList"), "Insert bullet list")}
       ${tool("numberedList", editorToolIcon("numberedList"), "Insert numbered list")}
       ${tool("outdent", editorToolIcon("outdent"), "Outdent")}
@@ -1203,12 +1382,58 @@ function editorFormatToolbarMarkup() {
         <button class="editor-mode-pill ${local.editorMode === "code" ? "active" : ""}" data-editor-mode="code" role="tab" aria-selected="${local.editorMode === "code"}">Code Editor</button>
         <button class="editor-mode-pill ${local.editorMode === "visual" ? "active" : ""}" data-editor-mode="visual" role="tab" aria-selected="${local.editorMode === "visual"}">Visual Editor</button>
       </div>
+      <button class="editor-tool-button ${local.searchOpen ? "active" : ""}" id="editorSearchToggle" title="Search and replace" aria-label="Search and replace">
+        ${editorToolIcon("search")}
+      </button>
       <span class="format-row-spacer"></span>
       <button class="editor-chat-tab-button" id="showChatRailInline" title="Show chat" aria-label="Show chat">
         ${editorToolIcon("chat")}
         <span>Chat</span>
       </button>
     </div>
+  `;
+}
+
+function editorSearchPanelMarkup() {
+  if (!local.searchOpen) return "";
+  return `
+    <section class="editor-search-popover" role="search" aria-label="Search and replace">
+      <div class="editor-search-fields">
+        <div class="editor-search-input-row">
+          <input id="editorSearchInput" value="${escapeHtml(local.searchQuery)}" placeholder="Search for" autocomplete="off" />
+          <button class="search-toggle ${local.searchMatchCase ? "active" : ""}" id="searchMatchCase" title="Match case" aria-label="Match case">Aa</button>
+          <button class="search-toggle ${local.searchRegex ? "active" : ""}" id="searchRegex" title="Use regular expression" aria-label="Use regular expression">.*</button>
+          <button class="search-toggle ${local.searchWholeWord ? "active" : ""}" id="searchWholeWord" title="Whole word" aria-label="Whole word">W</button>
+        </div>
+        <input id="editorReplaceInput" value="${escapeHtml(local.searchReplace)}" placeholder="Replace with" autocomplete="off" />
+      </div>
+      <div class="editor-search-actions">
+        <button class="editor-tool-button" id="searchPrevious" title="Previous match" aria-label="Previous match">↑</button>
+        <button class="editor-tool-button" id="searchNext" title="Next match" aria-label="Next match">↓</button>
+        <button class="btn" id="replaceOne">Replace</button>
+        <button class="btn" id="replaceAll">Replace All</button>
+        <span class="search-status" id="searchStatus">${escapeHtml(local.searchStatus)}</span>
+        <button class="editor-tool-button" id="closeSearchPanel" title="Close search" aria-label="Close search">x</button>
+      </div>
+    </section>
+  `;
+}
+
+function tablePickerMarkup() {
+  if (!local.tablePickerOpen || local.editorMode !== "visual") return "";
+  const sizes = [];
+  for (let row = 1; row <= 5; row += 1) {
+    for (let col = 1; col <= 5; col += 1) {
+      sizes.push(`<button type="button" class="table-size-cell" data-rows="${row}" data-cols="${col}" title="${row} x ${col}" aria-label="Insert ${row} by ${col} table"></button>`);
+    }
+  }
+  return `
+    <section class="editor-table-popover" aria-label="Insert table">
+      <strong>Insert table</strong>
+      <button type="button" class="table-from-text" id="tableFromText">From text or image</button>
+      <span>Select size</span>
+      <div class="table-size-grid">${sizes.join("")}</div>
+    </section>
   `;
 }
 
@@ -1305,6 +1530,17 @@ function setPdfScale(nextScale) {
 function bindPdfPreviewControls() {
   document.querySelector("#pdfZoomOut")?.addEventListener("click", () => setPdfScale(local.pdfScale - 0.1));
   document.querySelector("#pdfZoomIn")?.addEventListener("click", () => setPdfScale(local.pdfScale + 0.1));
+}
+
+function bindPdfWheelZoom() {
+  const previewPane = document.querySelector("#previewPane");
+  if (!previewPane || previewPane.dataset.ctrlWheelZoomBound === "1") return;
+  previewPane.dataset.ctrlWheelZoomBound = "1";
+  previewPane.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey || local.appState?.compile?.mode !== "pdf") return;
+    event.preventDefault();
+    setPdfScale(local.pdfScale + (event.deltaY < 0 ? 0.1 : -0.1));
+  }, { passive: false });
 }
 
 function editorShellClasses() {
@@ -1484,6 +1720,8 @@ function editorView() {
           </div>
         </div>
         ${editorFormatToolbarMarkup()}
+        ${editorSearchPanelMarkup()}
+        ${tablePickerMarkup()}
       </header>
 
       <div class="editor-grid">
@@ -1787,19 +2025,62 @@ function mountVisualEditor() {
   const handleInput = () => markEditorChanged(getText());
   const handleKeyDown = (event) => {
     const target = event.target;
+    const mod = event.ctrlKey || event.metaKey;
+    if (mod) {
+      const key = event.key.toLowerCase();
+      if (key === "b" || key === "i" || key === "z" || key === "y") {
+        event.preventDefault();
+        const command = key === "b" ? "bold" : key === "i" ? "italic" : key === "z" && event.shiftKey ? "redo" : key === "z" ? "undo" : "redo";
+        execVisualCommand(command);
+        return;
+      }
+    }
     if (event.key !== "Enter" || !target?.classList?.contains("visual-paragraph-input")) return;
     event.preventDefault();
     document.execCommand("insertLineBreak");
     markEditorChanged(getText());
   };
+  const handleClick = (event) => {
+    const addRow = event.target.closest?.(".visual-table-add-row");
+    const addColumn = event.target.closest?.(".visual-table-add-column");
+    const editObject = event.target.closest?.(".visual-object-edit-button");
+    if (addRow) {
+      const table = addRow.closest(".visual-table-block")?.querySelector(".visual-table-grid tbody");
+      const columns = table?.querySelector("tr")?.children.length || 2;
+      table?.insertAdjacentHTML("beforeend", `<tr>${Array.from({ length: columns }, () => `<td contenteditable="true" spellcheck="true"></td>`).join("")}</tr>`);
+      markEditorChanged(getText());
+    } else if (addColumn) {
+      addColumn.closest(".visual-table-block")?.querySelectorAll(".visual-table-grid tr").forEach((row) => {
+        row.insertAdjacentHTML("beforeend", `<td contenteditable="true" spellcheck="true"></td>`);
+      });
+      markEditorChanged(getText());
+    } else if (editObject) {
+      const block = editObject.closest(".visual-block");
+      if (block?.dataset.visualType === "figure") {
+        block.outerHTML = visualBlockMarkup({ type: "raw", text: visualFigureToLatex(block), line: "" }, 0);
+        markEditorChanged(getText());
+      }
+    }
+  };
+  const handleChange = (event) => {
+    if (event.target.classList?.contains("visual-table-borders")) {
+      const block = event.target.closest(".visual-table-block");
+      if (block) block.dataset.tableBorders = event.target.value;
+      markEditorChanged(getText());
+    }
+  };
   const handleFocusIn = () => {
     local.editingNow = true;
+    const block = document.activeElement?.closest?.(".visual-block");
+    if (block && documentNode?.contains(block)) local.visualInsertAfterBlock = block;
   };
   const handleFocusOut = () => {
     local.editingNow = false;
   };
   documentNode?.addEventListener("input", handleInput);
   documentNode?.addEventListener("keydown", handleKeyDown);
+  documentNode?.addEventListener("click", handleClick);
+  documentNode?.addEventListener("change", handleChange);
   documentNode?.addEventListener("focusin", handleFocusIn);
   documentNode?.addEventListener("focusout", handleFocusOut);
   host.querySelectorAll(".visual-raw-input").forEach((input) => {
@@ -1811,6 +2092,8 @@ function mountVisualEditor() {
     destroy() {
       documentNode?.removeEventListener("input", handleInput);
       documentNode?.removeEventListener("keydown", handleKeyDown);
+      documentNode?.removeEventListener("click", handleClick);
+      documentNode?.removeEventListener("change", handleChange);
       documentNode?.removeEventListener("focusin", handleFocusIn);
       documentNode?.removeEventListener("focusout", handleFocusOut);
       local.visualEditor = null;
@@ -1840,15 +2123,24 @@ function execVisualCommand(command, value) {
     return false;
   };
 
-  if (command === "bold") document.execCommand("bold");
+  if (command === "undo") document.execCommand("undo");
+  else if (command === "redo") document.execCommand("redo");
+  else if (command === "bold") document.execCommand("bold");
   else if (command === "italic") document.execCommand("italic");
   else if (command === "monospace") document.execCommand("insertHTML", false, "<code data-latex-inline=\"texttt\">text</code>");
   else if (command === "style" && value && value !== "normal") insertText(`\\${value}{Title}`);
   else if (command === "link") insertText("\\href{}{text}");
   else if (command === "ref") insertText("\\ref{}");
   else if (command === "cite") insertText("\\cite{}");
-  else if (command === "figure") insertText("\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{}\n  \\caption{}\n  \\label{fig:}\n\\end{figure}");
-  else if (command === "table") insertText("\\begin{table}[h]\n  \\centering\n  \\begin{tabular}{ll}\n    \\hline\n    Column & Value \\\\\n    \\hline\n  \\end{tabular}\n  \\caption{}\n  \\label{tab:}\n\\end{table}");
+  else if (command === "figure") {
+    insertVisualFigure();
+    return true;
+  }
+  else if (command === "table") {
+    local.tablePickerOpen = !local.tablePickerOpen;
+    refreshEditorToolbarPanels();
+    return true;
+  }
   else if (command === "bulletList") insertText("\\begin{itemize}\n  \\item \n\\end{itemize}");
   else if (command === "numberedList") insertText("\\begin{enumerate}\n  \\item \n\\end{enumerate}");
   else if (command === "symbol") insertText("\\alpha");
@@ -1871,8 +2163,232 @@ function setEditorMode(mode) {
   if (!["code", "visual"].includes(mode) || local.editorMode === mode) return;
   local.editorContent = currentEditorText();
   local.editorMode = mode;
+  local.tablePickerOpen = false;
   localStorage.setItem("localleaf.editorMode", mode);
   updateEditorSourceUi();
+}
+
+function activeSearchOptions() {
+  return {
+    matchCase: local.searchMatchCase,
+    wholeWord: local.searchWholeWord,
+    regex: local.searchRegex
+  };
+}
+
+function createAppSearchRegex(query, options = {}) {
+  if (!query) return null;
+  const source = options.regex
+    ? query
+    : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const wrapped = options.wholeWord ? `\\b(?:${source})\\b` : source;
+  try {
+    return new RegExp(wrapped, options.matchCase ? "g" : "gi");
+  } catch {
+    return null;
+  }
+}
+
+function replaceWithRegex(text, query, replacement, options = {}) {
+  const regex = createAppSearchRegex(query, options);
+  if (!regex) return { text, count: 0 };
+  let count = 0;
+  const nextText = String(text).replace(regex, () => {
+    count += 1;
+    return replacement;
+  });
+  return { text: nextText, count };
+}
+
+function visualTextNodes(root) {
+  if (!root) return [];
+  const nodes = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest(".visual-line-number")) return NodeFilter.FILTER_REJECT;
+      if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  return nodes;
+}
+
+function visualVisibleText(root) {
+  return visualTextNodes(root).map((node) => node.nodeValue).join("");
+}
+
+function selectVisualTextRange(root, from, to) {
+  const nodes = visualTextNodes(root);
+  let offset = 0;
+  let startNode = null;
+  let startOffset = 0;
+  let endNode = null;
+  let endOffset = 0;
+  for (const node of nodes) {
+    const nextOffset = offset + node.nodeValue.length;
+    if (!startNode && from >= offset && from <= nextOffset) {
+      startNode = node;
+      startOffset = from - offset;
+    }
+    if (!endNode && to >= offset && to <= nextOffset) {
+      endNode = node;
+      endOffset = to - offset;
+      break;
+    }
+    offset = nextOffset;
+  }
+  if (!startNode || !endNode) return false;
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  startNode.parentElement?.closest?.("[contenteditable], textarea")?.focus?.();
+  return true;
+}
+
+function visualFind(query, direction = "next") {
+  const root = document.querySelector("#visualEditorDocument");
+  const regex = createAppSearchRegex(query, activeSearchOptions());
+  if (!root || !regex) return { found: false, total: 0 };
+  const text = visualVisibleText(root);
+  const matches = [];
+  let match;
+  while ((match = regex.exec(text))) {
+    if (!match[0]) {
+      regex.lastIndex += 1;
+      continue;
+    }
+    matches.push({ from: match.index, to: match.index + match[0].length });
+  }
+  if (!matches.length) return { found: false, total: 0 };
+  local.visualSearchIndex = direction === "prev"
+    ? (local.visualSearchIndex - 1 + matches.length) % matches.length
+    : local.visualSearchIndex % matches.length;
+  const selected = matches[local.visualSearchIndex];
+  if (direction !== "prev") local.visualSearchIndex = (local.visualSearchIndex + 1) % matches.length;
+  selectVisualTextRange(root, selected.from, selected.to);
+  return { found: true, total: matches.length, index: matches.indexOf(selected) + 1 };
+}
+
+function visualReplaceSelection(replacement) {
+  const selection = window.getSelection();
+  if (!selection.rangeCount || !document.querySelector("#visualEditorDocument")?.contains(selection.anchorNode)) return false;
+  document.execCommand("insertText", false, replacement);
+  markEditorChanged(currentEditorText());
+  return true;
+}
+
+function updateSearchStatus(result, action = "find") {
+  if (!result) return;
+  if (result.count !== undefined) local.searchStatus = `${result.count} replaced`;
+  else if (!result.found) local.searchStatus = "No matches";
+  else local.searchStatus = `${result.index || 1} of ${result.total}`;
+  const status = document.querySelector("#searchStatus");
+  if (status) status.textContent = local.searchStatus;
+}
+
+function runEditorSearch(direction = "next") {
+  if (!local.searchQuery) {
+    updateSearchStatus({ found: false, total: 0 });
+    return;
+  }
+  const result = local.codeEditor
+    ? local.codeEditor.find(local.searchQuery, { ...activeSearchOptions(), direction })
+    : visualFind(local.searchQuery, direction);
+  updateSearchStatus(result);
+}
+
+function runEditorReplace(all = false) {
+  if (!local.searchQuery) return;
+  const options = activeSearchOptions();
+  if (local.codeEditor) {
+    const result = all
+      ? local.codeEditor.replaceAll(local.searchQuery, local.searchReplace, options)
+      : local.codeEditor.replace(local.searchQuery, local.searchReplace, options);
+    updateSearchStatus(result, "replace");
+    return;
+  }
+  if (all) {
+    const result = replaceWithRegex(currentEditorText(), local.searchQuery, local.searchReplace, options);
+    if (result.count) {
+      local.editorContent = result.text;
+      local.visualEditor?.applyRemoteText(result.text);
+      markEditorChanged(result.text);
+    }
+    updateSearchStatus(result, "replace");
+    return;
+  }
+  const didReplace = visualReplaceSelection(local.searchReplace);
+  if (!didReplace) runEditorSearch("next");
+  updateSearchStatus({ count: didReplace ? 1 : 0 }, "replace");
+}
+
+function refreshEditorToolbarPanels() {
+  const topbar = document.querySelector(".editor-topbar");
+  if (!topbar) return;
+  document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
+  document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
+  topbar.querySelector(".editor-search-popover")?.remove();
+  topbar.querySelector(".editor-table-popover")?.remove();
+  topbar.insertAdjacentHTML("beforeend", editorSearchPanelMarkup() + tablePickerMarkup());
+  bindEditorToolbarPanels();
+}
+
+function visualInsertionTarget(documentNode) {
+  const activeBlock = document.activeElement?.closest?.(".visual-block");
+  if (activeBlock && documentNode.contains(activeBlock)) {
+    return { node: activeBlock, position: "afterend" };
+  }
+  if (local.visualInsertAfterBlock && documentNode.contains(local.visualInsertAfterBlock)) {
+    return { node: local.visualInsertAfterBlock, position: "afterend" };
+  }
+  const blocks = [...documentNode.querySelectorAll(".visual-block")];
+  const editableBlocks = blocks.filter((block) => !["raw", "blank"].includes(block.dataset.visualType || ""));
+  const fallbackBlock = editableBlocks[editableBlocks.length - 1];
+  if (fallbackBlock) return { node: fallbackBlock, position: "afterend" };
+  return { node: documentNode, position: "beforeend" };
+}
+
+function insertVisualTable(rows = 2, cols = 2) {
+  const documentNode = document.querySelector("#visualEditorDocument");
+  if (!documentNode) return;
+  const rowData = Array.from({ length: rows }, () => Array.from({ length: cols }, () => ""));
+  const blockHtml = visualBlockMarkup({
+    type: "table",
+    rows: rowData,
+    caption: "Caption",
+    label: "tab:placeholder",
+    borders: "borders",
+    line: ""
+  }, 0);
+  const target = visualInsertionTarget(documentNode);
+  target.node.insertAdjacentHTML(target.position, blockHtml);
+  local.visualInsertAfterBlock = target.position === "beforeend" ? documentNode.lastElementChild : target.node.nextElementSibling;
+  local.tablePickerOpen = false;
+  refreshEditorToolbarPanels();
+  markEditorChanged(currentEditorText());
+  local.visualInsertAfterBlock?.querySelector?.("td")?.focus();
+}
+
+function insertVisualFigure() {
+  const documentNode = document.querySelector("#visualEditorDocument");
+  if (!documentNode) return;
+  const blockHtml = visualBlockMarkup({
+    type: "figure",
+    image: "image.png",
+    caption: "Caption",
+    label: "fig:placeholder",
+    line: ""
+  }, 0);
+  const target = visualInsertionTarget(documentNode);
+  target.node.insertAdjacentHTML(target.position, blockHtml);
+  local.visualInsertAfterBlock = target.position === "beforeend" ? documentNode.lastElementChild : target.node.nextElementSibling;
+  markEditorChanged(currentEditorText());
+  local.visualInsertAfterBlock?.querySelector?.(".visual-figure-image")?.focus();
 }
 
 function copyTextWithSelection(text) {
@@ -2080,6 +2596,7 @@ function bindEditor() {
   bindEditorToolbar();
   mountActiveEditor();
   bindPdfPreviewControls();
+  bindPdfWheelZoom();
   mountPdfPreview();
 
   document.querySelector("#chatForm")?.addEventListener("submit", async (event) => {
@@ -2133,15 +2650,85 @@ function bindEditorToolbar() {
   });
   document.querySelectorAll("[data-editor-command]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (local.codeEditor) local.codeEditor.exec(button.dataset.editorCommand);
-      else local.visualEditor?.exec(button.dataset.editorCommand);
+      const command = button.dataset.editorCommand;
+      if (command === "table" && local.visualEditor) {
+        local.visualEditor.exec(command);
+        return;
+      }
+      if (local.codeEditor) local.codeEditor.exec(command);
+      else local.visualEditor?.exec(command);
     });
+  });
+  document.querySelector("#editorSearchToggle")?.addEventListener("click", () => {
+    local.searchOpen = !local.searchOpen;
+    local.tablePickerOpen = false;
+    refreshEditorToolbarPanels();
+    setTimeout(() => document.querySelector("#editorSearchInput")?.focus(), 0);
   });
   const styleSelect = document.querySelector("#editorStyleSelect");
   styleSelect?.addEventListener("change", () => {
     if (local.codeEditor) local.codeEditor.exec("style", styleSelect.value);
     else local.visualEditor?.exec("style", styleSelect.value);
     styleSelect.value = "normal";
+  });
+  document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
+  document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
+  bindEditorToolbarPanels();
+}
+
+function bindEditorToolbarPanels() {
+  const searchInput = document.querySelector("#editorSearchInput");
+  const replaceInput = document.querySelector("#editorReplaceInput");
+  searchInput?.addEventListener("input", (event) => {
+    local.searchQuery = event.target.value;
+    local.visualSearchIndex = 0;
+    local.searchStatus = "";
+    const status = document.querySelector("#searchStatus");
+    if (status) status.textContent = "";
+  });
+  searchInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runEditorSearch(event.shiftKey ? "prev" : "next");
+    } else if (event.key === "Escape") {
+      local.searchOpen = false;
+      refreshEditorToolbarPanels();
+    }
+  });
+  replaceInput?.addEventListener("input", (event) => {
+    local.searchReplace = event.target.value;
+  });
+  replaceInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runEditorReplace(event.shiftKey);
+    }
+  });
+  document.querySelector("#searchPrevious")?.addEventListener("click", () => runEditorSearch("prev"));
+  document.querySelector("#searchNext")?.addEventListener("click", () => runEditorSearch("next"));
+  document.querySelector("#replaceOne")?.addEventListener("click", () => runEditorReplace(false));
+  document.querySelector("#replaceAll")?.addEventListener("click", () => runEditorReplace(true));
+  document.querySelector("#closeSearchPanel")?.addEventListener("click", () => {
+    local.searchOpen = false;
+    refreshEditorToolbarPanels();
+  });
+  document.querySelector("#searchMatchCase")?.addEventListener("click", () => {
+    local.searchMatchCase = !local.searchMatchCase;
+    refreshEditorToolbarPanels();
+  });
+  document.querySelector("#searchRegex")?.addEventListener("click", () => {
+    local.searchRegex = !local.searchRegex;
+    refreshEditorToolbarPanels();
+  });
+  document.querySelector("#searchWholeWord")?.addEventListener("click", () => {
+    local.searchWholeWord = !local.searchWholeWord;
+    refreshEditorToolbarPanels();
+  });
+  document.querySelector("#tableFromText")?.addEventListener("click", () => insertVisualTable(2, 2));
+  document.querySelectorAll(".table-size-cell").forEach((button) => {
+    button.addEventListener("click", () => {
+      insertVisualTable(Number(button.dataset.rows || 2), Number(button.dataset.cols || 2));
+    });
   });
 }
 
@@ -2731,11 +3318,28 @@ window.addEventListener("popstate", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-  const isSaveShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s";
-  if (!isSaveShortcut || route().view !== "editor") return;
+  const mod = event.ctrlKey || event.metaKey;
+  if (!mod || route().view !== "editor") return;
+  const key = event.key.toLowerCase();
+  if (key === "f") {
+    event.preventDefault();
+    local.searchOpen = true;
+    local.tablePickerOpen = false;
+    refreshEditorToolbarPanels();
+    setTimeout(() => document.querySelector("#editorSearchInput")?.focus(), 0);
+    return;
+  }
+  if (key === "s") {
+    if (document.activeElement?.closest?.(".cm-editor")) return;
+    event.preventDefault();
+    saveAndCompile();
+    return;
+  }
   if (document.activeElement?.closest?.(".cm-editor")) return;
+  if (!local.visualEditor || !["b", "i", "z", "y"].includes(key)) return;
   event.preventDefault();
-  saveAndCompile();
+  const command = key === "b" ? "bold" : key === "i" ? "italic" : key === "z" && event.shiftKey ? "redo" : key === "z" ? "undo" : "redo";
+  local.visualEditor.exec(command);
 });
 
 loadState()
