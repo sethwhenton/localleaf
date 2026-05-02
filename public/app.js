@@ -46,6 +46,7 @@ const local = {
   previewPaneVisible: localStorage.getItem("localleaf.previewPaneVisible") !== "0",
   rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0",
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
+  pdfScale: Number(localStorage.getItem("localleaf.pdfScale") || 1),
   pendingPreviewScroll: null,
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
@@ -1214,13 +1215,16 @@ function editorFormatToolbarMarkup() {
 function compiledPreviewMarkup() {
   const state = local.appState;
   if (state.compile.mode === "pdf") {
-    return `<iframe title="PDF preview" src="${authUrl(`/api/pdf?v=${state.compile.version}`)}" class="pdf-preview-frame"></iframe>`;
+    return `<div class="pdf-preview-mount" data-pdf-url="${escapeHtml(authUrl(`/api/pdf?v=${state.compile.version}`))}"></div>`;
   }
   return state.compile.previewHtml || `<article class="paper-preview"><header class="paper-title"><h1>Compile to Preview</h1><p>Click Recompile to render the document preview.</p></header></article>`;
 }
 
 function capturePreviewScroll(previewPane = document.querySelector("#previewPane")) {
   if (!previewPane) return null;
+  if (previewPane.querySelector(".pdf-document") && window.LocalLeafPdfPreview?.captureScroll) {
+    return window.LocalLeafPdfPreview.captureScroll(previewPane);
+  }
   const maxTop = Math.max(0, previewPane.scrollHeight - previewPane.clientHeight);
   const maxLeft = Math.max(0, previewPane.scrollWidth - previewPane.clientWidth);
   return {
@@ -1233,6 +1237,10 @@ function capturePreviewScroll(previewPane = document.querySelector("#previewPane
 
 function restorePreviewScroll(scrollState, previewPane = document.querySelector("#previewPane")) {
   if (!scrollState || !previewPane) return;
+  if (previewPane.querySelector(".pdf-document") && window.LocalLeafPdfPreview?.restoreScroll) {
+    window.LocalLeafPdfPreview.restoreScroll(previewPane, scrollState);
+    return;
+  }
   const apply = () => {
     const maxTop = Math.max(0, previewPane.scrollHeight - previewPane.clientHeight);
     const maxLeft = Math.max(0, previewPane.scrollWidth - previewPane.clientWidth);
@@ -1241,11 +1249,62 @@ function restorePreviewScroll(scrollState, previewPane = document.querySelector(
   };
   requestAnimationFrame(() => {
     apply();
-    const frame = previewPane.querySelector(".pdf-preview-frame");
-    frame?.addEventListener("load", apply, { once: true });
     setTimeout(apply, 150);
     setTimeout(apply, 450);
   });
+}
+
+function previewActionsMarkup(compile = local.appState?.compile || {}) {
+  if (compile.mode !== "pdf") {
+    return `<span>${escapeHtml(compile.status || "")}</span>`;
+  }
+  return `
+    <div class="pdf-zoom-controls" aria-label="PDF zoom controls">
+      <button class="pdf-zoom-button" id="pdfZoomOut" type="button" title="Zoom out" aria-label="Zoom out">-</button>
+      <span class="pdf-zoom-value" id="pdfZoomValue">${Math.round(local.pdfScale * 100)}%</span>
+      <button class="pdf-zoom-button" id="pdfZoomIn" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+    </div>
+    <a class="pdf-link" href="${authUrl(`/api/pdf?v=${compile.version}`)}" target="_blank" rel="noopener">PDF</a>
+    <span>${escapeHtml(compile.status || "")}</span>
+  `;
+}
+
+function updatePdfZoomUi() {
+  const label = document.querySelector("#pdfZoomValue");
+  if (label) label.textContent = `${Math.round(local.pdfScale * 100)}%`;
+}
+
+function mountPdfPreview(scrollState = null) {
+  const previewPane = document.querySelector("#previewPane");
+  const marker = previewPane?.querySelector(".pdf-preview-mount");
+  if (!previewPane || !marker || !window.LocalLeafPdfPreview?.mount) return false;
+  if (local.appState?.compile?.status === "running") return false;
+  window.LocalLeafPdfPreview.mount(previewPane, {
+    url: marker.dataset.pdfUrl,
+    scale: local.pdfScale,
+    scrollState
+  });
+  updatePdfZoomUi();
+  return true;
+}
+
+function setPdfScale(nextScale) {
+  const previewPane = document.querySelector("#previewPane");
+  const scrollState = window.LocalLeafPdfPreview?.captureScroll?.(previewPane) || capturePreviewScroll(previewPane);
+  local.pdfScale = Math.max(0.5, Math.min(2.4, Math.round(Number(nextScale || 1) * 10) / 10));
+  localStorage.setItem("localleaf.pdfScale", String(local.pdfScale));
+  updatePdfZoomUi();
+  if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.remount) {
+    window.LocalLeafPdfPreview.remount(previewPane, {
+      scale: local.pdfScale,
+      scrollState
+    });
+  }
+}
+
+function bindPdfPreviewControls() {
+  document.querySelector("#pdfZoomOut")?.addEventListener("click", () => setPdfScale(local.pdfScale - 0.1));
+  document.querySelector("#pdfZoomIn")?.addEventListener("click", () => setPdfScale(local.pdfScale + 0.1));
 }
 
 function editorShellClasses() {
@@ -1476,8 +1535,7 @@ function editorView() {
           <div class="panel-head">
             <span>Compiled Output</span>
             <div class="preview-actions">
-              ${state.compile.mode === "pdf" ? `<a class="pdf-link" href="${authUrl(`/api/pdf?v=${state.compile.version}`)}" target="_blank" rel="noopener">PDF</a>` : ""}
-              <span>${escapeHtml(state.compile.status)}</span>
+              ${previewActionsMarkup(state.compile)}
             </div>
           </div>
           <div class="preview-scroll" id="previewPane">
@@ -2021,6 +2079,8 @@ function bindEditor() {
 
   bindEditorToolbar();
   mountActiveEditor();
+  bindPdfPreviewControls();
+  mountPdfPreview();
 
   document.querySelector("#chatForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2232,7 +2292,8 @@ function updateCompileUi(options = {}) {
 
   const previewActions = document.querySelector(".preview-actions");
   if (previewActions) {
-    previewActions.innerHTML = `${compile.mode === "pdf" ? `<a class="pdf-link" href="${authUrl(`/api/pdf?v=${compile.version}`)}" target="_blank" rel="noopener">PDF</a>` : ""}<span>${escapeHtml(compile.status)}</span>`;
+    previewActions.innerHTML = previewActionsMarkup(compile);
+    bindPdfPreviewControls();
   }
 
   const logs = document.querySelector(".logs");
@@ -2252,7 +2313,9 @@ function updateCompileUi(options = {}) {
   if (options.refreshPreview) {
     const scrollState = options.previewScroll || capturePreviewScroll(previewPane);
     previewPane.innerHTML = compiledPreviewMarkup();
-    restorePreviewScroll(scrollState, previewPane);
+    if (!mountPdfPreview(scrollState)) {
+      restorePreviewScroll(scrollState, previewPane);
+    }
   }
 }
 

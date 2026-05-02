@@ -1,19 +1,22 @@
 {
   "name": "localleaf",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "LocalLeaf host-powered Overleaf-style collaboration app.",
   "main": "src/desktop/main.js",
   "scripts": {
     "build:editor": "esbuild src/client/editor.js --bundle --format=iife --minify --outfile=public/editor.bundle.js",
+    "build:pdf": "esbuild src/client/pdf-preview.js --bundle --format=iife --minify --outfile=public/pdf-preview.bundle.js",
+    "build:pdf-worker": "esbuild node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs --bundle --format=iife --minify --outfile=public/pdf.worker.bundle.js",
+    "build:client": "npm run build:editor && npm run build:pdf && npm run build:pdf-worker",
     "start": "node src/server/index.js",
-    "dev:desktop": "npm run build:editor -- --sourcemap && electron .",
+    "dev:desktop": "npm run build:client && electron .",
     "prepare:binaries": "node scripts/prepare-binaries.js",
     "install:tectonic": "powershell -ExecutionPolicy Bypass -File scripts/install-tectonic.ps1",
-    "package:win": "npm run build:editor && electron-builder --win nsis --x64 --publish never",
-    "package:mac:x64": "npm run build:editor && electron-builder --mac dmg zip --x64 --publish never",
-    "package:mac:arm64": "npm run build:editor && electron-builder --mac dmg zip --arm64 --publish never",
-    "test": "npm run build:editor && node --test tests/*.test.js"
+    "package:win": "npm run build:client && electron-builder --win nsis --x64 --publish never",
+    "package:mac:x64": "npm run build:client && electron-builder --mac dmg zip --x64 --publish never",
+    "package:mac:arm64": "npm run build:client && electron-builder --mac dmg zip --arm64 --publish never",
+    "test": "npm run build:client && node --test tests/*.test.js"
   },
   "keywords": [
     "latex",
@@ -96,6 +99,7 @@
     "adm-zip": "^0.5.17",
     "codemirror": "^6.0.2",
     "localtunnel": "^2.0.2",
+    "pdfjs-dist": "^5.7.284",
     "ws": "^8.18.3"
   },
   "overrides": {
