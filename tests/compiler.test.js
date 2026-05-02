@@ -19,8 +19,8 @@ test("keeps the last successful PDF visible after a failed compile", { skip: !de
     const first = await compileProject(root, "main.tex");
     assert.equal(first.ok, true);
     assert.equal(first.mode, "pdf");
-    assert.equal(fs.existsSync(pdfPath), true);
-    const firstPdfSize = fs.statSync(pdfPath).size;
+    assert.equal(fs.existsSync(first.pdfPath), true);
+    const firstPdfSize = fs.statSync(first.pdfPath).size;
     assert.ok(firstPdfSize > 0);
 
     fs.writeFileSync(
@@ -29,11 +29,12 @@ test("keeps the last successful PDF visible after a failed compile", { skip: !de
       "utf8"
     );
 
-    const second = await compileProject(root, "main.tex");
+    const second = await compileProject(root, "main.tex", undefined, { previousPdfPath: first.pdfPath });
     assert.equal(second.ok, false);
     assert.equal(second.mode, "pdf");
-    assert.equal(fs.existsSync(pdfPath), true);
-    assert.equal(fs.statSync(pdfPath).size, firstPdfSize);
+    assert.equal(second.pdfPath, first.pdfPath);
+    assert.equal(fs.existsSync(second.pdfPath), true);
+    assert.equal(fs.statSync(second.pdfPath).size, firstPdfSize);
     assert.ok(second.logs.some((line) => line.includes("Keeping the last successful PDF preview visible")));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

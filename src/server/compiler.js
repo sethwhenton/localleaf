@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { renderLatexPreview } = require("./latex-preview");
@@ -162,8 +163,8 @@ function splitLogs(output) {
   return String(output || "").split(/\r?\n/).filter(Boolean);
 }
 
-function expectedPdfPath(projectRoot, mainFile) {
-  return path.join(projectRoot, `${path.basename(mainFile, ".tex")}.pdf`);
+function expectedPdfPath(projectRoot, mainFile, outputDir = projectRoot) {
+  return path.join(outputDir, `${path.basename(mainFile, ".tex")}.pdf`);
 }
 
 function hasBibliography(projectRoot, source) {
@@ -173,14 +174,19 @@ function hasBibliography(projectRoot, source) {
   return listProjectFiles(projectRoot).some((file) => file.path.toLowerCase().endsWith(".bib"));
 }
 
-function preferredDirectEngine() {
-  return ["pdflatex", "xelatex", "lualatex"].find(commandExists);
+function preferredDirectEngine(projectRoot, source) {
+  const latexmkRcPath = path.join(projectRoot, "latexmkrc");
+  const latexmkRc = fs.existsSync(latexmkRcPath) ? fs.readFileSync(latexmkRcPath, "utf8") : "";
+  const wantsUnicodeEngine = /\\usepackage(?:\[[^\]]*\])?\{fontspec\}/.test(source) ||
+    /(?:lua|xe)latex/i.test(latexmkRc);
+  const engines = wantsUnicodeEngine ? ["lualatex", "xelatex", "pdflatex"] : ["pdflatex", "lualatex", "xelatex"];
+  return engines.find(commandExists);
 }
 
-async function runLatexmk(projectRoot, mainFile, onData) {
+async function runLatexmk(projectRoot, mainFile, outputDir, onData) {
   const result = await runProcess(
     "latexmk",
-    ["-pdf", "-interaction=nonstopmode", "-file-line-error", "-synctex=1", mainFile],
+    ["-pdf", `-outdir=${outputDir}`, "-interaction=nonstopmode", "-file-line-error", "-synctex=1", mainFile],
     {
       cwd: projectRoot,
       timeoutMs: 90000,
@@ -191,12 +197,12 @@ async function runLatexmk(projectRoot, mainFile, onData) {
   return {
     engine: "latexmk",
     logs: splitLogs(result.output),
-    pdfPath: expectedPdfPath(projectRoot, mainFile)
+    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
   };
 }
 
-async function runTectonic(projectRoot, mainFile, command, onData) {
-  const result = await runProcess(command, ["--synctex", mainFile], {
+async function runTectonic(projectRoot, mainFile, outputDir, command, onData) {
+  const result = await runProcess(command, ["--synctex", "--outdir", outputDir, mainFile], {
     cwd: projectRoot,
     timeoutMs: 90000,
     onData
@@ -205,13 +211,13 @@ async function runTectonic(projectRoot, mainFile, command, onData) {
   return {
     engine: command === "tectonic" ? "tectonic" : "bundled tectonic",
     logs: splitLogs(result.output),
-    pdfPath: expectedPdfPath(projectRoot, mainFile)
+    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
   };
 }
 
-async function runDirectEngine(projectRoot, mainFile, source, engine, onData) {
+async function runDirectEngine(projectRoot, mainFile, source, outputDir, engine, onData) {
   const logs = [];
-  const latexArgs = ["-interaction=nonstopmode", "-file-line-error", "-synctex=1", mainFile];
+  const latexArgs = ["-interaction=nonstopmode", "-file-line-error", "-synctex=1", `-output-directory=${outputDir}`, mainFile];
 
   for (let pass = 1; pass <= 2; pass += 1) {
     logs.push(`[LocalLeaf] ${engine} pass ${pass} started.`);
@@ -223,7 +229,7 @@ async function runDirectEngine(projectRoot, mainFile, source, engine, onData) {
     logs.push(...splitLogs(result.output));
 
     if (pass === 1 && hasBibliography(projectRoot, source) && commandExists("bibtex")) {
-      const auxName = path.basename(mainFile, ".tex");
+      const auxName = path.join(outputDir, path.basename(mainFile, ".tex"));
       logs.push("[LocalLeaf] BibTeX pass started.");
       const bibtex = await runProcess("bibtex", [auxName], {
         cwd: projectRoot,
@@ -237,22 +243,18 @@ async function runDirectEngine(projectRoot, mainFile, source, engine, onData) {
   return {
     engine,
     logs,
-    pdfPath: expectedPdfPath(projectRoot, mainFile)
+    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
   };
 }
 
-async function compileProject(projectRoot, mainFile, onData) {
+async function compileProject(projectRoot, mainFile, onData, options = {}) {
   const compiler = detectCompiler();
   const mainFilePath = resolveProjectPath(projectRoot, mainFile);
   const source = fs.readFileSync(mainFilePath, "utf8");
   const includedFiles = readIncludedFiles(projectRoot);
   const previewHtml = renderLatexPreview(source, includedFiles);
-  const pdfPath = expectedPdfPath(projectRoot, mainFile);
-  const previousPdfBackup = path.join(
-    projectRoot,
-    `.localleaf-last-good-${path.basename(mainFile, ".tex")}-${Date.now()}.pdf`
-  );
-  const hadPreviousPdf = fs.existsSync(pdfPath);
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-compile-"));
+  const previousPdfPath = options.previousPdfPath;
   let restoredPreviousPdf = false;
 
   if (!compiler.available) {
@@ -273,34 +275,25 @@ async function compileProject(projectRoot, mainFile, onData) {
     };
   }
 
-  if (hadPreviousPdf) {
-    try {
-      fs.copyFileSync(pdfPath, previousPdfBackup);
-    } catch {
-      // The next compile can still proceed; a backup just lets us keep the preview stable on failure.
-    }
-  }
-
-  try {
-    fs.rmSync(pdfPath, { force: true });
-  } catch {
-    // If the browser is still holding the old PDF, the new compile attempt will overwrite it when possible.
-  }
-
   const attempts = [];
+  const hasProjectLatexmkConfig = commandExists("latexmk") && fs.existsSync(path.join(projectRoot, "latexmkrc"));
+  if (hasProjectLatexmkConfig) {
+    attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
+  }
+
   if (compiler.engine === "latexmk") {
-    attempts.push(() => runLatexmk(projectRoot, mainFile, onData));
+    if (!hasProjectLatexmkConfig) attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
     const tectonic = findTectonic();
-    if (tectonic) attempts.push(() => runTectonic(projectRoot, mainFile, tectonic.command, onData));
-    const direct = preferredDirectEngine();
-    if (direct) attempts.push(() => runDirectEngine(projectRoot, mainFile, source, direct, onData));
+    if (tectonic) attempts.push(() => runTectonic(projectRoot, mainFile, outputDir, tectonic.command, onData));
+    const direct = preferredDirectEngine(projectRoot, source);
+    if (direct) attempts.push(() => runDirectEngine(projectRoot, mainFile, source, outputDir, direct, onData));
   } else if (compiler.engine === "tectonic") {
-    attempts.push(() => runTectonic(projectRoot, mainFile, compiler.command || "tectonic", onData));
-    if (commandExists("latexmk")) attempts.push(() => runLatexmk(projectRoot, mainFile, onData));
-    const direct = preferredDirectEngine();
-    if (direct) attempts.push(() => runDirectEngine(projectRoot, mainFile, source, direct, onData));
+    attempts.push(() => runTectonic(projectRoot, mainFile, outputDir, compiler.command || "tectonic", onData));
+    if (commandExists("latexmk") && !hasProjectLatexmkConfig) attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
+    const direct = preferredDirectEngine(projectRoot, source);
+    if (direct) attempts.push(() => runDirectEngine(projectRoot, mainFile, source, outputDir, direct, onData));
   } else {
-    attempts.push(() => runDirectEngine(projectRoot, mainFile, source, compiler.command || compiler.engine, onData));
+    attempts.push(() => runDirectEngine(projectRoot, mainFile, source, outputDir, compiler.command || compiler.engine, onData));
   }
 
   const logs = [];
@@ -321,18 +314,11 @@ async function compileProject(projectRoot, mainFile, onData) {
     logs.push(`[LocalLeaf] ${result.engine} did not produce a PDF.`);
   }
 
-  if (!producedPdf && fs.existsSync(previousPdfBackup)) {
-    try {
-      fs.copyFileSync(previousPdfBackup, pdfPath);
-      producedPdf = pdfPath;
-      restoredPreviousPdf = true;
-      logs.push("[LocalLeaf] Compile failed. Keeping the last successful PDF preview visible.");
-    } catch {
-      logs.push("[LocalLeaf] Compile failed and the previous PDF preview could not be restored.");
-    }
+  if (!producedPdf && previousPdfPath && fs.existsSync(previousPdfPath)) {
+    producedPdf = previousPdfPath;
+    restoredPreviousPdf = true;
+    logs.push("[LocalLeaf] Compile failed. Keeping the last successful PDF preview visible.");
   }
-
-  fs.rmSync(previousPdfBackup, { force: true });
 
   return {
     ok: Boolean(producedPdf) && !restoredPreviousPdf,

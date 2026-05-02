@@ -908,6 +908,52 @@ function latexUnescapeText(value) {
     .replace(/\\~\{\}/g, "~");
 }
 
+function stripLatexComments(line) {
+  let escaped = false;
+  let result = "";
+  for (const char of String(line || "")) {
+    if (char === "%" && !escaped) break;
+    result += char;
+    escaped = char === "\\" && !escaped;
+    if (char !== "\\") escaped = false;
+  }
+  return result;
+}
+
+function latexBalance(lines, openChar, closeChar) {
+  let balance = 0;
+  for (const line of lines) {
+    let escaped = false;
+    for (const char of stripLatexComments(line)) {
+      if (char === openChar && !escaped) balance += 1;
+      else if (char === closeChar && !escaped) balance -= 1;
+      escaped = char === "\\" && !escaped;
+      if (char !== "\\") escaped = false;
+    }
+  }
+  return balance;
+}
+
+function latexEnvironmentBalance(lines) {
+  let balance = 0;
+  for (const line of lines) {
+    const source = stripLatexComments(line);
+    const beginMatches = source.match(/\\begin\{[^{}]+\}/g) || [];
+    const endMatches = source.match(/\\end\{[^{}]+\}/g) || [];
+    balance += beginMatches.length - endMatches.length;
+  }
+  return balance;
+}
+
+function visualRawBlockIsOpen(lines) {
+  if (!lines.length) return false;
+  return (
+    latexBalance(lines, "{", "}") > 0 ||
+    latexBalance(lines, "[", "]") > 0 ||
+    latexEnvironmentBalance(lines) > 0
+  );
+}
+
 function visualInlineHtml(text) {
   let html = escapeHtml(latexUnescapeText(text));
   html = html.replace(/\\textbf\{([^{}]*)\}/g, "<strong data-latex-inline=\"textbf\">$1</strong>");
@@ -964,6 +1010,11 @@ function parseVisualLatex(content) {
 
   for (const line of lines) {
     const trimmed = line.trim();
+    if (raw.length && visualRawBlockIsOpen(raw)) {
+      raw.push(line);
+      continue;
+    }
+
     const heading = trimmed.match(/^\\(chapter|section|subsection|subsubsection|paragraph)\*?\{([^}]*)\}\s*$/);
     if (heading) {
       flushParagraph();

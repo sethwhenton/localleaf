@@ -1946,10 +1946,11 @@ function createLocalLeafServer(options = {}) {
       };
       broadcastProject(state, "compile", state.compile);
 
+      const previousPdfPath = state.compile.pdfPath;
       const result = await compileProject(state.project.root, state.project.mainFile, (chunk) => {
         state.compile.logs = [...state.compile.logs, ...chunk.split(/\r?\n/).filter(Boolean)].slice(-300);
         broadcastProject(state, "compile", state.compile);
-      });
+      }, { previousPdfPath });
 
       state.compile = {
         status: result.ok ? "success" : "failed",
