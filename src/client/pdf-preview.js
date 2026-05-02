@@ -55,6 +55,22 @@ function restoreScroll(container, scrollState) {
   });
 }
 
+function resizeExistingPages(container, nextScale, previousScale) {
+  const ratio = previousScale ? nextScale / previousScale : 1;
+  if (!Number.isFinite(ratio) || ratio <= 0 || ratio === 1) return;
+  container.querySelectorAll(".pdf-page").forEach((pageShell) => {
+    const canvas = pageShell.querySelector(".pdf-page-canvas");
+    const pageWidth = Number.parseFloat(pageShell.style.width || pageShell.offsetWidth);
+    const canvasWidth = Number.parseFloat(canvas?.style.width || canvas?.offsetWidth || pageWidth);
+    const canvasHeight = Number.parseFloat(canvas?.style.height || canvas?.offsetHeight || 0);
+    if (pageWidth) pageShell.style.width = `${pageWidth * ratio}px`;
+    if (canvas) {
+      if (canvasWidth) canvas.style.width = `${canvasWidth * ratio}px`;
+      if (canvasHeight) canvas.style.height = `${canvasHeight * ratio}px`;
+    }
+  });
+}
+
 async function renderPage(page, scale) {
   const viewport = page.getViewport({ scale });
   const dpr = window.devicePixelRatio || 1;
@@ -150,9 +166,40 @@ function remount(container, nextOptions = {}) {
   });
 }
 
+async function zoom(container, nextOptions = {}) {
+  const state = viewers.get(container);
+  if (!container || !state?.document) return remount(container, nextOptions);
+  const nextScale = clampScale(nextOptions.scale || state.scale);
+  if (nextScale === state.scale) return state;
+  const scrollState = nextOptions.scrollState || captureScroll(container);
+  const previousScale = state.scale;
+  state.scale = nextScale;
+  state.zoomToken = (state.zoomToken || 0) + 1;
+  const token = state.zoomToken;
+
+  resizeExistingPages(container, nextScale, previousScale);
+  restoreScroll(container, scrollState);
+
+  for (let pageNumber = 1; pageNumber <= state.document.numPages; pageNumber += 1) {
+    if (state.cancelled || state.zoomToken !== token) return state;
+    const page = await state.document.getPage(pageNumber);
+    const pageShell = await renderPage(page, nextScale);
+    if (state.cancelled || state.zoomToken !== token) return state;
+    pageShell.dataset.pageNumber = String(pageNumber);
+    const existing = container.querySelector(`.pdf-page[data-page-number="${pageNumber}"]`);
+    if (existing) existing.replaceWith(pageShell);
+    else container.querySelector(".pdf-document")?.append(pageShell);
+    if (pageNumber === scrollState?.pageNumber) restoreScroll(container, scrollState);
+  }
+
+  restoreScroll(container, scrollState);
+  return state;
+}
+
 window.LocalLeafPdfPreview = {
   captureScroll,
   mount,
   remount,
-  restoreScroll
+  restoreScroll,
+  zoom
 };

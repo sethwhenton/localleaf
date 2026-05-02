@@ -109,7 +109,19 @@ function collabUrl() {
   return `${protocol}//${location.host}/collab?${params.toString()}`;
 }
 
+function isLiveSession() {
+  return local.appState?.session?.status === "live";
+}
+
+function isGuestClient() {
+  return Boolean(local.guestToken);
+}
+
 function connectCollab() {
+  if (!isLiveSession()) {
+    closeCollab();
+    return;
+  }
   if (local.collabSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(local.collabSocket.readyState)) {
     return;
   }
@@ -277,7 +289,9 @@ function handleCollabMessage(payload) {
   }
 
   if (payload.type === "session_ended") {
-    handleSessionEnded(payload.reason || "The host stopped the session.");
+    if (isGuestClient() || isLiveSession()) {
+      handleSessionEnded(payload.reason || "The host stopped the session.");
+    }
   }
 }
 
@@ -978,6 +992,16 @@ function visualInlineHtml(text) {
   return html;
 }
 
+function visualLatexSourceHtml(text) {
+  return escapeHtml(text)
+    .replace(/(\\[a-zA-Z@]+)(\*?)/g, "<span class=\"visual-latex-command\">$1$2</span>")
+    .replace(/(\\)(?=[^a-zA-Z@]|$)/g, "<span class=\"visual-latex-command\">$1</span>");
+}
+
+function visualSourceLineMarkup(text, className = "") {
+  return `<div class="visual-source-line ${className}">${visualLatexSourceHtml(text)}</div>`;
+}
+
 function inlineNodeToLatex(node) {
   if (node.nodeType === Node.TEXT_NODE) return latexEscapeText(node.nodeValue);
   if (node.nodeType !== Node.ELEMENT_NODE) return "";
@@ -1028,6 +1052,7 @@ function parseLatexTableBlock(text) {
   const source = String(text || "");
   const tabular = source.match(/\\begin\{tabular\}\{([^}]*)\}([\s\S]*?)\\end\{tabular\}/);
   if (!tabular) return null;
+  const tableBegin = source.match(/\\begin\{table\}(?:\[([^\]]*)\])?/);
   const caption = source.match(/\\caption(?:\[[^\]]*\])?\{([^{}]*)\}/);
   const label = source.match(/\\label\{([^{}]*)\}/);
   const tableBody = tabular[2]
@@ -1046,6 +1071,7 @@ function parseLatexTableBlock(text) {
     rows: normalizedRows,
     caption: latexUnescapeText(caption?.[1] || ""),
     label: label?.[1] || "tab:placeholder",
+    placement: tableBegin?.[1] || "h",
     colSpec: tabular[1] || "l".repeat(colCount),
     borders: /\\hline|\\toprule|\\midrule|\\bottomrule/.test(source) ? "borders" : "none"
   };
@@ -1054,7 +1080,9 @@ function parseLatexTableBlock(text) {
 function parseLatexFigureBlock(text) {
   const source = String(text || "");
   if (!/\\begin\{figure\}/.test(source) || !/\\end\{figure\}/.test(source)) return null;
+  const figureBegin = source.match(/\\begin\{figure\}(?:\[([^\]]*)\])?/);
   const image = source.match(/\\includegraphics(?:\[[^\]]*\])?\{([^{}]*)\}/);
+  const options = source.match(/\\includegraphics(?:\[([^\]]*)\])?\{([^{}]*)\}/);
   const caption = source.match(/\\caption(?:\[[^\]]*\])?\{([^{}]*)\}/);
   const label = source.match(/\\label\{([^{}]*)\}/);
   if (!image && !caption && !label) return null;
@@ -1062,23 +1090,27 @@ function parseLatexFigureBlock(text) {
     type: "figure",
     image: latexUnescapeText(image?.[1] || ""),
     caption: latexUnescapeText(caption?.[1] || ""),
-    label: label?.[1] || "fig:placeholder"
+    label: label?.[1] || "fig:placeholder",
+    placement: figureBegin?.[1] || "h",
+    options: options?.[1] || "width=0.8\\linewidth"
   };
 }
 
 function visualTableToLatex(block) {
   const rows = [...block.querySelectorAll(".visual-table-grid tr")].map((row) =>
     [...row.querySelectorAll("td, th")].map((cell) => latexEscapeText(cell.textContent.trim()))
-  ).filter((row) => row.some(Boolean));
+  );
   const colCount = Math.max(1, ...rows.map((row) => row.length));
-  const colSpec = "l".repeat(colCount);
+  const savedSpec = block.dataset.tableColspec || "";
+  const colSpec = (savedSpec.match(/[lcrpmbX]/g) || []).length === colCount ? savedSpec : "l".repeat(colCount);
+  const placement = block.dataset.tablePlacement || "h";
   const borders = block.dataset.tableBorders !== "none";
   const bodyRows = (rows.length ? rows : [Array.from({ length: colCount }, () => "")])
     .map((row) => `    ${Array.from({ length: colCount }, (_, index) => row[index] || "").join(" & ")} \\\\`);
   const caption = latexEscapeText(block.querySelector(".visual-table-caption")?.textContent.trim() || "Caption");
   const label = latexEscapeText(block.querySelector(".visual-table-label")?.textContent.trim() || "tab:placeholder");
   return [
-    "\\begin{table}[h]",
+    `\\begin{table}[${placement}]`,
     "  \\centering",
     `  \\begin{tabular}{${colSpec}}`,
     borders ? "    \\hline" : "",
@@ -1095,10 +1127,12 @@ function visualFigureToLatex(block) {
   const image = latexEscapeText(block.querySelector(".visual-figure-image")?.textContent.trim() || "image.png");
   const caption = latexEscapeText(block.querySelector(".visual-figure-caption")?.textContent.trim() || "Caption");
   const label = latexEscapeText(block.querySelector(".visual-figure-label")?.textContent.trim() || "fig:placeholder");
+  const placement = block.dataset.figurePlacement || "h";
+  const options = block.dataset.figureOptions || "width=0.8\\linewidth";
   return [
-    "\\begin{figure}[h]",
+    `\\begin{figure}[${placement}]`,
     "  \\centering",
-    `  \\includegraphics[width=0.8\\linewidth]{${image}}`,
+    `  \\includegraphics[${options}]{${image}}`,
     `  \\caption{${caption}}`,
     `  \\label{${label}}`,
     "\\end{figure}"
@@ -1156,11 +1190,18 @@ function parseVisualLatex(content) {
       continue;
     }
 
-    const heading = trimmed.match(/^\\(chapter|section|subsection|subsubsection|paragraph)\*?\{([^}]*)\}\s*$/);
+    const heading = trimmed.match(/^\\(chapter|section|subsection|subsubsection|paragraph)(\*)?\{([^}]*)\}\s*(?:\\label\{([^{}]*)\})?\s*$/);
     if (heading) {
       flushParagraph();
       flushRaw();
-      blocks.push({ type: "heading", level: heading[1], text: latexUnescapeText(heading[2]), line: lineNumber });
+      blocks.push({
+        type: "heading",
+        level: heading[1],
+        starred: Boolean(heading[2]),
+        text: latexUnescapeText(heading[3]),
+        label: heading[4] || "",
+        line: lineNumber
+      });
       continue;
     }
 
@@ -1194,12 +1235,17 @@ function visualLineNumberMarkup(block) {
 
 function visualBlockMarkup(block, index) {
   if (block.type === "heading") {
+    const label = block.label
+      ? `<span class="visual-heading-label-wrap" spellcheck="false"><span class="visual-latex-command">\\label</span>{<span class="visual-heading-label" contenteditable="true">${escapeHtml(block.label)}</span>}</span>`
+      : "";
     return `
-      <section class="visual-block visual-heading-block" data-visual-type="heading" data-heading-level="${escapeHtml(block.level)}">
+      <section class="visual-block visual-heading-block" data-visual-type="heading" data-heading-level="${escapeHtml(block.level)}" data-heading-starred="${block.starred ? "1" : "0"}">
         ${visualLineNumberMarkup(block)}
         <div class="visual-block-body visual-heading-body">
-          <label>${escapeHtml(block.level)}</label>
-          <div class="visual-heading-input" contenteditable="true" spellcheck="true">${escapeHtml(block.text)}</div>
+          <div class="visual-heading-line">
+            <div class="visual-heading-input" contenteditable="true" spellcheck="true">${escapeHtml(block.text)}</div>
+            ${label}
+          </div>
         </div>
       </section>
     `;
@@ -1226,15 +1272,13 @@ function visualBlockMarkup(block, index) {
   }
   if (block.type === "table") {
     const rows = block.rows || [["", ""]];
+    const placement = block.placement || "h";
+    const colSpec = block.colSpec || "l".repeat(Math.max(1, ...rows.map((row) => row.length)));
     return `
-      <section class="visual-block visual-table-block" data-visual-type="table" data-table-borders="${escapeHtml(block.borders || "borders")}">
+      <section class="visual-block visual-table-block" data-visual-type="table" data-table-borders="${escapeHtml(block.borders || "borders")}" data-table-placement="${escapeHtml(placement)}" data-table-colspec="${escapeHtml(colSpec)}">
         ${visualLineNumberMarkup(block)}
-        <div class="visual-block-body visual-table-shell">
-          <div class="visual-object-toolbar">
-            <select class="visual-table-caption-position" title="Caption position" aria-label="Caption position">
-              <option value="below" selected>Caption below</option>
-              <option value="above">Caption above</option>
-            </select>
+        <div class="visual-block-body visual-table-shell visual-latex-object">
+          <div class="visual-object-toolbar" aria-label="Table controls">
             <select class="visual-table-borders" title="Table borders" aria-label="Table borders">
               <option value="borders" ${(block.borders || "borders") === "borders" ? "selected" : ""}>Borders</option>
               <option value="none" ${(block.borders || "borders") === "none" ? "selected" : ""}>No borders</option>
@@ -1242,35 +1286,53 @@ function visualBlockMarkup(block, index) {
             <button type="button" class="mini-button visual-table-add-row" title="Add row">+ Row</button>
             <button type="button" class="mini-button visual-table-add-column" title="Add column">+ Col</button>
           </div>
-          <table class="visual-table-grid">
-            <tbody>
-              ${rows.map((row) => `<tr>${row.map((cell) => `<td contenteditable="true" spellcheck="true">${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}
-            </tbody>
-          </table>
+          <div class="visual-object-source">
+            ${visualSourceLineMarkup(`\\begin{table}[${placement}]`)}
+            ${visualSourceLineMarkup("  \\centering")}
+          </div>
+          <div class="visual-table-wrap" style="--visual-table-columns:${rows[0].length || 1}">
+            <div class="visual-table-handle-row" aria-hidden="true">${rows[0].map(() => "<span></span>").join("")}</div>
+            <table class="visual-table-grid">
+              <tbody>
+                ${rows.map((row) => `<tr>${row.map((cell) => `<td contenteditable="true" spellcheck="true">${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}
+              </tbody>
+            </table>
+          </div>
           <div class="visual-table-caption" contenteditable="true" spellcheck="true">${escapeHtml(block.caption || "Caption")}</div>
-          <div class="visual-table-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "tab:placeholder")}</div>
+          <div class="visual-table-label-row"><span aria-hidden="true">label:</span><span class="visual-table-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "tab:placeholder")}</span></div>
+          <div class="visual-object-source">
+            ${visualSourceLineMarkup("\\end{table}")}
+          </div>
         </div>
       </section>
     `;
   }
   if (block.type === "figure") {
+    const placement = block.placement || "h";
+    const options = block.options || "width=0.8\\linewidth";
     return `
-      <section class="visual-block visual-figure-block" data-visual-type="figure">
+      <section class="visual-block visual-figure-block" data-visual-type="figure" data-figure-placement="${escapeHtml(placement)}" data-figure-options="${escapeHtml(options)}">
         ${visualLineNumberMarkup(block)}
-        <div class="visual-block-body visual-figure-shell">
+        <div class="visual-block-body visual-figure-shell visual-latex-object">
           <button type="button" class="visual-object-edit-button" title="Edit figure source" aria-label="Edit figure source">${editorToolIcon("monospace")}</button>
-          <div class="visual-figure-image" contenteditable="true" spellcheck="false">${escapeHtml(block.image || "image.png")}</div>
-          <div class="visual-figure-caption" contenteditable="true" spellcheck="true">${escapeHtml(block.caption || "Caption")}</div>
-          <div class="visual-figure-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "fig:placeholder")}</div>
+          <div class="visual-object-source">
+            ${visualSourceLineMarkup(`\\begin{figure}[${placement}]`)}
+            ${visualSourceLineMarkup("  \\centering")}
+          </div>
+          <div class="visual-object-inline-line visual-figure-line"><span class="visual-latex-command">\\includegraphics</span>[${escapeHtml(options)}]{<span class="visual-figure-image" contenteditable="true" spellcheck="false">${escapeHtml(block.image || "image.png")}</span>}</div>
+          <div class="visual-object-inline-line visual-caption-line"><span class="visual-latex-command">\\caption</span>{<span class="visual-figure-caption" contenteditable="true" spellcheck="true">${escapeHtml(block.caption || "Caption")}</span>}</div>
+          <div class="visual-object-inline-line visual-label-line"><span class="visual-latex-command">\\label</span>{<span class="visual-figure-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "fig:placeholder")}</span>}</div>
+          <div class="visual-object-source">
+            ${visualSourceLineMarkup("\\end{figure}")}
+          </div>
         </div>
       </section>
     `;
   }
   return `
-    <section class="visual-block visual-raw-block" data-visual-type="raw">
+    <section class="visual-block visual-raw-block visual-source-block" data-visual-type="raw">
       ${visualLineNumberMarkup(block)}
-      <div class="visual-block-body visual-raw-shell">
-        <div class="visual-raw-head"><span>LaTeX block</span><small>advanced source</small></div>
+      <div class="visual-block-body visual-raw-shell visual-source-shell">
         <textarea class="visual-raw-input" spellcheck="false" aria-label="Raw LaTeX block ${index + 1}">${escapeHtml(block.text)}</textarea>
       </div>
     </section>
@@ -1287,8 +1349,10 @@ function visualDomToLatex(host) {
     const type = block.dataset.visualType;
     if (type === "heading") {
       const level = block.dataset.headingLevel || "section";
+      const star = block.dataset.headingStarred === "1" ? "*" : "";
       const text = block.querySelector(".visual-heading-input")?.textContent || "";
-      blocks.push(`\\${level}{${latexEscapeText(text.trim())}}`);
+      const label = block.querySelector(".visual-heading-label")?.textContent.trim() || "";
+      blocks.push(`\\${level}${star}{${latexEscapeText(text.trim())}}${label ? `\\label{${label}}` : ""}`);
     } else if (type === "paragraph") {
       const input = block.querySelector(".visual-paragraph-input");
       blocks.push(blockContentToLatex(input || block));
@@ -1431,7 +1495,7 @@ function tablePickerMarkup() {
     <section class="editor-table-popover" aria-label="Insert table">
       <strong>Insert table</strong>
       <button type="button" class="table-from-text" id="tableFromText">From text or image</button>
-      <span>Select size</span>
+      <span id="tableSizeHint">Select size</span>
       <div class="table-size-grid">${sizes.join("")}</div>
     </section>
   `;
@@ -1494,6 +1558,58 @@ function previewActionsMarkup(compile = local.appState?.compile || {}) {
   `;
 }
 
+function compileLogLevel(line) {
+  const text = String(line || "");
+  if (
+    /^! /.test(text) ||
+    /\b(error|fatal|failed|failure|emergency stop|undefined control sequence|missing \$|runaway argument)\b/i.test(text)
+  ) {
+    return "error";
+  }
+  if (
+    /\b(warning|warn|overfull|underfull|rerun|undefined references?|citation .* undefined|reference .* undefined)\b/i.test(text)
+  ) {
+    return "warning";
+  }
+  if (/\b(success|successful|output written|done)\b/i.test(text)) return "success";
+  return "info";
+}
+
+function compileLogCounts(lines = []) {
+  return lines.reduce((counts, line) => {
+    counts[compileLogLevel(line)] += 1;
+    return counts;
+  }, { error: 0, warning: 0, success: 0, info: 0 });
+}
+
+function compileLogSummaryMarkup(lines = []) {
+  const counts = compileLogCounts(lines);
+  return `
+    <div class="log-summary" aria-label="Compile log summary">
+      <span class="log-chip error">${counts.error} errors</span>
+      <span class="log-chip warning">${counts.warning} warnings</span>
+      <span class="log-chip info">${counts.info + counts.success} info</span>
+    </div>
+  `;
+}
+
+function compileLogsMarkup(lines = []) {
+  const recent = lines.slice(-120);
+  if (!recent.length) {
+    return `<div class="log-empty">No compile logs yet.</div>`;
+  }
+  return recent.map((line) => {
+    const level = compileLogLevel(line);
+    const label = level === "error" ? "Error" : level === "warning" ? "Warning" : level === "success" ? "OK" : "";
+    return `
+      <div class="log-line ${level}">
+        ${label ? `<span class="log-level">${label}</span>` : `<span class="log-level subtle">log</span>`}
+        <span class="log-text">${escapeHtml(line)}</span>
+      </div>
+    `;
+  }).join("");
+}
+
 function updatePdfZoomUi() {
   const label = document.querySelector("#pdfZoomValue");
   if (label) label.textContent = `${Math.round(local.pdfScale * 100)}%`;
@@ -1519,7 +1635,12 @@ function setPdfScale(nextScale) {
   local.pdfScale = Math.max(0.5, Math.min(2.4, Math.round(Number(nextScale || 1) * 10) / 10));
   localStorage.setItem("localleaf.pdfScale", String(local.pdfScale));
   updatePdfZoomUi();
-  if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.remount) {
+  if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.zoom) {
+    window.LocalLeafPdfPreview.zoom(previewPane, {
+      scale: local.pdfScale,
+      scrollState
+    });
+  } else if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.remount) {
     window.LocalLeafPdfPreview.remount(previewPane, {
       scale: local.pdfScale,
       scrollState
@@ -1679,7 +1800,7 @@ async function selectProjectFile(filePath) {
 function editorView() {
   const state = local.appState;
   const file = local.selectedFile || state.project.mainFile || state.project.files.find((item) => item.type === "text" || item.type === "image")?.path || "";
-  const logs = (state.compile.logs || []).slice(-20).join("\n");
+  const compileLogs = state.compile.logs || [];
   const selection = selectedFileState(file);
   const isCompiling = state.compile.status === "running";
   const editorSurface = editorSurfaceMarkup(file, selection.selectedMeta);
@@ -1814,8 +1935,11 @@ function editorView() {
 
       <footer class="log-dock">
         <div class="log-resizer" id="logResizer" title="Resize logs"></div>
-        <div class="log-tabs"><button class="active">Logs</button></div>
-        <pre class="logs">${escapeHtml(logs)}</pre>
+        <div class="log-tabs">
+          <button class="active">Logs</button>
+          ${compileLogSummaryMarkup(compileLogs)}
+        </div>
+        <div class="logs" aria-live="polite">${compileLogsMarkup(compileLogs)}</div>
       </footer>
     </section>
   `;
@@ -1856,6 +1980,9 @@ function bindCommon() {
 function goBackHome() {
   closeCollab();
   local.joinRequestId = null;
+  local.guestToken = "";
+  local.userName = "Host";
+  local.userId = "";
   local.sessionEndedReason = "The host has ended the session.";
   local.sessionEndedDetail = "Ask the host to start it again.";
   history.pushState({}, "", "/");
@@ -2540,7 +2667,8 @@ async function pollJoinStatus() {
 
 function bindEditor() {
   if (route().view !== "editor") return;
-  connectCollab();
+  if (isLiveSession()) connectCollab();
+  else closeCollab();
   document.querySelector("#backToProject")?.addEventListener("click", () => {
     if (local.appState.session.status === "live") setView("session");
     else setView("project");
@@ -2748,7 +2876,24 @@ function bindEditorToolbarPanels() {
     refreshEditorToolbarPanels();
   });
   document.querySelector("#tableFromText")?.addEventListener("click", () => insertVisualTable(2, 2));
-  document.querySelectorAll(".table-size-cell").forEach((button) => {
+  const tableCells = [...document.querySelectorAll(".table-size-cell")];
+  const tableHint = document.querySelector("#tableSizeHint");
+  const updateTablePreview = (rows = 0, cols = 0) => {
+    tableCells.forEach((cell) => {
+      const cellRows = Number(cell.dataset.rows || 0);
+      const cellCols = Number(cell.dataset.cols || 0);
+      cell.classList.toggle("preview-active", cellRows <= rows && cellCols <= cols);
+    });
+    if (tableHint) tableHint.textContent = rows && cols ? `${rows} x ${cols}` : "Select size";
+  };
+  document.querySelector(".table-size-grid")?.addEventListener("mouseleave", () => updateTablePreview());
+  tableCells.forEach((button) => {
+    button.addEventListener("mouseenter", () => {
+      updateTablePreview(Number(button.dataset.rows || 0), Number(button.dataset.cols || 0));
+    });
+    button.addEventListener("focus", () => {
+      updateTablePreview(Number(button.dataset.rows || 0), Number(button.dataset.cols || 0));
+    });
     button.addEventListener("click", () => {
       insertVisualTable(Number(button.dataset.rows || 2), Number(button.dataset.cols || 2));
     });
@@ -2907,7 +3052,11 @@ function updateCompileUi(options = {}) {
   }
 
   const logs = document.querySelector(".logs");
-  if (logs) logs.textContent = (compile.logs || []).slice(-20).join("\n");
+  if (logs) logs.innerHTML = compileLogsMarkup(compile.logs || []);
+  const logTabs = document.querySelector(".log-tabs");
+  if (logTabs) {
+    logTabs.innerHTML = `<button class="active">Logs</button>${compileLogSummaryMarkup(compile.logs || [])}`;
+  }
 
   const previewPane = document.querySelector("#previewPane");
   if (!previewPane) return;
@@ -3235,6 +3384,11 @@ async function render() {
   else if (current.view === "session") app.innerHTML = sessionView();
   else if (current.view === "active") app.innerHTML = sessionView();
   else if (current.view === "editor") {
+    if (isGuestClient() && local.appState?.session?.status !== "live") {
+      app.innerHTML = endedView();
+      bindCommon();
+      return;
+    }
     if (!local.editorContent) await loadSelectedFile();
     app.innerHTML = editorView();
   } else if (current.view === "ended") app.innerHTML = endedView();
@@ -3317,7 +3471,10 @@ function connectEvents() {
   });
   events.addEventListener("session-ended", (event) => {
     const payload = event.data ? JSON.parse(event.data) : {};
-    handleSessionEnded(payload.reason || "The host stopped the session.");
+    const current = route();
+    if (isGuestClient() || ["session", "active"].includes(current.view) || (current.view === "editor" && isLiveSession())) {
+      handleSessionEnded(payload.reason || "The host stopped the session.");
+    }
   });
   events.addEventListener("error", () => {
     clearTimeout(local.eventDisconnectTimer);

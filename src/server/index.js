@@ -869,7 +869,9 @@ function handleCollabMessage(state, client, payload) {
   }
 
   if (state.session.status === "ended") {
-    sendWs(client, { type: "session_ended", reason: "Host stopped the session." });
+    if (!client.isHost) {
+      sendWs(client, { type: "session_ended", reason: "Host stopped the session." });
+    }
     client.socket.close();
     return;
   }

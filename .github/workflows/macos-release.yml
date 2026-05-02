@@ -83,5 +83,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="v$(node -p "require('./package.json').version")"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "LocalLeaf release $TAG"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "LocalLeaf release $TAG" || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" "release/${{ matrix.asset_name }}" --clobber

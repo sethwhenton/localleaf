@@ -68,5 +68,11 @@ jobs:
           gh release view $tag 2>$null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --title $tag --notes "LocalLeaf release $tag"
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $tag
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not create or find release $tag"
+              }
+            }
           }
           gh release upload $tag "release/LocalLeaf-Host-Setup.exe" --clobber
