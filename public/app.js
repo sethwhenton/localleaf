@@ -46,6 +46,7 @@ const local = {
   previewPaneVisible: localStorage.getItem("localleaf.previewPaneVisible") !== "0",
   rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0",
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
+  pendingPreviewScroll: null,
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
 };
@@ -955,12 +956,13 @@ function visualRawBlockIsOpen(lines) {
 }
 
 function visualInlineHtml(text) {
-  let html = escapeHtml(latexUnescapeText(text));
+  let html = escapeHtml(latexUnescapeText(text).replace(/\\\\\s*(?:\n|$)/g, "\uE000"));
   html = html.replace(/\\textbf\{([^{}]*)\}/g, "<strong data-latex-inline=\"textbf\">$1</strong>");
   html = html.replace(/\\(?:textit|emph)\{([^{}]*)\}/g, "<em data-latex-inline=\"textit\">$1</em>");
   html = html.replace(/\\texttt\{([^{}]*)\}/g, "<code data-latex-inline=\"texttt\">$1</code>");
   html = html.replace(/\\(?:cite|citep|citet|parencite|textcite)\{([^{}]*)\}/g, "<span class=\"visual-chip\" data-latex-raw=\"\\\\cite{$1}\">cite:$1</span>");
   html = html.replace(/\\(?:ref|eqref|autoref|pageref)\{([^{}]*)\}/g, "<span class=\"visual-chip\" data-latex-raw=\"\\\\ref{$1}\">ref:$1</span>");
+  html = html.replace(/\uE000/g, "<br />");
   return html;
 }
 
@@ -970,34 +972,45 @@ function inlineNodeToLatex(node) {
   const raw = node.getAttribute("data-latex-raw");
   if (raw) return raw;
   const children = [...node.childNodes].map(inlineNodeToLatex).join("");
+  if (node.tagName === "BR") return "\\\\\n";
+  if (node.tagName === "DIV" || node.tagName === "P") {
+    const text = children.trim();
+    return text ? `${text}\\\\\n` : "\n";
+  }
   const inline = node.getAttribute("data-latex-inline");
   if (inline) return `\\${inline}{${children}}`;
   if (node.tagName === "STRONG" || node.tagName === "B") return `\\textbf{${children}}`;
   if (node.tagName === "EM" || node.tagName === "I") return `\\textit{${children}}`;
   if (node.tagName === "CODE") return `\\texttt{${children}}`;
-  if (node.tagName === "BR") return "\n";
   return children;
 }
 
 function blockContentToLatex(element) {
-  return [...element.childNodes].map(inlineNodeToLatex).join("").replace(/\n{3,}/g, "\n\n").trim();
+  return [...element.childNodes]
+    .map(inlineNodeToLatex)
+    .join("")
+    .replace(/(?:\\\\\s*){2,}$/g, "\\\\")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function parseVisualLatex(content) {
   const blocks = [];
   const lines = String(content || "").replace(/\r\n/g, "\n").split("\n");
   let paragraph = [];
+  let paragraphStartLine = 1;
   let raw = [];
+  let rawStartLine = 1;
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
-    blocks.push({ type: "paragraph", text: paragraph.join("\n").trim() });
+    blocks.push({ type: "paragraph", text: paragraph.join("\n").trim(), line: paragraphStartLine });
     paragraph = [];
   };
 
   const flushRaw = () => {
     if (!raw.length) return;
-    blocks.push({ type: "raw", text: raw.join("\n") });
+    blocks.push({ type: "raw", text: raw.join("\n"), line: rawStartLine });
     raw = [];
   };
 
@@ -1008,7 +1021,8 @@ function parseVisualLatex(content) {
     return !trimmed.startsWith("\\") && !trimmed.startsWith("%");
   };
 
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
     const trimmed = line.trim();
     if (raw.length && visualRawBlockIsOpen(raw)) {
       raw.push(line);
@@ -1019,55 +1033,70 @@ function parseVisualLatex(content) {
     if (heading) {
       flushParagraph();
       flushRaw();
-      blocks.push({ type: "heading", level: heading[1], text: latexUnescapeText(heading[2]) });
+      blocks.push({ type: "heading", level: heading[1], text: latexUnescapeText(heading[2]), line: lineNumber });
       continue;
     }
 
     if (!trimmed) {
       flushParagraph();
       flushRaw();
-      blocks.push({ type: "blank" });
+      blocks.push({ type: "blank", line: lineNumber });
       continue;
     }
 
     if (isPlainTextLine(line)) {
       flushRaw();
+      if (!paragraph.length) paragraphStartLine = lineNumber;
       paragraph.push(line.trim());
       continue;
     }
 
     flushParagraph();
+    if (!raw.length) rawStartLine = lineNumber;
     raw.push(line);
   }
 
   flushParagraph();
   flushRaw();
-  return blocks.length ? blocks : [{ type: "paragraph", text: "" }];
+  return blocks.length ? blocks : [{ type: "paragraph", text: "", line: 1 }];
+}
+
+function visualLineNumberMarkup(block) {
+  return `<span class="visual-line-number" aria-hidden="true">${escapeHtml(block.line || "")}</span>`;
 }
 
 function visualBlockMarkup(block, index) {
   if (block.type === "heading") {
     return `
       <section class="visual-block visual-heading-block" data-visual-type="heading" data-heading-level="${escapeHtml(block.level)}">
-        <label>${escapeHtml(block.level)}</label>
-        <div class="visual-heading-input" contenteditable="true" spellcheck="true">${escapeHtml(block.text)}</div>
+        ${visualLineNumberMarkup(block)}
+        <div class="visual-block-body visual-heading-body">
+          <label>${escapeHtml(block.level)}</label>
+          <div class="visual-heading-input" contenteditable="true" spellcheck="true">${escapeHtml(block.text)}</div>
+        </div>
       </section>
     `;
   }
   if (block.type === "paragraph") {
     return `
       <section class="visual-block visual-paragraph-block" data-visual-type="paragraph">
-        <div class="visual-paragraph-input" contenteditable="true" spellcheck="true">${visualInlineHtml(block.text)}</div>
+        ${visualLineNumberMarkup(block)}
+        <div class="visual-block-body">
+          <div class="visual-paragraph-input" contenteditable="true" spellcheck="true">${visualInlineHtml(block.text)}</div>
+        </div>
       </section>
     `;
   }
   if (block.type === "blank") {
-    return `<div class="visual-block visual-blank-block" data-visual-type="blank" aria-label="Blank line"></div>`;
+    return `<div class="visual-block visual-blank-block" data-visual-type="blank" aria-label="Blank line">${visualLineNumberMarkup(block)}<span class="visual-blank-marker"></span></div>`;
   }
   return `
     <section class="visual-block visual-raw-block" data-visual-type="raw">
-      <div class="visual-raw-head"><span>LaTeX block</span><small>advanced source</small></div>
-      <textarea class="visual-raw-input" spellcheck="false" aria-label="Raw LaTeX block ${index + 1}">${escapeHtml(block.text)}</textarea>
+      ${visualLineNumberMarkup(block)}
+      <div class="visual-block-body visual-raw-shell">
+        <div class="visual-raw-head"><span>LaTeX block</span><small>advanced source</small></div>
+        <textarea class="visual-raw-input" spellcheck="false" aria-label="Raw LaTeX block ${index + 1}">${escapeHtml(block.text)}</textarea>
+      </div>
     </section>
   `;
 }
@@ -1188,6 +1217,35 @@ function compiledPreviewMarkup() {
     return `<iframe title="PDF preview" src="${authUrl(`/api/pdf?v=${state.compile.version}`)}" class="pdf-preview-frame"></iframe>`;
   }
   return state.compile.previewHtml || `<article class="paper-preview"><header class="paper-title"><h1>Compile to Preview</h1><p>Click Recompile to render the document preview.</p></header></article>`;
+}
+
+function capturePreviewScroll(previewPane = document.querySelector("#previewPane")) {
+  if (!previewPane) return null;
+  const maxTop = Math.max(0, previewPane.scrollHeight - previewPane.clientHeight);
+  const maxLeft = Math.max(0, previewPane.scrollWidth - previewPane.clientWidth);
+  return {
+    top: previewPane.scrollTop,
+    left: previewPane.scrollLeft,
+    topRatio: maxTop ? previewPane.scrollTop / maxTop : 0,
+    leftRatio: maxLeft ? previewPane.scrollLeft / maxLeft : 0
+  };
+}
+
+function restorePreviewScroll(scrollState, previewPane = document.querySelector("#previewPane")) {
+  if (!scrollState || !previewPane) return;
+  const apply = () => {
+    const maxTop = Math.max(0, previewPane.scrollHeight - previewPane.clientHeight);
+    const maxLeft = Math.max(0, previewPane.scrollWidth - previewPane.clientWidth);
+    previewPane.scrollTop = Math.min(maxTop, Math.max(scrollState.top, Math.round(maxTop * scrollState.topRatio)));
+    previewPane.scrollLeft = Math.min(maxLeft, Math.max(scrollState.left, Math.round(maxLeft * scrollState.leftRatio)));
+  };
+  requestAnimationFrame(() => {
+    apply();
+    const frame = previewPane.querySelector(".pdf-preview-frame");
+    frame?.addEventListener("load", apply, { once: true });
+    setTimeout(apply, 150);
+    setTimeout(apply, 450);
+  });
 }
 
 function editorShellClasses() {
@@ -1649,7 +1707,7 @@ function mountCodeEditor() {
     filePath: local.selectedFile,
     suggestions: local.editorSuggestions || {},
     onChange: (text) => markEditorChanged(text),
-    onSave: saveCurrentFile,
+    onSave: saveAndCompile,
     onCompile: compile,
     onFocus: () => {
       local.editingNow = true;
@@ -1669,6 +1727,13 @@ function mountVisualEditor() {
   const documentNode = host.querySelector("#visualEditorDocument");
   const getText = () => visualDomToLatex(documentNode);
   const handleInput = () => markEditorChanged(getText());
+  const handleKeyDown = (event) => {
+    const target = event.target;
+    if (event.key !== "Enter" || !target?.classList?.contains("visual-paragraph-input")) return;
+    event.preventDefault();
+    document.execCommand("insertLineBreak");
+    markEditorChanged(getText());
+  };
   const handleFocusIn = () => {
     local.editingNow = true;
   };
@@ -1676,6 +1741,7 @@ function mountVisualEditor() {
     local.editingNow = false;
   };
   documentNode?.addEventListener("input", handleInput);
+  documentNode?.addEventListener("keydown", handleKeyDown);
   documentNode?.addEventListener("focusin", handleFocusIn);
   documentNode?.addEventListener("focusout", handleFocusOut);
   host.querySelectorAll(".visual-raw-input").forEach((input) => {
@@ -1686,6 +1752,7 @@ function mountVisualEditor() {
     host,
     destroy() {
       documentNode?.removeEventListener("input", handleInput);
+      documentNode?.removeEventListener("keydown", handleKeyDown);
       documentNode?.removeEventListener("focusin", handleFocusIn);
       documentNode?.removeEventListener("focusout", handleFocusOut);
       local.visualEditor = null;
@@ -1885,7 +1952,7 @@ function bindEditor() {
   });
   document.querySelector("#compileButton")?.addEventListener("click", compile);
   document.querySelector("#exportButton")?.addEventListener("click", showExportModal);
-  document.querySelector("#saveButton")?.addEventListener("click", saveCurrentFile);
+  document.querySelector("#saveButton")?.addEventListener("click", saveAndCompile);
   document.querySelector("#newFile")?.addEventListener("click", createFile);
   document.querySelector("#newFolder")?.addEventListener("click", createFolder);
   document.querySelector("#uploadFile")?.addEventListener("click", uploadProjectFile);
@@ -2183,7 +2250,9 @@ function updateCompileUi(options = {}) {
 
   if (existingOverlay) existingOverlay.remove();
   if (options.refreshPreview) {
+    const scrollState = options.previewScroll || capturePreviewScroll(previewPane);
     previewPane.innerHTML = compiledPreviewMarkup();
+    restorePreviewScroll(scrollState, previewPane);
   }
 }
 
@@ -2325,6 +2394,11 @@ async function saveCurrentFile() {
   return local.savePromise;
 }
 
+async function saveAndCompile() {
+  clearTimeout(local.saveTimer);
+  await compile();
+}
+
 async function createFile() {
   const filePath = prompt("New file path:", "chapter.tex");
   if (!filePath) return;
@@ -2454,6 +2528,8 @@ async function setMainFile() {
 }
 
 async function compile() {
+  const previewScroll = capturePreviewScroll();
+  local.pendingPreviewScroll = previewScroll;
   await saveCurrentFile();
   local.appState.compile.status = "running";
   updateCompileUi();
@@ -2464,7 +2540,8 @@ async function compile() {
   if (shouldApplyCompileUpdate(nextCompile)) {
     local.appState.compile = nextCompile;
   }
-  updateCompileUi({ refreshPreview: true });
+  updateCompileUi({ refreshPreview: true, previewScroll });
+  local.pendingPreviewScroll = null;
 }
 
 async function render() {
@@ -2555,7 +2632,9 @@ function connectEvents() {
     if (!shouldApplyCompileUpdate(nextCompile)) return;
     local.appState.compile = nextCompile;
     if (route().view === "editor") {
-      updateCompileUi({ refreshPreview: local.appState.compile.status !== "running" });
+      const refreshPreview = local.appState.compile.status !== "running";
+      updateCompileUi({ refreshPreview, previewScroll: refreshPreview ? local.pendingPreviewScroll : null });
+      if (refreshPreview) local.pendingPreviewScroll = null;
     }
   });
   events.addEventListener("chat", () => {
@@ -2586,6 +2665,14 @@ function connectEvents() {
 window.addEventListener("popstate", () => {
   local.view = new URLSearchParams(location.search).get("view") || "";
   render();
+});
+
+window.addEventListener("keydown", (event) => {
+  const isSaveShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s";
+  if (!isSaveShortcut || route().view !== "editor") return;
+  if (document.activeElement?.closest?.(".cm-editor")) return;
+  event.preventDefault();
+  saveAndCompile();
 });
 
 loadState()

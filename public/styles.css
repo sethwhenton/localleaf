@@ -2501,7 +2501,7 @@ button:disabled {
   max-width: 820px;
   min-height: 100%;
   margin: 0 auto;
-  padding: 26px 34px 48px;
+  padding: 26px 30px 48px 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
@@ -2509,10 +2509,28 @@ button:disabled {
 }
 
 .visual-block {
-  margin: 0 0 16px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  column-gap: 18px;
+  align-items: start;
+  margin: 0 0 10px;
 }
 
-.visual-heading-block {
+.visual-block-body {
+  min-width: 0;
+}
+
+.visual-line-number {
+  padding-top: 4px;
+  color: #9f958d;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: right;
+  user-select: none;
+}
+
+.visual-heading-body {
   display: grid;
   gap: 6px;
 }
@@ -2528,7 +2546,7 @@ button:disabled {
 .visual-paragraph-input {
   outline: none;
   border-radius: 6px;
-  padding: 5px 7px;
+  padding: 3px 7px;
 }
 
 .visual-heading-input {
@@ -2542,8 +2560,9 @@ button:disabled {
   color: #241b15;
   font-family: Georgia, "Times New Roman", serif;
   font-size: 16px;
-  line-height: 1.75;
-  min-height: 34px;
+  line-height: 1.5;
+  min-height: 26px;
+  white-space: pre-wrap;
 }
 
 .visual-heading-input:focus,
@@ -2569,10 +2588,14 @@ button:disabled {
 }
 
 .visual-blank-block {
-  height: 10px;
+  margin-bottom: 4px;
 }
 
-.visual-raw-block {
+.visual-blank-marker {
+  min-height: 6px;
+}
+
+.visual-raw-shell {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;

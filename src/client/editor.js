@@ -409,6 +409,33 @@ function createEditor(parent, options = {}) {
     );
   }
 
+  function lineAllowsVisibleBreak(lineText) {
+    const trimmed = String(lineText || "").trim();
+    if (!trimmed) return false;
+    if (trimmed.endsWith("\\\\") || trimmed.endsWith("\\newline") || trimmed.endsWith("\\par")) return false;
+    if (trimmed.startsWith("%")) return false;
+    if (/^\\(?:chapter|section|subsection|subsubsection|paragraph|begin|end|item|documentclass|usepackage|input|include|title|author|date|label|caption|centering|frontmatter|mainmatter|backmatter|tableofcontents|listoffigures|listoftables|newpage|clearpage|cleardoublepage|maketitle|pagestyle|thispagestyle|graphicspath|set|let|makeat|newcommand|renewcommand)\b/.test(trimmed)) {
+      return false;
+    }
+    if (/\\(?:begin|end)\{/.test(trimmed)) return false;
+    return true;
+  }
+
+  function insertVisibleLineBreak() {
+    const selection = view.state.selection.main;
+    if (!selection.empty) return false;
+    const line = view.state.doc.lineAt(selection.from);
+    const beforeCursor = line.text.slice(0, selection.from - line.from);
+    if (!lineAllowsVisibleBreak(beforeCursor)) return false;
+    view.dispatch({
+      changes: { from: selection.from, insert: "\\\\\n" },
+      selection: { anchor: selection.from + 3 },
+      scrollIntoView: true,
+      userEvent: "input"
+    });
+    return true;
+  }
+
   function applyStyle(style) {
     if (!style || style === "normal") return true;
     const command = `\\${style}{`;
@@ -515,6 +542,7 @@ function createEditor(parent, options = {}) {
       keymap.of([
         { key: "Mod-s", run: () => (options.onSave?.(), true) },
         { key: "Mod-Enter", run: () => (options.onCompile?.(), true) },
+        { key: "Enter", run: insertVisibleLineBreak },
         { key: "Mod-b", run: () => exec("bold") },
         { key: "Mod-i", run: () => exec("italic") },
         { key: "Mod-/", run: () => exec("comment") },
