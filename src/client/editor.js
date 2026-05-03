@@ -597,6 +597,23 @@ function createEditor(parent, options = {}) {
     suppressChange = false;
   }
 
+  const highPriorityKeys = [
+    { key: "Mod-s", run: () => (options.onSave?.(), true) },
+    { key: "Mod-Enter", run: () => (options.onCompile?.(), true) },
+    { key: "Mod-z", run: () => exec("undo") },
+    { key: "Mod-y", run: () => exec("redo") },
+    { key: "Shift-Mod-z", run: () => exec("redo") },
+    { key: "Mod-b", run: () => exec("bold") },
+    { key: "Mod-i", run: () => exec("italic") },
+    { key: "Mod-/", run: () => exec("comment") },
+    { key: "Ctrl-Space", run: () => exec("complete") },
+    { key: "Alt-/", run: () => exec("complete") },
+    indentWithTab
+  ];
+  if (options.visibleLineBreaks !== false) {
+    highPriorityKeys.splice(2, 0, { key: "Enter", run: insertVisibleLineBreak });
+  }
+
   const extensions = [
     basicSetup,
     StreamLanguage.define(stex),
@@ -620,20 +637,7 @@ function createEditor(parent, options = {}) {
       }
     }),
     Prec.highest(
-      keymap.of([
-        { key: "Mod-s", run: () => (options.onSave?.(), true) },
-        { key: "Mod-Enter", run: () => (options.onCompile?.(), true) },
-        { key: "Enter", run: insertVisibleLineBreak },
-        { key: "Mod-z", run: () => exec("undo") },
-        { key: "Mod-y", run: () => exec("redo") },
-        { key: "Shift-Mod-z", run: () => exec("redo") },
-        { key: "Mod-b", run: () => exec("bold") },
-        { key: "Mod-i", run: () => exec("italic") },
-        { key: "Mod-/", run: () => exec("comment") },
-        { key: "Ctrl-Space", run: () => exec("complete") },
-        { key: "Alt-/", run: () => exec("complete") },
-        indentWithTab
-      ])
+      keymap.of(highPriorityKeys)
     ),
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap])
   ];

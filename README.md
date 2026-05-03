@@ -13,7 +13,7 @@ When the host stops the session or closes the app, the room ends.
 
 ## Current Release
 
-Version `0.1.11` focuses on visual-editor polish, smoother PDF viewing, pinned compile errors, and safer local editing after a hosted session ends.
+Version `0.1.12` focuses on the visual editor's figure-source workflow, update prompts, and safer PDF/ZIP exports.
 
 ## Features
 
@@ -24,16 +24,18 @@ Version `0.1.11` focuses on visual-editor polish, smoother PDF viewing, pinned c
 - File tree with folder grouping, image grouping, rename, delete, upload, and set-main-file support.
 - Real CodeMirror 6 LaTeX editor with line numbers, command highlighting, toolbar actions, shortcuts, and autocomplete.
 - Lightweight visual editor for simple text, headings, figures, and editable tables.
+- Overleaf-style figure source editing with LaTeX highlighting, command autocomplete, and automatic return to the visual figure block after editing.
 - Blended visual table and figure editing that keeps LaTeX context visible without noisy source cards.
 - Search and replace panel for editor work, with case, regex, and whole-word toggles.
 - Keyboard shortcuts for save/recompile, bold, italic, undo, redo, comments, indentation, and autocomplete.
 - Real-time shared text editing over WebSockets with file-level presence, without cursor or selection sync.
 - Working project chat.
-- Save, recompile, export ZIP, export PDF, and connected-guest ZIP download support.
+- Save, recompile, export ZIP, export PDF, and connected-guest ZIP download support with correct `.zip` and `.pdf` filenames.
 - PDF compilation through bundled Tectonic, system LaTeX tools, or fallback preview guidance.
 - PDF preview powered by PDF.js, with smooth zoom buttons, Ctrl+mouse-wheel zoom, and page/scroll preservation after recompiles.
 - Compile logs with pinned red error groups, clearable orange warning groups, and gray informational output.
 - Session management screen with invite copy feedback, user list, health status, and stop-session handling.
+- Host-only update prompt when a newer LocalLeaf release is available.
 - Guests are notified when the host ends the session.
 - Hosts can stop a session and continue editing locally without being bounced back to the ended-session screen.
 

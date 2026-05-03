@@ -9,6 +9,7 @@ const { URL } = require("node:url");
 const { spawn, spawnSync } = require("node:child_process");
 const AdmZip = require("adm-zip");
 const { WebSocketServer } = require("ws");
+const PACKAGE_INFO = require("../../package.json");
 const {
   detectMainFile,
   getProjectSize,
@@ -37,9 +38,12 @@ const TUNNEL_RESTART_ATTEMPTS = 3;
 const TUNNEL_START_TIMEOUT_MS = 35000;
 const SESSION_END_TUNNEL_GRACE_MS = 10000;
 const SERVER_CLOSE_NOTICE_GRACE_MS = 350;
+const UPDATE_CACHE_TTL_MS = 30 * 60 * 1000;
+const UPDATE_RELEASE_API = "https://api.github.com/repos/sethwhenton/localleaf/releases/latest";
 const PUBLIC_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"];
 const publicDnsResolver = new dns.Resolver();
 publicDnsResolver.setServers(PUBLIC_DNS_SERVERS);
+let latestReleaseCache = null;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -417,11 +421,18 @@ function safeDownloadName(name, extension) {
   return `${base || "LocalLeaf_Project"}${extension}`;
 }
 
+function contentDisposition(disposition, filename) {
+  const cleanName = String(filename || "LocalLeaf_Project")
+    .replace(/[\\/"\r\n]/g, "_")
+    .slice(0, 180);
+  return `${disposition}; filename="${cleanName}"; filename*=UTF-8''${encodeURIComponent(cleanName)}`;
+}
+
 function attachmentHeaders(filename, contentType) {
-  const cleanName = String(filename).replace(/["\r\n]/g, "_");
   return {
     "content-type": contentType,
-    "content-disposition": `attachment; filename="${cleanName}"`,
+    "content-disposition": contentDisposition("attachment", filename),
+    "x-content-type-options": "nosniff",
     "cache-control": "no-store"
   };
 }
@@ -515,6 +526,113 @@ function createProjectZip(projectRoot, projectName) {
   }
 
   return { tempRoot, zipPath };
+}
+
+function normalizeVersion(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^v/i, "")
+    .split(/[+-]/)[0];
+}
+
+function compareVersions(left, right) {
+  const leftParts = normalizeVersion(left).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = normalizeVersion(right).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length, 3);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function preferredReleaseAsset(assets = []) {
+  const platform = os.platform();
+  const arch = os.arch();
+  const candidates = Array.isArray(assets) ? assets : [];
+  const findAsset = (matcher) => candidates.find((asset) => matcher(String(asset.name || "").toLowerCase()));
+  if (platform === "win32") {
+    return findAsset((name) => name.endsWith(".exe")) || findAsset((name) => name.includes("setup"));
+  }
+  if (platform === "darwin") {
+    if (arch === "arm64") {
+      return findAsset((name) => name.includes("arm64") && name.endsWith(".dmg"));
+    }
+    return findAsset((name) => name.includes("x64") && name.endsWith(".dmg")) || findAsset((name) => name.endsWith(".dmg"));
+  }
+  return findAsset((name) => name.endsWith(".zip")) || candidates[0] || null;
+}
+
+function fetchLatestRelease() {
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      UPDATE_RELEASE_API,
+      {
+        timeout: 6500,
+        headers: {
+          accept: "application/vnd.github+json",
+          "user-agent": `LocalLeaf/${PACKAGE_INFO.version}`
+        }
+      },
+      (response) => {
+        let data = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          data += chunk;
+          if (data.length > 1_000_000) {
+            request.destroy(new Error("Update response was too large."));
+          }
+        });
+        response.on("end", () => {
+          if (response.statusCode !== 200) {
+            reject(new Error(`GitHub returned ${response.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch {
+            reject(new Error("GitHub returned an unreadable update response."));
+          }
+        });
+      }
+    );
+    request.on("timeout", () => request.destroy(new Error("Update check timed out.")));
+    request.on("error", reject);
+  });
+}
+
+async function getLatestUpdateInfo() {
+  const now = Date.now();
+  if (latestReleaseCache && now - latestReleaseCache.checkedAt < UPDATE_CACHE_TTL_MS) {
+    return latestReleaseCache.payload;
+  }
+
+  const currentVersion = PACKAGE_INFO.version;
+  try {
+    const release = await fetchLatestRelease();
+    const latestVersion = normalizeVersion(release.tag_name || release.name || "");
+    const asset = preferredReleaseAsset(release.assets);
+    const payload = {
+      currentVersion,
+      latestVersion,
+      updateAvailable: Boolean(latestVersion) && compareVersions(latestVersion, currentVersion) > 0,
+      releaseUrl: release.html_url || "https://github.com/sethwhenton/localleaf/releases/latest",
+      downloadUrl: asset?.browser_download_url || release.html_url || "https://github.com/sethwhenton/localleaf/releases/latest",
+      assetName: asset?.name || "",
+      checkedAt: new Date(now).toISOString()
+    };
+    latestReleaseCache = { checkedAt: now, payload };
+    return payload;
+  } catch (error) {
+    return {
+      currentVersion,
+      latestVersion: currentVersion,
+      updateAvailable: false,
+      releaseUrl: "https://github.com/sethwhenton/localleaf/releases/latest",
+      downloadUrl: "https://github.com/sethwhenton/localleaf/releases/latest",
+      error: error.message || "Could not check for updates."
+    };
+  }
 }
 
 function createInitialState(options = {}) {
@@ -1487,6 +1605,15 @@ function createLocalLeafServer(options = {}) {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/update/latest") {
+      if (!isHostRequest(request)) {
+        deny(response, "Only the host app can check for LocalLeaf updates.");
+        return;
+      }
+      jsonResponse(response, 200, await getLatestUpdateInfo());
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/editor/suggestions") {
       if (!canReadProject(state, request, url)) {
         deny(response, "Join approval is required before reading project suggestions.");
@@ -1976,7 +2103,8 @@ function createLocalLeafServer(options = {}) {
       }
       if (state.compile.pdfPath && fs.existsSync(state.compile.pdfPath)) {
         streamFileResponse(request, response, state.compile.pdfPath, "application/pdf", {
-          "content-disposition": `inline; filename="${safeDownloadName(state.project.name, ".pdf")}"`
+          "content-disposition": contentDisposition("inline", safeDownloadName(state.project.name, ".pdf")),
+          "x-content-type-options": "nosniff"
         });
         return;
       }

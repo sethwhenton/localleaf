@@ -237,7 +237,10 @@ test("serves compiled PDFs with byte-range support for embedded viewers", async 
     assert.equal(fullPdf.response.headers.get("content-type"), "application/pdf");
     assert.equal(fullPdf.response.headers.get("accept-ranges"), "bytes");
     assert.equal(fullPdf.response.headers.get("content-length"), String(pdfBytes.length));
-    assert.match(fullPdf.response.headers.get("content-disposition"), /^inline; filename=".+\.pdf"$/);
+    assert.match(
+      fullPdf.response.headers.get("content-disposition"),
+      /^inline; filename=".+\.pdf"; filename\*=UTF-8''.+\.pdf$/
+    );
     assert.equal(fullPdf.buffer.toString("utf8"), pdfBytes.toString("utf8"));
 
     const rangePdf = await binaryRequest(baseUrl, "/api/pdf", {
@@ -247,6 +250,15 @@ test("serves compiled PDFs with byte-range support for embedded viewers", async 
     assert.equal(rangePdf.response.headers.get("content-range"), `bytes 0-7/${pdfBytes.length}`);
     assert.equal(rangePdf.response.headers.get("content-length"), "8");
     assert.equal(rangePdf.buffer.toString("utf8"), pdfBytes.subarray(0, 8).toString("utf8"));
+
+    const exportedPdf = await binaryRequest(baseUrl, "/api/export/pdf");
+    assert.equal(exportedPdf.response.status, 200);
+    assert.equal(exportedPdf.response.headers.get("content-type"), "application/pdf");
+    assert.match(
+      exportedPdf.response.headers.get("content-disposition"),
+      /^attachment; filename=".+\.pdf"; filename\*=UTF-8''.+\.pdf$/
+    );
+    assert.equal(exportedPdf.buffer.toString("utf8"), pdfBytes.toString("utf8"));
   } finally {
     await app.stop();
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -404,7 +416,10 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
     );
     assert.equal(exportedZip.response.statusCode, 200);
     assert.equal(exportedZip.response.headers["content-type"], "application/zip");
-    assert.match(exportedZip.response.headers["content-disposition"], /attachment; filename=".+\.zip"/);
+    assert.match(
+      exportedZip.response.headers["content-disposition"],
+      /^attachment; filename=".+\.zip"; filename\*=UTF-8''.+\.zip$/
+    );
     assert.ok(exportedZip.buffer.length > 100);
 
     const missingPdf = await binaryRequest(baseUrl, "/api/export/pdf");

@@ -61,6 +61,9 @@ const local = {
   pinnedCompileErrors: [],
   pinnedCompileWarnings: [],
   clearedWarningVersion: null,
+  updateInfo: null,
+  updateCheckStarted: false,
+  updateDismissedVersion: localStorage.getItem("localleaf.updateDismissedVersion") || "",
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
 };
@@ -320,6 +323,25 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+function downloadFileName(name, extension) {
+  const base = String(name || "LocalLeaf Project")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
+    .replace(/\s+/g, "_")
+    .replace(/\.+$/g, "")
+    .slice(0, 80);
+  return `${base || "LocalLeaf_Project"}${extension}`;
+}
+
+function triggerDownload(url, filename) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 function icon(name) {
   const icons = {
     plus: uiGlyph("plus"),
@@ -362,7 +384,8 @@ function editorToolIcon(name) {
     complete: `<svg ${attrs}><path d="M14 4 9 20" /><path d="M17 6h3" /><path d="M18.5 4.5v3" /><path d="M4 17h3" /><path d="M5.5 15.5v3" /></svg>`,
     search: `<svg ${attrs}><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>`,
     files: `<svg ${attrs}><path d="M4 6.5h6l2 2h8v9.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6.5Z" /><path d="M4 10h16" /></svg>`,
-    chat: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`
+    chat: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`,
+    edit: `<svg ${attrs}><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" /><path d="m13.5 8.5 3 3" /></svg>`
   };
   return icons[name] || "";
 }
@@ -662,6 +685,54 @@ function showEditorJoinRequest(request) {
   });
 }
 
+function shouldShowUpdateToast() {
+  if (isGuestClient()) return false;
+  if (!local.updateInfo?.updateAvailable || !local.updateInfo.latestVersion) return false;
+  if (local.updateDismissedVersion === local.updateInfo.latestVersion) return false;
+  return !["join", "waiting"].includes(route().view);
+}
+
+function updateToastMarkup() {
+  const info = local.updateInfo || {};
+  const targetUrl = info.downloadUrl || info.releaseUrl || "https://github.com/sethwhenton/localleaf/releases/latest";
+  return `
+    <section class="update-toast" role="status" aria-live="polite" aria-label="LocalLeaf update available">
+      <div class="update-toast-icon">${icon("download")}</div>
+      <div class="update-toast-copy">
+        <strong>Update available</strong>
+        <span>LocalLeaf v${escapeHtml(info.latestVersion)} is ready. You are on v${escapeHtml(info.currentVersion || "")}.</span>
+      </div>
+      <a class="btn btn-primary update-toast-action" href="${escapeHtml(targetUrl)}" target="_blank" rel="noopener">Update</a>
+      <button class="icon-button update-toast-close" data-dismiss-update title="Later" aria-label="Dismiss update notice">x</button>
+    </section>
+  `;
+}
+
+function renderUpdateToast() {
+  document.querySelector(".update-toast")?.remove();
+  if (!shouldShowUpdateToast()) return;
+  app.insertAdjacentHTML("beforeend", updateToastMarkup());
+  document.querySelector("[data-dismiss-update]")?.addEventListener("click", () => {
+    local.updateDismissedVersion = local.updateInfo.latestVersion;
+    localStorage.setItem("localleaf.updateDismissedVersion", local.updateDismissedVersion);
+    document.querySelector(".update-toast")?.remove();
+  });
+}
+
+async function checkForUpdates() {
+  if (isGuestClient() || local.updateCheckStarted) return;
+  local.updateCheckStarted = true;
+  try {
+    const info = await api("/api/update/latest");
+    if (info?.updateAvailable) {
+      local.updateInfo = info;
+      renderUpdateToast();
+    }
+  } catch {
+    local.updateInfo = null;
+  }
+}
+
 function joinView(code) {
   const hostName = local.appState?.session?.users?.find((user) => user.role === "host")?.name || "the host";
   return `
@@ -702,8 +773,9 @@ function waitingView() {
 
 function endedView() {
   const canDownload = Boolean(local.appState?.project?.files?.length);
+  const zipName = downloadFileName(local.appState?.project?.name, ".zip");
   const downloadButton = canDownload
-    ? `<a class="btn ended-download-button" href="${authUrl("/api/export/zip")}" download>${icon("download")}<span>Download ZIP</span></a>`
+    ? `<a class="btn ended-download-button" href="${authUrl("/api/export/zip")}" download="${escapeHtml(zipName)}">${icon("download")}<span>Download ZIP</span></a>`
     : "";
   return `
     <section class="empty-state">
@@ -938,6 +1010,14 @@ function latexUnescapeText(value) {
     .replace(/\\~\{\}/g, "~");
 }
 
+function stripLatexAssetQuotes(value) {
+  const text = String(value || "").trim();
+  if ((text.startsWith("\"") && text.endsWith("\"")) || (text.startsWith("'") && text.endsWith("'"))) {
+    return text.slice(1, -1);
+  }
+  return text;
+}
+
 function stripLatexComments(line) {
   let escaped = false;
   let result = "";
@@ -1091,7 +1171,7 @@ function parseLatexFigureBlock(text) {
   if (!image && !caption && !label) return null;
   return {
     type: "figure",
-    image: latexUnescapeText(image?.[1] || ""),
+    image: stripLatexAssetQuotes(latexUnescapeText(image?.[1] || "")),
     caption: latexUnescapeText(caption?.[1] || ""),
     label: label?.[1] || "fig:placeholder",
     placement: figureBegin?.[1] || "h",
@@ -1127,15 +1207,15 @@ function visualTableToLatex(block) {
 }
 
 function visualFigureToLatex(block) {
-  const image = latexEscapeText(block.querySelector(".visual-figure-image")?.textContent.trim() || "image.png");
+  const image = stripLatexAssetQuotes(block.querySelector(".visual-figure-image")?.textContent.trim() || "image.png").replace(/"/g, "");
   const caption = latexEscapeText(block.querySelector(".visual-figure-caption")?.textContent.trim() || "Caption");
-  const label = latexEscapeText(block.querySelector(".visual-figure-label")?.textContent.trim() || "fig:placeholder");
-  const placement = block.dataset.figurePlacement || "h";
-  const options = block.dataset.figureOptions || "width=0.8\\linewidth";
+  const label = block.querySelector(".visual-figure-label")?.textContent.trim() || "fig:placeholder";
+  const placement = block.querySelector(".visual-figure-placement")?.textContent.trim() || block.dataset.figurePlacement || "h";
+  const options = block.querySelector(".visual-figure-options")?.textContent.trim() || block.dataset.figureOptions || "width=0.8\\linewidth";
   return [
     `\\begin{figure}[${placement}]`,
     "  \\centering",
-    `  \\includegraphics[${options}]{${image}}`,
+    `  \\includegraphics[${options}]{"${image}"}`,
     `  \\caption{${caption}}`,
     `  \\label{${label}}`,
     "\\end{figure}"
@@ -1236,6 +1316,15 @@ function visualLineNumberMarkup(block) {
   return `<span class="visual-line-number" aria-hidden="true">${escapeHtml(block.line || "")}</span>`;
 }
 
+function visualTextareaRows(text, minimum = 8, maximum = 28) {
+  const lineCount = String(text || "").split("\n").length;
+  return Math.max(minimum, Math.min(maximum, lineCount + 1));
+}
+
+function visualRawEditorLines(text, minimum = 9, maximum = 24) {
+  return visualTextareaRows(text, minimum, maximum);
+}
+
 function visualBlockMarkup(block, index) {
   if (block.type === "heading") {
     const label = block.label
@@ -1316,16 +1405,14 @@ function visualBlockMarkup(block, index) {
     return `
       <section class="visual-block visual-figure-block" data-visual-type="figure" data-figure-placement="${escapeHtml(placement)}" data-figure-options="${escapeHtml(options)}">
         ${visualLineNumberMarkup(block)}
-        <div class="visual-block-body visual-figure-shell visual-latex-object">
-          <button type="button" class="visual-object-edit-button" title="Edit figure source" aria-label="Edit figure source">${editorToolIcon("monospace")}</button>
-          <div class="visual-object-source">
-            ${visualSourceLineMarkup(`\\begin{figure}[${placement}]`)}
+        <div class="visual-block-body visual-figure-shell visual-latex-object visual-source-like-object">
+          <button type="button" class="visual-object-edit-button" title="Edit figure source" aria-label="Edit figure source">${editorToolIcon("edit")}</button>
+          <div class="visual-object-source visual-figure-source">
+            <div class="visual-source-line"><span class="visual-latex-command">\\begin</span>{figure}[<span class="visual-figure-placement" contenteditable="true" spellcheck="false">${escapeHtml(placement)}</span>]</div>
             ${visualSourceLineMarkup("  \\centering")}
-          </div>
-          <div class="visual-object-inline-line visual-figure-line"><span class="visual-latex-command">\\includegraphics</span>[${escapeHtml(options)}]{<span class="visual-figure-image" contenteditable="true" spellcheck="false">${escapeHtml(block.image || "image.png")}</span>}</div>
-          <div class="visual-object-inline-line visual-caption-line"><span class="visual-latex-command">\\caption</span>{<span class="visual-figure-caption" contenteditable="true" spellcheck="true">${escapeHtml(block.caption || "Caption")}</span>}</div>
-          <div class="visual-object-inline-line visual-label-line"><span class="visual-latex-command">\\label</span>{<span class="visual-figure-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "fig:placeholder")}</span>}</div>
-          <div class="visual-object-source">
+            <div class="visual-object-inline-line visual-figure-line"><span class="visual-latex-command">\\includegraphics</span>[<span class="visual-figure-options" contenteditable="true" spellcheck="false">${escapeHtml(options)}</span>]{"<span class="visual-figure-image" contenteditable="true" spellcheck="false">${escapeHtml(block.image || "image.png")}</span>"}</div>
+            <div class="visual-object-inline-line visual-caption-line"><span class="visual-latex-command">\\caption</span>{<span class="visual-figure-caption" contenteditable="true" spellcheck="true">${escapeHtml(block.caption || "Caption")}</span>}</div>
+            <div class="visual-object-inline-line visual-label-line"><span class="visual-latex-command">\\label</span>{<span class="visual-figure-label" contenteditable="true" spellcheck="false">${escapeHtml(block.label || "fig:placeholder")}</span>}</div>
             ${visualSourceLineMarkup("\\end{figure}")}
           </div>
         </div>
@@ -1333,10 +1420,11 @@ function visualBlockMarkup(block, index) {
     `;
   }
   return `
-    <section class="visual-block visual-raw-block visual-source-block" data-visual-type="raw">
+    <section class="visual-block visual-raw-block visual-source-block ${block.expanded ? "visual-expanded-source-block" : ""}" data-visual-type="raw">
       ${visualLineNumberMarkup(block)}
       <div class="visual-block-body visual-raw-shell visual-source-shell">
-        <textarea class="visual-raw-input" spellcheck="false" aria-label="Raw LaTeX block ${index + 1}">${escapeHtml(block.text)}</textarea>
+        <div class="visual-raw-code-mount" data-visual-raw-code style="--raw-editor-lines:${visualRawEditorLines(block.text, block.expanded ? 10 : 7)}">${escapeHtml(block.text)}</div>
+        <textarea class="visual-raw-input" rows="${visualTextareaRows(block.text, block.expanded ? 10 : 7)}" spellcheck="false" aria-label="Raw LaTeX block ${index + 1}">${escapeHtml(block.text)}</textarea>
       </div>
     </section>
   `;
@@ -1360,7 +1448,7 @@ function visualDomToLatex(host) {
       const input = block.querySelector(".visual-paragraph-input");
       blocks.push(blockContentToLatex(input || block));
     } else if (type === "raw") {
-      blocks.push(block.querySelector(".visual-raw-input")?.value || "");
+      blocks.push(visualRawBlockText(block));
     } else if (type === "blank") {
       blocks.push("");
     } else if (type === "table") {
@@ -1808,6 +1896,8 @@ function hideExportModal() {
 function showExportModal() {
   hideExportModal();
   const projectName = local.appState?.project?.name || "LocalLeaf project";
+  const zipName = downloadFileName(projectName, ".zip");
+  const pdfName = downloadFileName(projectName, ".pdf");
   const zipUrl = authUrl("/api/export/zip");
   const pdfUrl = authUrl("/api/export/pdf");
   const shell = document.querySelector(".editor-shell") || app;
@@ -1822,14 +1912,14 @@ function showExportModal() {
           <button class="icon-button" data-close-export title="Close export dialog" aria-label="Close export dialog">x</button>
         </div>
         <div class="export-options">
-          <a class="export-card" href="${zipUrl}" download>
+          <a class="export-card" href="${zipUrl}" download="${escapeHtml(zipName)}">
             <strong>Source ZIP</strong>
             <span>All project files, folders, images, bibliography, and LaTeX sources.</span>
           </a>
-          <a class="export-card" href="${pdfUrl}" download>
+          <button class="export-card export-card-button" type="button" data-export-pdf>
             <strong>Compiled PDF</strong>
-            <span>The latest successful PDF compile. Recompile first if it is out of date.</span>
-          </a>
+            <span>Save, recompile, then download a real PDF file.</span>
+          </button>
         </div>
       </section>
     </div>
@@ -1840,10 +1930,32 @@ function showExportModal() {
     if (event.target === modal) hideExportModal();
   });
   modal?.querySelector("[data-close-export]")?.addEventListener("click", hideExportModal);
-  modal?.querySelectorAll(".export-card").forEach((link) => {
+  modal?.querySelectorAll("a.export-card").forEach((link) => {
     link.addEventListener("click", () => {
       setTimeout(hideExportModal, 250);
     });
+  });
+  modal?.querySelector("[data-export-pdf]")?.addEventListener("click", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.classList.add("is-working");
+    button.querySelector("span").textContent = "Compiling before download...";
+    try {
+      await compile();
+      if (local.appState?.compile?.status !== "success") {
+        button.disabled = false;
+        button.classList.remove("is-working");
+        button.querySelector("span").textContent = "Fix compile errors, then try again.";
+        return;
+      }
+      triggerDownload(pdfUrl, pdfName);
+      setTimeout(hideExportModal, 250);
+    } catch (error) {
+      button.disabled = false;
+      button.classList.remove("is-working");
+      button.querySelector("span").textContent = error.message || "Could not export PDF.";
+    }
   });
 }
 
@@ -1887,7 +1999,7 @@ function editorView() {
               <span class="save-glyph" aria-hidden="true"></span>
               <span>Save</span>
             </button>
-            <a class="btn editor-download-button" id="downloadZipButton" href="${authUrl("/api/export/zip")}" download title="Download the full project as a ZIP" aria-label="Download the full project as a ZIP">
+            <a class="btn editor-download-button" id="downloadZipButton" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" title="Download the full project as a ZIP" aria-label="Download the full project as a ZIP">
               ${icon("download")}
               <span>ZIP</span>
             </a>
@@ -2176,6 +2288,9 @@ async function refreshEditorSuggestions() {
   try {
     local.editorSuggestions = await api("/api/editor/suggestions");
     local.codeEditor?.setSuggestions(local.editorSuggestions);
+    document.querySelectorAll(".visual-raw-code-mount").forEach((mount) => {
+      mount.__localLeafEditor?.setSuggestions(local.editorSuggestions);
+    });
   } catch {
     local.editorSuggestions = local.editorSuggestions || {};
   }
@@ -2185,6 +2300,107 @@ function currentEditorText() {
   if (local.codeEditor) return local.codeEditor.getText();
   if (local.visualEditor) return local.visualEditor.getText();
   return local.editorContent;
+}
+
+function isVisualEditableTarget(target) {
+  if (!target) return false;
+  if (target.classList?.contains("visual-raw-input")) return true;
+  return Boolean(target.closest?.("[contenteditable='true']"));
+}
+
+function insertTabIntoVisualTarget(target) {
+  const tabText = "  ";
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    const start = target.selectionStart ?? target.value.length;
+    const end = target.selectionEnd ?? start;
+    target.value = `${target.value.slice(0, start)}${tabText}${target.value.slice(end)}`;
+    target.selectionStart = target.selectionEnd = start + tabText.length;
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+  document.execCommand("insertText", false, tabText);
+}
+
+function visualRawBlockText(block) {
+  const codeMount = block?.querySelector?.(".visual-raw-code-mount");
+  const codeEditor = codeMount?.__localLeafEditor;
+  if (codeEditor) return codeEditor.getText();
+  return block?.querySelector?.(".visual-raw-input")?.value || codeMount?.textContent || "";
+}
+
+function syncVisualRawFallback(block) {
+  const fallback = block?.querySelector?.(".visual-raw-input");
+  if (fallback) fallback.value = visualRawBlockText(block);
+}
+
+function destroyVisualRawEditors(host) {
+  host?.querySelectorAll?.(".visual-raw-code-mount").forEach((mount) => {
+    mount.__localLeafEditor?.destroy();
+  });
+}
+
+function collapseVisualRawBlockIfStructured(block, getText) {
+  if (!block?.isConnected || !block.classList.contains("visual-expanded-source-block")) return false;
+  syncVisualRawFallback(block);
+  const source = visualRawBlockText(block);
+  const figure = parseLatexFigureBlock(source);
+  const table = figure ? null : parseLatexTableBlock(source);
+  const structured = figure || table;
+  if (!structured) return false;
+  const line = block.querySelector(".visual-line-number")?.textContent.trim() || "";
+  destroyVisualRawEditors(block);
+  block.outerHTML = visualBlockMarkup({ ...structured, line }, 0);
+  markEditorChanged(getText());
+  return true;
+}
+
+function scheduleVisualRawCollapse(block, getText, documentNode) {
+  clearTimeout(block.__localLeafCollapseTimer);
+  block.__localLeafCollapseTimer = setTimeout(() => {
+    if (!block.isConnected || !documentNode?.contains(block)) return;
+    const active = document.activeElement;
+    if (active && block.contains(active)) return;
+    collapseVisualRawBlockIfStructured(block, getText);
+  }, 180);
+}
+
+function mountVisualRawEditors(host, getText, handleInput, documentNode) {
+  host.querySelectorAll(".visual-raw-code-mount").forEach((mount) => {
+    if (mount.__localLeafEditor) return;
+    const block = mount.closest(".visual-raw-block");
+    const shell = mount.closest(".visual-raw-shell");
+    const fallback = block?.querySelector(".visual-raw-input");
+    const source = fallback?.value || mount.textContent || "";
+    if (!window.LocalLeafEditor) {
+      mount.textContent = "";
+      fallback?.addEventListener("input", handleInput);
+      fallback?.addEventListener("blur", () => scheduleVisualRawCollapse(block, getText, documentNode));
+      return;
+    }
+
+    shell?.classList.add("has-code-editor");
+    mount.textContent = "";
+    const editor = window.LocalLeafEditor.mount({
+      parent: mount,
+      value: source,
+      filePath: local.selectedFile,
+      suggestions: local.editorSuggestions || {},
+      visibleLineBreaks: false,
+      onChange: () => {
+        syncVisualRawFallback(block);
+        markEditorChanged(getText());
+      },
+      onFocus: () => {
+        local.editingNow = true;
+      },
+      onBlur: () => {
+        local.editingNow = false;
+        scheduleVisualRawCollapse(block, getText, documentNode);
+      }
+    });
+    mount.__localLeafEditor = editor;
+    syncVisualRawFallback(block);
+  });
 }
 
 function mountCodeEditor() {
@@ -2224,6 +2440,7 @@ function mountVisualEditor() {
   const handleInput = () => markEditorChanged(getText());
   const handleKeyDown = (event) => {
     const target = event.target;
+    if (target?.closest?.(".visual-raw-code-mount .cm-editor")) return;
     const mod = event.ctrlKey || event.metaKey;
     if (mod) {
       const key = event.key.toLowerCase();
@@ -2233,6 +2450,12 @@ function mountVisualEditor() {
         execVisualCommand(command);
         return;
       }
+    }
+    if (event.key === "Tab" && isVisualEditableTarget(target)) {
+      event.preventDefault();
+      insertTabIntoVisualTarget(target);
+      markEditorChanged(getText());
+      return;
     }
     if (event.key !== "Enter" || !target?.classList?.contains("visual-paragraph-input")) return;
     event.preventDefault();
@@ -2256,7 +2479,17 @@ function mountVisualEditor() {
     } else if (editObject) {
       const block = editObject.closest(".visual-block");
       if (block?.dataset.visualType === "figure") {
-        block.outerHTML = visualBlockMarkup({ type: "raw", text: visualFigureToLatex(block), line: "" }, 0);
+        const line = block.querySelector(".visual-line-number")?.textContent.trim() || "";
+        block.outerHTML = visualBlockMarkup({ type: "raw", text: visualFigureToLatex(block), line, expanded: true }, 0);
+        mountVisualRawEditors(host, getText, handleInput, documentNode);
+        const codeMount = host.querySelector(".visual-expanded-source-block .visual-raw-code-mount");
+        const textarea = host.querySelector(".visual-expanded-source-block .visual-raw-input");
+        if (codeMount?.__localLeafEditor) {
+          codeMount.__localLeafEditor.focus();
+        } else if (textarea) {
+          textarea.focus();
+          textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+        }
         markEditorChanged(getText());
       }
     }
@@ -2282,13 +2515,13 @@ function mountVisualEditor() {
   documentNode?.addEventListener("change", handleChange);
   documentNode?.addEventListener("focusin", handleFocusIn);
   documentNode?.addEventListener("focusout", handleFocusOut);
-  host.querySelectorAll(".visual-raw-input").forEach((input) => {
-    input.addEventListener("input", handleInput);
-  });
+  mountVisualRawEditors(host, getText, handleInput, documentNode);
+  refreshEditorSuggestions();
 
   local.visualEditor = {
     host,
     destroy() {
+      destroyVisualRawEditors(host);
       documentNode?.removeEventListener("input", handleInput);
       documentNode?.removeEventListener("keydown", handleKeyDown);
       documentNode?.removeEventListener("click", handleClick);
@@ -2300,10 +2533,9 @@ function mountVisualEditor() {
     getText,
     applyRemoteText(text) {
       if (!documentNode) return;
+      destroyVisualRawEditors(host);
       documentNode.innerHTML = visualLatexMarkup(text);
-      host.querySelectorAll(".visual-raw-input").forEach((input) => {
-        input.addEventListener("input", handleInput);
-      });
+      mountVisualRawEditors(host, getText, handleInput, documentNode);
     },
     exec(command, value) {
       return execVisualCommand(command, value);
@@ -3482,6 +3714,7 @@ async function render() {
   bindSession();
   bindEditor();
   settleEditorUi();
+  renderUpdateToast();
 }
 
 function connectEvents() {
@@ -3607,8 +3840,9 @@ window.addEventListener("keydown", (event) => {
 loadState()
   .then(() => {
     connectEvents();
-    render();
+    return render();
   })
+  .then(checkForUpdates)
   .catch((error) => {
     app.innerHTML = `<section class="empty-state"><div class="ended-card"><h1>LocalLeaf failed to start</h1><p class="error">${escapeHtml(error.message)}</p></div></section>`;
   });

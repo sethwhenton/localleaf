@@ -2872,6 +2872,8 @@ button:disabled {
 .visual-figure-image:focus,
 .visual-figure-caption:focus,
 .visual-figure-label:focus,
+.visual-figure-placement:focus,
+.visual-figure-options:focus,
 .visual-table-caption:focus,
 .visual-table-label:focus {
   border-color: rgba(255, 103, 0, 0.78);
@@ -2914,23 +2916,55 @@ button:disabled {
 }
 
 .visual-figure-shell {
-  padding: 0 44px 8px 0;
+  padding: 12px 58px 12px 14px;
+}
+
+.visual-source-like-object {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+.visual-source-like-object .visual-object-edit-button {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.visual-source-like-object:hover .visual-object-edit-button,
+.visual-source-like-object:focus-within .visual-object-edit-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.visual-figure-source {
+  min-width: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
 }
 
 .visual-object-edit-button {
   position: absolute;
-  right: 12px;
+  right: 14px;
   top: 50%;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   transform: translateY(-50%);
   border: 0;
   border-radius: 50%;
-  background: #202733;
+  background: #1f2733;
   color: #fff;
   display: grid;
   place-items: center;
   cursor: pointer;
+  box-shadow: 0 10px 24px rgba(15, 20, 28, 0.22);
+}
+
+.visual-object-edit-button:hover,
+.visual-object-edit-button:focus-visible {
+  transform: translateY(-50%) scale(1.04);
+  outline: none;
+  background: #151c27;
 }
 
 .visual-object-edit-button .tool-icon {
@@ -2940,7 +2974,9 @@ button:disabled {
 
 .visual-figure-image,
 .visual-figure-caption,
-.visual-figure-label {
+.visual-figure-label,
+.visual-figure-placement,
+.visual-figure-options {
   display: inline;
   min-height: 0;
   outline: none;
@@ -2949,7 +2985,9 @@ button:disabled {
   padding: 1px 3px;
 }
 
-.visual-figure-image {
+.visual-figure-image,
+.visual-figure-placement,
+.visual-figure-options {
   border-color: rgba(255, 103, 0, 0.38);
   color: #17120e;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -2957,8 +2995,9 @@ button:disabled {
 }
 
 .visual-figure-caption {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 15px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  color: #241b15;
 }
 
 .visual-figure-label {
@@ -2969,21 +3008,34 @@ button:disabled {
 
 .visual-object-inline-line {
   min-height: 24px;
-  padding: 1px 10px;
+  padding: 0;
   color: #111;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .visual-caption-line {
+  padding-left: 0;
   text-align: center;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 15px;
 }
 
 .visual-label-line {
+  padding-left: 0;
   text-align: center;
   color: #00708f;
+}
+
+.visual-figure-image:focus {
+  display: inline-block;
+  min-width: min(440px, calc(100% - 190px));
+  border-color: #ff3b30;
+  background: #fff;
+  box-shadow: none;
 }
 
 .visual-raw-shell {
@@ -2991,6 +3043,56 @@ button:disabled {
   border-radius: 0;
   overflow: hidden;
   background: #f8f8f8;
+}
+
+.visual-raw-code-mount {
+  display: none;
+  width: 100%;
+  height: min(520px, max(220px, calc(var(--raw-editor-lines, 9) * 22px + 34px)));
+  min-height: 0;
+  background: transparent;
+}
+
+.visual-raw-shell.has-code-editor .visual-raw-code-mount {
+  display: block;
+}
+
+.visual-raw-shell.has-code-editor .visual-raw-input {
+  display: none;
+}
+
+.visual-raw-code-mount .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+
+.visual-raw-code-mount .cm-scroller {
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.visual-raw-code-mount .cm-gutters {
+  display: none;
+}
+
+.visual-raw-code-mount .cm-content {
+  padding: 10px 12px;
+}
+
+.visual-raw-code-mount .cm-line {
+  padding: 0;
+}
+
+.visual-expanded-source-block {
+  margin-top: 12px;
+  margin-bottom: 16px;
+}
+
+.visual-expanded-source-block .visual-raw-shell {
+  border: 1px solid rgba(255, 103, 0, 0.22);
+  border-radius: 8px;
+  background: #fffdfb;
+  box-shadow: 0 10px 28px rgba(37, 24, 13, 0.08);
 }
 
 .visual-raw-head {
@@ -3012,14 +3114,19 @@ button:disabled {
 
 .visual-raw-input {
   width: 100%;
-  min-height: 38px;
+  min-height: 150px;
   border: 0;
   outline: none;
   resize: vertical;
-  padding: 8px 10px;
+  padding: 10px 12px;
   background: transparent;
   color: #3b2e25;
-  font: 12px/1.6 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font: 13px/1.65 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  overflow: auto;
+}
+
+.visual-expanded-source-block .visual-raw-input {
+  min-height: 240px;
 }
 
 .editor-textarea {
@@ -3908,8 +4015,25 @@ button:disabled {
   background: #fff;
 }
 
+.export-card-button {
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+  appearance: none;
+}
+
 .export-card:hover {
   border-color: rgba(255, 103, 0, 0.55);
+  background: #fff8f3;
+}
+
+.export-card:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+.export-card.is-working {
+  border-color: rgba(255, 103, 0, 0.45);
   background: #fff8f3;
 }
 
@@ -4071,6 +4195,59 @@ button:disabled {
   font-size: 12px;
 }
 
+.update-toast {
+  position: fixed;
+  right: 22px;
+  top: 62px;
+  z-index: 32;
+  width: min(410px, calc(100vw - 44px));
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto 32px;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 103, 0, 0.34);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 60px rgba(26, 18, 10, 0.16);
+}
+
+.update-toast-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--orange-dark);
+  background: var(--orange-soft);
+}
+
+.update-toast-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.update-toast-copy strong {
+  font-size: 13px;
+}
+
+.update-toast-copy span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.update-toast-action {
+  height: 32px;
+  padding: 0 14px;
+}
+
+.update-toast-close {
+  width: 32px;
+  height: 32px;
+}
+
 .error {
   color: var(--red);
   font-size: 13px;
@@ -4102,7 +4279,17 @@ button:disabled {
     grid-template-columns: 32px minmax(0, 1fr);
   }
 
-  .join-toast .btn {
+  .update-toast {
+    left: 12px;
+    right: 12px;
+    top: 58px;
+    width: auto;
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .join-toast .btn,
+  .update-toast .btn,
+  .update-toast-close {
     grid-column: span 1;
     width: 100%;
   }
