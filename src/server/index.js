@@ -16,6 +16,7 @@ const {
   isImageFile,
   isTextFile,
   listProjectFiles,
+  normalizeRelativePath,
   resolveProjectPath
 } = require("./safe-path");
 const { compileProject, commandExists, detectCompiler } = require("./compiler");
@@ -31,6 +32,7 @@ try {
 const ROOT = path.resolve(__dirname, "../..");
 const PUBLIC_DIR = path.join(ROOT, "public");
 const SAMPLE_PROJECT = path.join(ROOT, "samples", "thesis");
+const DEFAULT_PROJECT_NAME = "LocalLeaf Project";
 const DEFAULT_PORT = Number(process.env.PORT || 4317);
 const MAX_USERS = 5;
 const TUNNEL_VERIFY_ATTEMPTS = 12;
@@ -345,7 +347,7 @@ function ensureDefaultProjectRoot(options = {}) {
     return path.resolve(options.projectRoot);
   }
 
-  const projectRoot = path.join(getUserProjectsDir(), "Thesis Draft");
+  const projectRoot = path.join(getUserProjectsDir(), DEFAULT_PROJECT_NAME);
   if (!fs.existsSync(projectRoot)) {
     copyDirectory(SAMPLE_PROJECT, projectRoot);
   }
@@ -411,6 +413,16 @@ function importZipProject(zipBuffer, filename) {
     throw new Error("ZIP imported, but no .tex files were found.");
   }
 
+  return projectRoot;
+}
+
+function createNewTemplateProject() {
+  const projectRoot = uniqueDirectory(getUserProjectsDir(), DEFAULT_PROJECT_NAME);
+  copyDirectory(SAMPLE_PROJECT, projectRoot);
+  const mainFile = detectMainFile(projectRoot);
+  if (!mainFile) {
+    throw new Error("Starter template is missing a .tex file.");
+  }
   return projectRoot;
 }
 
@@ -526,6 +538,71 @@ function createProjectZip(projectRoot, projectName) {
   }
 
   return { tempRoot, zipPath };
+}
+
+function createItemZip(projectRoot, relativePath) {
+  const fullPath = resolveProjectPath(projectRoot, relativePath);
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-item-export-"));
+  const zipPath = path.join(tempRoot, safeDownloadName(path.basename(fullPath), ".zip"));
+
+  try {
+    const zip = new AdmZip();
+    addDirectoryToZip(zip, fullPath, path.dirname(fullPath));
+    zip.writeZip(zipPath);
+  } catch (error) {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    throw new Error(error.message || "Could not create folder ZIP.");
+  }
+
+  return { tempRoot, zipPath };
+}
+
+function contentTypeForFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return {
+    ".bib": "text/plain; charset=utf-8",
+    ".bst": "text/plain; charset=utf-8",
+    ".cfg": "text/plain; charset=utf-8",
+    ".cls": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".dat": "text/plain; charset=utf-8",
+    ".def": "text/plain; charset=utf-8",
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".json": "application/json; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".py": "text/x-python; charset=utf-8",
+    ".sty": "text/plain; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".tex": "text/x-tex; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".webp": "image/webp"
+  }[ext] || "application/octet-stream";
+}
+
+function copyProjectItem(fromPath, toPath) {
+  const fromStats = fs.statSync(fromPath);
+  fs.mkdirSync(path.dirname(toPath), { recursive: true });
+  if (fromStats.isDirectory()) {
+    fs.cpSync(fromPath, toPath, {
+      recursive: true,
+      filter(source) {
+        try {
+          return !fs.lstatSync(source).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      }
+    });
+    return;
+  }
+  if (!fromStats.isFile()) {
+    throw new Error("Only files and folders can be copied.");
+  }
+  fs.copyFileSync(fromPath, toPath);
 }
 
 function normalizeVersion(value) {
@@ -1657,6 +1734,49 @@ function createLocalLeafServer(options = {}) {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/file/download") {
+      if (!canReadProject(state, request, url)) {
+        deny(response, "Join approval is required before downloading project files.");
+        return;
+      }
+      const filePath = url.searchParams.get("path") || "";
+      const fullPath = resolveProjectPath(state.project.root, filePath);
+      if (!fs.existsSync(fullPath)) {
+        jsonResponse(response, 404, { error: "File or folder was not found." });
+        return;
+      }
+      const stats = fs.statSync(fullPath);
+      if (stats.isDirectory()) {
+        let exported;
+        try {
+          exported = createItemZip(state.project.root, filePath);
+        } catch (error) {
+          jsonResponse(response, 500, { error: error.message });
+          return;
+        }
+        response.writeHead(200, attachmentHeaders(path.basename(exported.zipPath), "application/zip"));
+        const stream = fs.createReadStream(exported.zipPath);
+        const cleanup = () => fs.rmSync(exported.tempRoot, { recursive: true, force: true });
+        stream.on("close", cleanup);
+        stream.on("error", cleanup);
+        stream.pipe(response);
+        return;
+      }
+      if (!stats.isFile()) {
+        jsonResponse(response, 400, { error: "Only files and folders can be downloaded." });
+        return;
+      }
+      const contentType = contentTypeForFile(fullPath);
+      streamFileResponse(
+        request,
+        response,
+        fullPath,
+        contentType,
+        attachmentHeaders(path.basename(fullPath), contentType)
+      );
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/project/open") {
       if (!isHostRequest(request)) {
         deny(response);
@@ -1669,6 +1789,19 @@ function createLocalLeafServer(options = {}) {
         return;
       }
       setProjectRoot(state, nextRoot);
+      broadcastState(state);
+      jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/project/new") {
+      if (!isHostRequest(request)) {
+        deny(response);
+        return;
+      }
+      const projectRoot = createNewTemplateProject();
+      setProjectRoot(state, projectRoot);
+      state.compile.logs = [`[LocalLeaf] New project created from the starter template: ${state.project.name}`];
       broadcastState(state);
       jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
       return;
@@ -1823,7 +1956,7 @@ function createLocalLeafServer(options = {}) {
 
     if (request.method === "POST" && url.pathname === "/api/file/rename") {
       if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before renaming files.");
+        deny(response, "Editor approval is required before renaming project items.");
         return;
       }
       const body = await readBody(request);
@@ -1831,15 +1964,26 @@ function createLocalLeafServer(options = {}) {
       const to = String(body.to || "").trim();
       const fromPath = resolveProjectPath(state.project.root, from);
       const toPath = resolveProjectPath(state.project.root, to);
-      if (!fs.existsSync(fromPath) || !fs.statSync(fromPath).isFile()) {
-        jsonResponse(response, 404, { error: "Source file was not found." });
+      if (!fs.existsSync(fromPath)) {
+        jsonResponse(response, 404, { error: "Source file or folder was not found." });
         return;
       }
       if (fs.existsSync(toPath)) {
-        jsonResponse(response, 409, { error: "A file already exists at the new path." });
+        jsonResponse(response, 409, { error: "A file or folder already exists at the new path." });
         return;
       }
-      if (!isTextFile(toPath) && !isImageFile(toPath)) {
+      const fromStats = fs.statSync(fromPath);
+      if (fromStats.isDirectory()) {
+        const cleanFrom = normalizeRelativePath(from);
+        const cleanTo = normalizeRelativePath(to);
+        if (cleanTo === cleanFrom || cleanTo.startsWith(`${cleanFrom}/`)) {
+          jsonResponse(response, 400, { error: "A folder cannot be moved inside itself." });
+          return;
+        }
+      } else if (!fromStats.isFile()) {
+        jsonResponse(response, 400, { error: "Only files and folders can be renamed." });
+        return;
+      } else if (!isTextFile(toPath) && !isImageFile(toPath)) {
         jsonResponse(response, 400, { error: "Only text-based files and image assets can be renamed." });
         return;
       }
@@ -1847,6 +1991,47 @@ function createLocalLeafServer(options = {}) {
       fs.renameSync(fromPath, toPath);
       if (state.project.mainFile === from) {
         state.project.mainFile = to;
+      } else if (fromStats.isDirectory() && state.project.mainFile?.startsWith(`${from}/`)) {
+        state.project.mainFile = `${to}${state.project.mainFile.slice(from.length)}`;
+      }
+      refreshProject(state);
+      broadcastState(state);
+      jsonResponse(response, 200, { ok: true, path: to });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/file/copy") {
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before copying project items.");
+        return;
+      }
+      const body = await readBody(request);
+      const from = String(body.from || "").trim();
+      const to = String(body.to || "").trim();
+      const fromPath = resolveProjectPath(state.project.root, from);
+      const toPath = resolveProjectPath(state.project.root, to);
+      if (!fs.existsSync(fromPath)) {
+        jsonResponse(response, 404, { error: "Source file or folder was not found." });
+        return;
+      }
+      if (fs.existsSync(toPath)) {
+        jsonResponse(response, 409, { error: "A file or folder already exists at the destination path." });
+        return;
+      }
+      const fromStats = fs.statSync(fromPath);
+      if (fromStats.isDirectory()) {
+        const cleanFrom = normalizeRelativePath(from);
+        const cleanTo = normalizeRelativePath(to);
+        if (cleanTo === cleanFrom || cleanTo.startsWith(`${cleanFrom}/`)) {
+          jsonResponse(response, 400, { error: "A folder cannot be copied inside itself." });
+          return;
+        }
+      }
+      try {
+        copyProjectItem(fromPath, toPath);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+        return;
       }
       refreshProject(state);
       broadcastState(state);
@@ -1862,16 +2047,27 @@ function createLocalLeafServer(options = {}) {
       const body = await readBody(request);
       const filePath = String(body.path || "").trim();
       const fullPath = resolveProjectPath(state.project.root, filePath);
-      if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
-        jsonResponse(response, 404, { error: "File was not found." });
+      if (!fs.existsSync(fullPath)) {
+        jsonResponse(response, 404, { error: "File or folder was not found." });
         return;
       }
-      if (state.project.files.filter((file) => file.type === "text").length <= 1) {
+      const targetStats = fs.statSync(fullPath);
+      const deletingDirectory = targetStats.isDirectory();
+      if (!targetStats.isFile() && !deletingDirectory) {
+        jsonResponse(response, 400, { error: "Only files and folders can be deleted." });
+        return;
+      }
+      const remainingTextFiles = state.project.files.filter((file) => {
+        if (file.type !== "text") return false;
+        return deletingDirectory ? !file.path.startsWith(`${filePath}/`) : file.path !== filePath;
+      });
+      if (remainingTextFiles.length < 1) {
         jsonResponse(response, 400, { error: "Cannot delete the last editable file." });
         return;
       }
-      fs.unlinkSync(fullPath);
-      if (state.project.mainFile === filePath) {
+      if (deletingDirectory) fs.rmSync(fullPath, { recursive: true, force: true });
+      else fs.unlinkSync(fullPath);
+      if (state.project.mainFile === filePath || state.project.mainFile?.startsWith(`${filePath}/`)) {
         state.project.mainFile = detectMainFile(state.project.root);
       }
       refreshProject(state);

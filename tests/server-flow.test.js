@@ -265,6 +265,44 @@ test("serves compiled PDFs with byte-range support for embedded viewers", async 
   }
 });
 
+test("creates new projects from the bundled starter template", async () => {
+  const previousProjectsDir = process.env.LOCALLEAF_PROJECTS_DIR;
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-new-projects-"));
+  const initialRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-initial-"));
+  process.env.LOCALLEAF_PROJECTS_DIR = projectsRoot;
+  fs.writeFileSync(path.join(initialRoot, "main.tex"), "\\documentclass{article}\\begin{document}Initial\\end{document}", "utf8");
+
+  const app = createLocalLeafServer({ port: 0, projectRoot: initialRoot, autoStartTunnel: false });
+  app.server.listen(0);
+  await once(app.server, "listening");
+  const port = app.server.address().port;
+  app.state.port = port;
+  const baseUrl = `http://localhost:${port}`;
+
+  try {
+    const created = await request(baseUrl, "/api/project/new", { method: "POST", body: {} });
+    assert.equal(created.project.name, "LocalLeaf Project");
+    assert.equal(created.project.mainFile, "main.tex");
+    assert.match(created.project.root, /LocalLeaf Project$/);
+    assert.ok(created.project.files.some((file) => file.path === "main.tex" && file.type === "text"));
+    assert.ok(created.project.files.some((file) => file.path === "references.bib" && file.type === "text"));
+    assert.ok(created.project.files.some((file) => file.path === "assets/localleaf-icon.png" && file.type === "image"));
+    assert.match(fs.readFileSync(path.join(created.project.root, "main.tex"), "utf8"), /\\includegraphics\[width=0\.28\\linewidth\]\{assets\/localleaf-icon\.png\}/);
+
+    const second = await request(baseUrl, "/api/project/new", { method: "POST", body: {} });
+    assert.equal(second.project.name, "LocalLeaf Project 2");
+  } finally {
+    await app.stop();
+    fs.rmSync(projectsRoot, { recursive: true, force: true });
+    fs.rmSync(initialRoot, { recursive: true, force: true });
+    if (previousProjectsDir === undefined) {
+      delete process.env.LOCALLEAF_PROJECTS_DIR;
+    } else {
+      process.env.LOCALLEAF_PROJECTS_DIR = previousProjectsDir;
+    }
+  }
+});
+
 test("supports the host, join, edit, compile, chat, import, stop flow", async () => {
   const previousForcePreview = process.env.LOCALLEAF_FORCE_PREVIEW;
   const previousProjectsDir = process.env.LOCALLEAF_PROJECTS_DIR;
@@ -332,7 +370,7 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
 
     guestWs.send(JSON.stringify({ type: "open_file", filePath: "main.tex" }));
     await waitForWsMessage(guestWs, "file_opened", (payload) => payload.filePath === "main.tex");
-    const sharedText = fs.readFileSync(path.join(tempRoot, "main.tex"), "utf8").replace("A Sample Thesis", "A Shared Thesis");
+    const sharedText = fs.readFileSync(path.join(tempRoot, "main.tex"), "utf8").replace("A LocalLeaf Starter Project", "A Shared Thesis");
     const guestUpdate = waitForWsMessage(guestWs, "file_updated", (payload) => payload.filePath === "main.tex");
     hostWs.send(JSON.stringify({ type: "edit", filePath: "main.tex", newText: sharedText }));
     assert.match((await guestUpdate).newText, /A Shared Thesis/);
@@ -380,6 +418,45 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
       body: { from: "appendix.tex", to: "chapters/appendix.tex" }
     });
     assert.equal(renamed.path, "chapters/appendix.tex");
+
+    const renamedFolder = await request(baseUrl, "/api/file/rename", {
+      method: "POST",
+      body: { from: "chapters", to: "sections" }
+    });
+    assert.equal(renamedFolder.path, "sections");
+    state = await request(baseUrl, "/api/state");
+    assert.ok(state.project.files.some((item) => item.path === "sections" && item.type === "directory"));
+    assert.ok(state.project.files.some((item) => item.path === "sections/appendix.tex" && item.type === "text"));
+
+    const copiedFile = await request(baseUrl, "/api/file/copy", {
+      method: "POST",
+      body: { from: "sections/appendix.tex", to: "appendix copy.tex" }
+    });
+    assert.equal(copiedFile.path, "appendix copy.tex");
+    assert.match(fs.readFileSync(path.join(tempRoot, "appendix copy.tex"), "utf8"), /Real file ops work/);
+
+    const copiedFolder = await request(baseUrl, "/api/file/copy", {
+      method: "POST",
+      body: { from: "sections", to: "sections copy" }
+    });
+    assert.equal(copiedFolder.path, "sections copy");
+    assert.ok(fs.existsSync(path.join(tempRoot, "sections copy", "appendix.tex")));
+
+    const duplicateCopy = await rawRequest(baseUrl, "/api/file/copy", {
+      method: "POST",
+      body: { from: "sections/appendix.tex", to: "appendix copy.tex" }
+    });
+    assert.equal(duplicateCopy.response.status, 409);
+
+    const downloadedFile = await binaryRequest(baseUrl, "/api/file/download?path=appendix%20copy.tex");
+    assert.equal(downloadedFile.response.status, 200);
+    assert.match(downloadedFile.response.headers.get("content-disposition"), /attachment; filename="appendix copy\.tex"/);
+    assert.match(downloadedFile.buffer.toString("utf8"), /Real file ops work/);
+
+    const downloadedFolder = await binaryRequest(baseUrl, "/api/file/download?path=sections%20copy");
+    assert.equal(downloadedFolder.response.status, 200);
+    assert.equal(downloadedFolder.response.headers.get("content-type"), "application/zip");
+    assert.ok(downloadedFolder.buffer.length > 100);
 
     const folder = await request(baseUrl, "/api/folder/create", {
       method: "POST",

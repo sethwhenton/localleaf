@@ -1,27 +1,95 @@
-\documentclass{article}
+\documentclass[11pt]{report}
 \usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
 \usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{natbib}
 
-\title{A Sample Thesis}
-\author{LocalLeaf Host}
-\date{May 15, 2024}
+\newcommand{\LocalLeaf}{\textsc{LocalLeaf}}
+\newcommand{\parencite}[1]{\citep{#1}}
+\newcommand{\textcite}[1]{\citet{#1}}
+\newcommand{\printbibliography}{\bibliographystyle{plainnat}\bibliography{references}}
+\renewcommand{\arraystretch}{1.15}
+
+\title{A LocalLeaf Starter Project}
+\author{Your Team Name}
+\date{\today}
 
 \begin{document}
 \maketitle
+\tableofcontents
 
-\section{Introduction}
-This is a sample LocalLeaf project. Edit this paragraph from two browser windows to test live collaboration.
+\part{Project Draft}
 
-\input{introduction.tex}
+\chapter{Starter Tour}
+\label{chap:starter-tour}
 
-\section{Methods}
-\input{methods.tex}
+\section{Write together}
+\label{sec:write-together}
 
-\section{Results}
-LocalLeaf supports host-led sessions, browser-based collaborators, synchronized editing, project import, compilation, preview, and chat.
+Welcome to \LocalLeaf. This starter file is a small, compile-safe tour of the LaTeX commands that LocalLeaf helps you insert and autocomplete. Edit this paragraph, press Ctrl+S, and recompile to see the PDF update.
 
-\section{Conclusion}
-LocalLeaf keeps the project on the host computer and lets collaborators join through a temporary browser session.
+\subsection{Formatting examples}
+Use \textbf{bold}, \textit{italic}, \emph{emphasis}, \underline{underline}, and \texttt{monospace} text when you need different styles. You can also add a link with \href{https://www.latex-project.org/}{the LaTeX Project} or write a plain URL with \url{https://www.latex-project.org/}. Footnotes work too.\footnote{This is a sample footnote.}
+
+\subsubsection{References and citations}
+This section is labeled as \texttt{sec:write-together}. You can reference it with Section~\ref{sec:write-together}, page~\pageref{sec:write-together}, or \autoref{sec:write-together}. Equations can be referenced with \eqref{eq:sample-model}. Citations work with \cite{localleaf2026}, \citep{knuth1984}, \citet{localleaf2026}, \parencite{knuth1984}, and \textcite{localleaf2026}.
+
+\paragraph{Lists}
+Use itemized lists for quick notes:
+\begin{itemize}
+  \item Open a project.
+  \item Host a session.
+  \item Invite collaborators.
+\end{itemize}
+
+Use numbered lists for ordered steps:
+\begin{enumerate}
+  \item Edit the source.
+  \item Save the file.
+  \item Recompile the PDF.
+\end{enumerate}
+
+\section{Math examples}
+Inline math uses \( \alpha + \beta = \gamma \). Display math can use fractions, roots, sums, integrals, Greek letters, comparison symbols, multiplication, infinity, and auto-sized delimiters:
+\begin{equation}
+  f(\theta) = \left( \frac{\sqrt{x^2 + y^2}}{1 + \lambda} \right)
+  + \sum_{i=1}^{n} i
+  + \int_{0}^{\infty} e^{-t}\,dt,
+  \qquad \mu \neq \pi,\ \sigma \leq \omega,\ \delta \geq \epsilon,\ x \times y
+  \label{eq:sample-model}
+\end{equation}
+
+\section{Figures and tables}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.28\linewidth]{assets/localleaf-icon.png}
+  \caption{A local image included from the project folder.}
+  \label{fig:localleaf-icon}
+\end{figure}
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lll}
+    \toprule
+    Feature & Command & Purpose \\
+    \midrule
+    Figure & \texttt{\textbackslash includegraphics} & Add an image \\
+    Table & \texttt{\textbackslash begin\{tabular\}} & Compare values \\
+    Reference & \texttt{\textbackslash label} and \texttt{\textbackslash ref} & Link ideas \\
+    \bottomrule
+  \end{tabular}
+  \caption{A simple table using the \texttt{booktabs} package.}
+  \label{tab:starter-table}
+\end{table}
+
+\section{Where to go next}
+Try typing a backslash in the editor to open command suggestions. Then replace this text with your real introduction, methods, results, and conclusion.
+
+\printbibliography
 
 \end{document}

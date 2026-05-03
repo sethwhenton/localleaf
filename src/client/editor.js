@@ -533,6 +533,7 @@ function createEditor(parent, options = {}) {
       link: () => insertRaw("\\href{}{text}", 6),
       ref: () => insertRaw("\\ref{}", 5),
       cite: () => insertRaw("\\cite{}", 6),
+      math: () => insertRaw("\\(x\\)", 2),
       comment: () => runAndFocus(toggleLineComment),
       figure: () =>
         insertRaw("\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{}\n  \\caption{}\n  \\label{fig:}\n\\end{figure}", 73),

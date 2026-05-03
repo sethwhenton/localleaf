@@ -1,4 +1,5 @@
 const clientId = crypto.randomUUID();
+localStorage.setItem("localleaf.editorMode", "code");
 
 const app = document.querySelector("#app");
 const local = {
@@ -27,8 +28,16 @@ const local = {
   savePromise: null,
   codeEditor: null,
   visualEditor: null,
-  editorMode: localStorage.getItem("localleaf.editorMode") === "visual" ? "visual" : "code",
+  editorMode: "code",
   editorSuggestions: null,
+  selectedFolder: "",
+  draggedTreePath: "",
+  draggedTreeKind: "",
+  treeClipboardPath: "",
+  treeContextMenu: null,
+  renamingTreePath: "",
+  renamingTreeKind: "",
+  renameSaving: false,
   collapsedFolders: new Set(),
   imagesCollapsed: true,
   fileFilter: "",
@@ -56,6 +65,8 @@ const local = {
   searchStatus: "",
   visualSearchIndex: 0,
   tablePickerOpen: false,
+  editorStyleMenuOpen: false,
+  visualAutocomplete: null,
   visualInsertAfterBlock: null,
   pendingPreviewScroll: null,
   pinnedCompileErrors: [],
@@ -63,6 +74,7 @@ const local = {
   clearedWarningVersion: null,
   updateInfo: null,
   updateCheckStarted: false,
+  updateChecking: false,
   updateDismissedVersion: localStorage.getItem("localleaf.updateDismissedVersion") || "",
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
@@ -371,6 +383,7 @@ function editorToolIcon(name) {
     redo: `<svg ${attrs}><path d="M15 8h4V4" /><path d="M18.5 8.5A8 8 0 1 0 17 18" /></svg>`,
     monospace: `<svg ${attrs}><path d="M8 8 4 12l4 4" /><path d="m16 8 4 4-4 4" /><path d="m13.5 6-3 12" /></svg>`,
     symbol: `<svg ${attrs}><path d="M7 18h10" /><path d="M8 18c2.6-2.4 3-4.4 3-7 0-2.7-1.3-4-3.2-4C6 7 5 8.2 5 10" /><path d="M16 18c-2.6-2.4-3-4.4-3-7 0-2.7 1.3-4 3.2-4C18 7 19 8.2 19 10" /></svg>`,
+    math: `<svg ${attrs}><path d="M7 5h10" /><path d="M8 19h9" /><path d="M16 5 9 12l7 7" /><path d="M13.5 12H20" /></svg>`,
     link: `<svg ${attrs}><path d="M10 13a5 5 0 0 0 7.1 0l1.2-1.2a5 5 0 0 0-7.1-7.1L10.5 5.4" /><path d="M14 11a5 5 0 0 0-7.1 0l-1.2 1.2a5 5 0 0 0 7.1 7.1l.7-.7" /></svg>`,
     ref: `<svg ${attrs}><path d="M7 4h10v16l-5-3-5 3V4Z" /><path d="M10 8h4" /><path d="M10 11h4" /></svg>`,
     cite: `<svg ${attrs}><path d="M8 10h4v7H5v-4c0-3.3 1.7-5.3 5-6" /><path d="M17 10h2v7h-7v-4c0-3.3 1.7-5.3 5-6" /></svg>`,
@@ -384,6 +397,11 @@ function editorToolIcon(name) {
     complete: `<svg ${attrs}><path d="M14 4 9 20" /><path d="M17 6h3" /><path d="M18.5 4.5v3" /><path d="M4 17h3" /><path d="M5.5 15.5v3" /></svg>`,
     search: `<svg ${attrs}><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>`,
     files: `<svg ${attrs}><path d="M4 6.5h6l2 2h8v9.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6.5Z" /><path d="M4 10h16" /></svg>`,
+    newFile: `<svg ${attrs}><path d="M6 3.5h8l4 4V20H6V3.5Z" /><path d="M14 3.5V8h4" /><path d="M9 13h6" /><path d="M12 10v6" /></svg>`,
+    newFolder: `<svg ${attrs}><path d="M3.5 7h6l1.7 2H20v8.5a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2V7Z" /><path d="M12 14h5" /><path d="M14.5 11.5v5" /></svg>`,
+    upload: `<svg ${attrs}><path d="M12 16V5" /><path d="m8 9 4-4 4 4" /><path d="M5 18.5h14" /></svg>`,
+    rename: `<svg ${attrs}><path d="M4 19h7" /><path d="M13.5 5.5 18.5 10.5" /><path d="M6 15.5 15.8 5.7a2 2 0 0 1 2.8 2.8L8.8 18.3 5 19l1-3.5Z" /></svg>`,
+    delete: `<svg ${attrs}><path d="M5 7h14" /><path d="M9 7V5h6v2" /><path d="M8 10v8" /><path d="M12 10v8" /><path d="M16 10v8" /><path d="M7 7l1 14h8l1-14" /></svg>`,
     chat: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`,
     edit: `<svg ${attrs}><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" /><path d="m13.5 8.5 3 3" /></svg>`
   };
@@ -435,23 +453,34 @@ function activeFileForUser(userId) {
   return local.collabPresence.find((item) => item.userId === userId)?.filePath || "";
 }
 
+function updateCheckButtonMarkup(id, label = "Check for updates", extraClass = "") {
+  return `
+    <button class="btn update-check-button ${extraClass}" id="${escapeHtml(id)}" data-check-updates data-default-label="${escapeHtml(label)}" type="button" title="Check for updates" aria-label="Check for updates">
+      ${icon("download")}
+      <span data-update-label>${local.updateChecking ? "Checking..." : escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
 function homeView() {
   const state = local.appState;
+  const hasLiveSession = state.session.status === "live";
+  const sessionActionLabel = hasLiveSession ? "Manage Current Session" : "Host Online Session";
   return windowShell(`
-    <div class="home-app-page">
-      <header class="home-app-head">
-        ${brand()}
-        <button class="btn btn-outline-orange" id="hostSession">${uiGlyph("users")} Host Online Session</button>
-      </header>
+      <div class="home-app-page">
+        <header class="home-app-head">
+          ${brand()}
+          ${updateCheckButtonMarkup("homeCheckUpdates")}
+        </header>
 
       <div class="home-app-grid">
         <section class="home-actions-panel">
           <div class="section-title">Start</div>
           <div class="home-action-grid">
-            <button class="btn" id="newProject">${icon("plus")} New Project</button>
-            <button class="btn" id="openProject">${uiGlyph("folder")} Open Project</button>
+            <button class="btn btn-primary" id="newProject">${icon("plus")} New Project</button>
             <button class="btn" id="importZip">${uiGlyph("folder")} Import ZIP Project</button>
-            <button class="btn btn-primary" id="openCurrent">Open Current Project</button>
+            <button class="btn" id="openCurrent">Open Current Project</button>
+            <button class="btn btn-outline-orange" id="homeSessionAction">${uiGlyph("users")} ${sessionActionLabel}</button>
           </div>
         </section>
 
@@ -464,7 +493,6 @@ function homeView() {
             </div>
             <span>${escapeHtml(state.project.sizeLabel)}</span>
           </button>
-          <button class="btn btn-ghost open-another-button" id="openAnother">${uiGlyph("folder")} Open Another Project...</button>
         </section>
       </div>
     </div>
@@ -556,7 +584,7 @@ function sessionView() {
   return windowShell(`
     <div class="session-share-page">
       <header class="session-share-head">
-        <button class="icon-button project-back-icon" id="backProject" title="Back to project" aria-label="Back to project">
+        <button class="icon-button project-back-icon" id="backHome" title="Back to home" aria-label="Back to home">
           <span class="chevron-left" aria-hidden="true"></span>
         </button>
         <div>
@@ -564,9 +592,7 @@ function sessionView() {
           <h2>Session Management</h2>
           <p>${isLive ? `${escapeHtml(project.name)} is online. Copy the invite link or open the editor.` : `Start hosting when you are ready to invite collaborators into ${escapeHtml(project.name)}.`}</p>
         </div>
-        ${isLive
-          ? `<button class="btn btn-primary" id="openEditorFromSession" ${project.mainFile ? "" : "disabled"}>Open Editor</button>`
-          : `<button class="btn btn-primary" data-start-session>${uiGlyph("users")} Host Online Session</button>`}
+        ${!isLive ? `<button class="btn btn-primary" data-start-session>${uiGlyph("users")} Host Online Session</button>` : ""}
       </header>
 
       ${pendingMarkup}
@@ -610,6 +636,7 @@ function sessionView() {
               <div class="session-health-row"><span>Latency</span><b>${escapeHtml(session.network.latency)}</b></div>
             </div>
           </section>
+
         </main>
 
         <aside class="session-share-side">
@@ -640,6 +667,7 @@ function sessionView() {
           </section>
         </aside>
       </div>
+      ${isLive ? `<button class="btn btn-primary session-open-editor-wide" id="openEditorFromSession" ${project.mainFile ? "" : "disabled"}>Open Editor</button>` : ""}
     </div>
   `, { rail: true, active: "session", dashboard: true, wide: true });
 }
@@ -719,17 +747,57 @@ function renderUpdateToast() {
   });
 }
 
-async function checkForUpdates() {
-  if (isGuestClient() || local.updateCheckStarted) return;
-  local.updateCheckStarted = true;
+function updateUpdateCheckButtons() {
+  document.querySelectorAll("[data-check-updates]").forEach((button) => {
+    button.disabled = local.updateChecking;
+    const label = button.querySelector("[data-update-label]");
+    if (label) label.textContent = local.updateChecking ? "Checking..." : button.dataset.defaultLabel || "Check for updates";
+  });
+}
+
+function markUpdateButtonFeedback(button, message) {
+  if (!button || !message) return;
+  const label = button.querySelector("[data-update-label]");
+  if (!label) return;
+  const defaultLabel = button.dataset.defaultLabel || "Check for updates";
+  label.textContent = message;
+  setTimeout(() => {
+    if (!local.updateChecking) label.textContent = defaultLabel;
+  }, 1500);
+}
+
+async function checkForUpdates(options = {}) {
+  const manual = Boolean(options.manual);
+  if (isGuestClient() || local.updateChecking) return "skipped";
+  if (!manual && local.updateCheckStarted) return "skipped";
+  if (!manual) local.updateCheckStarted = true;
+  local.updateChecking = true;
+  if (manual) updateUpdateCheckButtons();
   try {
     const info = await api("/api/update/latest");
+    if (!info || info.error) return "silent";
+    local.updateInfo = info;
     if (info?.updateAvailable) {
-      local.updateInfo = info;
+      if (manual) {
+        local.updateDismissedVersion = "";
+        localStorage.removeItem("localleaf.updateDismissedVersion");
+      }
       renderUpdateToast();
+      return "available";
     }
+    return "current";
   } catch {
-    local.updateInfo = null;
+    return "silent";
+  } finally {
+    local.updateChecking = false;
+    if (manual) updateUpdateCheckButtons();
+  }
+}
+
+async function manualCheckForUpdates(event) {
+  const result = await checkForUpdates({ manual: true });
+  if (result === "current") {
+    markUpdateButtonFeedback(event?.currentTarget, "Up to date");
   }
 }
 
@@ -795,11 +863,21 @@ function endedView() {
 }
 
 function outlineFromContent(content) {
-  const matches = [...String(content || "").matchAll(/\\section\*?\{([^}]*)\}/g)];
-  if (!matches.length) {
-    return ["No sections found"];
-  }
-  return matches.map((match) => match[1].trim()).filter(Boolean);
+  const levels = {
+    chapter: 0,
+    section: 1,
+    subsection: 2,
+    subsubsection: 3,
+    paragraph: 4,
+    subparagraph: 5
+  };
+  const matches = [...String(content || "").matchAll(/\\(chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?\{([^}]*)\}/g)];
+  return matches.map((match, index) => ({
+    id: `outline-${index}`,
+    level: levels[match[1]] ?? 1,
+    command: match[1],
+    title: match[2].trim()
+  })).filter((item) => item.title);
 }
 
 function fileMeta(filePath = local.selectedFile) {
@@ -820,6 +898,131 @@ function isPdfAsset(item) {
 
 function isBrowserImageAsset(item) {
   return item?.type === "image" && /\.(png|jpe?g|gif|webp|svg)$/i.test(item.path);
+}
+
+function treeItem(pathValue) {
+  return local.appState?.project?.files?.find((item) => item.path === pathValue) || null;
+}
+
+function pathParts(pathValue = "") {
+  return String(pathValue || "").replace(/\\/g, "/").split("/").filter(Boolean);
+}
+
+function pathBasename(pathValue = "") {
+  const parts = pathParts(pathValue);
+  return parts[parts.length - 1] || "";
+}
+
+function pathDirname(pathValue = "") {
+  const parts = pathParts(pathValue);
+  parts.pop();
+  return parts.join("/");
+}
+
+function joinProjectPath(basePath = "", childPath = "") {
+  return [...pathParts(basePath), ...pathParts(childPath)].join("/");
+}
+
+function selectedDirectoryPath() {
+  const folder = treeItem(local.selectedFolder);
+  if (folder?.type === "directory") return folder.path;
+  const selected = treeItem(local.selectedFile);
+  return selected ? pathDirname(selected.path) : "";
+}
+
+function selectedTreeEntry() {
+  const folder = treeItem(local.selectedFolder);
+  if (folder?.type === "directory") return folder;
+  return treeItem(local.selectedFile);
+}
+
+function projectPathExists(pathValue, exceptPath = "") {
+  return local.appState?.project?.files?.some((item) => item.path === pathValue && item.path !== exceptPath);
+}
+
+function renameNameParts(item = {}) {
+  const name = item.name || pathBasename(item.path);
+  if (item.type === "directory") {
+    return { stem: name, extension: "" };
+  }
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === name.length - 1) {
+    return { stem: name, extension: "" };
+  }
+  return {
+    stem: name.slice(0, dotIndex),
+    extension: name.slice(dotIndex)
+  };
+}
+
+function normalizeRenameStem(value, extension = "") {
+  let stem = String(value || "").trim();
+  if (extension && stem.toLowerCase().endsWith(extension.toLowerCase())) {
+    stem = stem.slice(0, -extension.length).trimEnd();
+  }
+  return stem;
+}
+
+function uniqueProjectPath(directory, preferredName) {
+  const cleanDirectory = pathParts(directory).join("/");
+  const cleanName = String(preferredName || "").trim() || "new file.tex";
+  const extMatch = cleanName.match(/(\.[^./\\]+)$/);
+  const extension = extMatch ? extMatch[1] : "";
+  const baseName = extension ? cleanName.slice(0, -extension.length) : cleanName;
+  let candidateName = cleanName;
+  let index = 2;
+  while (projectPathExists(joinProjectPath(cleanDirectory, candidateName))) {
+    candidateName = `${baseName} ${index}${extension}`;
+    index += 1;
+  }
+  return joinProjectPath(cleanDirectory, candidateName);
+}
+
+function copyNameForItem(item) {
+  const name = item?.name || pathBasename(item?.path);
+  if (!name) return "copy";
+  if (item?.type === "directory") return `${name} copy`;
+  const parts = renameNameParts(item);
+  return `${parts.stem} copy${parts.extension}`;
+}
+
+function uniqueCopyPath(sourcePath, targetFolder) {
+  const item = treeItem(sourcePath);
+  return uniqueProjectPath(targetFolder, copyNameForItem(item));
+}
+
+function canCopyTreeItem(sourcePath) {
+  const source = treeItem(sourcePath);
+  return Boolean(source && source.type !== "binary");
+}
+
+function canPasteTreeItem(sourcePath, targetFolder = "") {
+  const source = treeItem(sourcePath);
+  if (!source || source.type === "binary") return false;
+  const target = targetFolder ? treeItem(targetFolder) : null;
+  if (targetFolder && target?.type !== "directory") return false;
+  if (source.type === "directory" && (targetFolder === source.path || targetFolder.startsWith(`${source.path}/`))) {
+    return false;
+  }
+  return true;
+}
+
+function renameInputMarkup(item) {
+  const parts = renameNameParts(item);
+  const label = item.name || pathBasename(item.path);
+  return `
+    <span class="tree-rename-wrap">
+      <input class="tree-rename-input"
+        data-rename-path="${escapeHtml(item.path)}"
+        data-rename-kind="${escapeHtml(item.type)}"
+        data-rename-extension="${escapeHtml(parts.extension)}"
+        value="${escapeHtml(parts.stem)}"
+        spellcheck="false"
+        autocomplete="off"
+        aria-label="Rename ${escapeHtml(label)}" />
+      ${parts.extension ? `<span class="tree-rename-extension">${escapeHtml(parts.extension)}</span>` : ""}
+    </span>
+  `;
 }
 
 function expandToFile(filePath) {
@@ -914,12 +1117,25 @@ function fileIconFor(item) {
 function renderTreeNode(node, selectedFile, depth = 0) {
   if (node.type === "directory") {
     const isCollapsed = local.collapsedFolders.has(node.path);
+    const isSelected = local.selectedFolder === node.path;
     const children = sortTreeNodes(node.children.values());
-    return `
-      <div class="tree-folder" data-depth="${depth}">
-        <button class="tree-folder-row folder-toggle" data-folder="${escapeHtml(node.path)}" style="--depth:${depth}">
+    const renameItem = {
+      path: node.path,
+      name: node.name,
+      type: "directory"
+    };
+      const nameMarkup = local.renamingTreePath === node.path ? renameInputMarkup(renameItem) : `<span class="folder-name">${escapeHtml(node.name)}</span>`;
+      return `
+        <div class="tree-folder" data-depth="${depth}">
+          <button class="tree-folder-row folder-toggle ${isSelected ? "active" : ""} ${depth > 0 ? "nested" : ""}"
+            data-folder="${escapeHtml(node.path)}"
+          data-drag-path="${escapeHtml(node.path)}"
+          data-drag-kind="directory"
+          data-drop-folder="${escapeHtml(node.path)}"
+          draggable="true"
+          style="--depth:${depth}">
           <span class="folder-caret">${isCollapsed ? ">" : "v"}</span>
-          <span class="folder-name">${escapeHtml(node.name)}</span>
+          ${nameMarkup}
           <span class="folder-count">${children.length}</span>
         </button>
         ${isCollapsed ? "" : `<div class="tree-children">${children.map((child) => renderTreeNode(child, selectedFile, depth + 1)).join("")}</div>`}
@@ -927,16 +1143,20 @@ function renderTreeNode(node, selectedFile, depth = 0) {
     `;
   }
 
-  const item = node.item;
-  const selectable = isEditableFile(item) || isImageAsset(item);
-  const disabled = selectable ? "" : "disabled";
-  return `
-    <button class="file-button tree-file ${item.path === selectedFile ? "active" : ""} ${item.type === "image" ? "image-file" : ""}"
+    const item = node.item;
+    const selectable = isEditableFile(item) || isImageAsset(item);
+    const labelMarkup = local.renamingTreePath === item.path ? renameInputMarkup(item) : `<span class="file-label">${escapeHtml(item.name)}</span>`;
+    return `
+      <button class="file-button tree-file ${item.path === selectedFile && !local.selectedFolder ? "active" : ""} ${item.type === "image" ? "image-file" : ""} ${selectable ? "" : "not-selectable"} ${depth > 0 ? "nested" : ""}"
       data-file="${escapeHtml(item.path)}"
       data-kind="${escapeHtml(item.type)}"
+      data-selectable="${selectable ? "1" : "0"}"
+      data-drag-path="${escapeHtml(item.path)}"
+      data-drag-kind="${escapeHtml(item.type)}"
       style="--depth:${depth}"
-      ${disabled}>
-      <span>${fileIconFor(item)}</span><span class="file-label">${escapeHtml(item.name)}</span>
+      draggable="true"
+      aria-disabled="${selectable ? "false" : "true"}">
+      <span>${fileIconFor(item)}</span>${labelMarkup}
     </button>
   `;
 }
@@ -963,16 +1183,56 @@ function renderImageGroup(files, selectedFile) {
         <span class="folder-name">Images</span>
         <span class="folder-count">${images.length}</span>
       </button>
-      ${local.imagesCollapsed ? "" : `<div class="tree-children">
-        ${images.map((item) => `
-          <button class="file-button tree-file image-file ${item.path === selectedFile ? "active" : ""}"
+        ${local.imagesCollapsed ? "" : `<div class="tree-children">
+          ${images.map((item) => `
+            <button class="file-button tree-file image-file ${item.path === selectedFile && !local.selectedFolder ? "active" : ""} nested"
             data-file="${escapeHtml(item.path)}"
             data-kind="image"
+            data-selectable="1"
+            data-drag-path="${escapeHtml(item.path)}"
+            data-drag-kind="image"
+            draggable="true"
             style="--depth:1">
-            <span>[img]</span><span class="file-label">${escapeHtml(item.path)}</span>
+            <span>[img]</span>${local.renamingTreePath === item.path ? renameInputMarkup(item) : `<span class="file-label">${escapeHtml(item.path)}</span>`}
           </button>
         `).join("")}
       </div>`}
+    </div>
+    `;
+  }
+
+function treeContextMenuMarkup() {
+  const menu = local.treeContextMenu;
+  if (!menu) return "";
+  const entry = menu.path ? treeItem(menu.path) : null;
+  const targetFolder = menu.targetFolder || "";
+  const clipboardReady = canPasteTreeItem(local.treeClipboardPath, targetFolder);
+  const canRename = Boolean(entry && entry.type !== "binary");
+  const canDownload = Boolean(entry);
+  const canCopy = Boolean(entry && canCopyTreeItem(entry.path));
+  const canSetMain = Boolean(entry && entry.type === "text" && entry.path.endsWith(".tex") && entry.path !== local.appState.project.mainFile);
+  const button = (action, label, options = {}) => `
+    <button type="button"
+      class="${options.danger ? "danger" : ""}"
+      data-tree-menu-action="${escapeHtml(action)}"
+      ${options.disabled ? "disabled" : ""}>
+      ${escapeHtml(label)}
+    </button>
+  `;
+  return `
+    <div class="tree-context-menu" style="left:${menu.x}px;top:${menu.y}px" role="menu" aria-label="File tree menu">
+      ${button("rename", "Rename", { disabled: !canRename })}
+      ${button("copy", "Copy", { disabled: !canCopy })}
+      ${button("paste", `Paste${local.treeClipboardPath ? ` ${pathBasename(local.treeClipboardPath)}` : ""}`, { disabled: !clipboardReady })}
+      ${button("download", "Download", { disabled: !canDownload })}
+      <div class="context-divider"></div>
+      ${button("set-main", "Set as main document", { disabled: !canSetMain })}
+      <div class="context-divider"></div>
+      ${button("delete", "Delete", { disabled: !entry, danger: true })}
+      <div class="context-divider"></div>
+      ${button("new-file", "New file")}
+      ${button("new-folder", "New folder")}
+      ${button("upload", "Upload")}
     </div>
   `;
 }
@@ -1055,23 +1315,80 @@ function latexEnvironmentBalance(lines) {
   return balance;
 }
 
+function latexDisplayMathBalance(lines) {
+  let balance = 0;
+  for (const line of lines) {
+    const source = stripLatexComments(line);
+    balance += (source.match(/\\\[/g) || []).length;
+    balance -= (source.match(/\\\]/g) || []).length;
+  }
+  return balance;
+}
+
 function visualRawBlockIsOpen(lines) {
   if (!lines.length) return false;
   return (
+    latexDisplayMathBalance(lines) > 0 ||
     latexBalance(lines, "{", "}") > 0 ||
     latexBalance(lines, "[", "]") > 0 ||
     latexEnvironmentBalance(lines) > 0
   );
 }
 
+const VISUAL_COMMAND_OPTIONS = [
+  { label: "\\(", insert: "\\(x\\)", detail: "math", info: "Inline formula", math: true },
+  { label: "\\[", insert: "\\[\nx\n\\]", detail: "math", info: "Display formula", math: true, display: true },
+  { label: "\\frac", insert: "\\frac{}{}", detail: "math", info: "Fraction", math: true },
+  { label: "\\sqrt", insert: "\\sqrt{}", detail: "math", info: "Square root", math: true },
+  { label: "\\sum", insert: "\\sum_{}^{}", detail: "math", info: "Summation", math: true },
+  { label: "\\int", insert: "\\int_{}^{}", detail: "math", info: "Integral", math: true },
+  { label: "\\alpha", insert: "\\alpha", detail: "math", info: "Greek alpha", math: true },
+  { label: "\\beta", insert: "\\beta", detail: "math", info: "Greek beta", math: true },
+  { label: "\\gamma", insert: "\\gamma", detail: "math", info: "Greek gamma", math: true },
+  { label: "\\delta", insert: "\\delta", detail: "math", info: "Greek delta", math: true },
+  { label: "\\theta", insert: "\\theta", detail: "math", info: "Greek theta", math: true },
+  { label: "\\lambda", insert: "\\lambda", detail: "math", info: "Greek lambda", math: true },
+  { label: "\\pi", insert: "\\pi", detail: "math", info: "Greek pi", math: true },
+  { label: "\\sigma", insert: "\\sigma", detail: "math", info: "Greek sigma", math: true },
+  { label: "\\omega", insert: "\\omega", detail: "math", info: "Greek omega", math: true },
+  { label: "\\times", insert: "\\times", detail: "math", info: "Multiplication", math: true },
+  { label: "\\leq", insert: "\\leq", detail: "math", info: "Less than or equal", math: true },
+  { label: "\\geq", insert: "\\geq", detail: "math", info: "Greater than or equal", math: true },
+  { label: "\\neq", insert: "\\neq", detail: "math", info: "Not equal", math: true },
+  { label: "\\infty", insert: "\\infty", detail: "math", info: "Infinity", math: true },
+  { label: "\\cite", insert: "\\cite{}", detail: "cite", info: "Citation" },
+  { label: "\\ref", insert: "\\ref{}", detail: "ref", info: "Reference" },
+  { label: "\\label", insert: "\\label{}", detail: "label", info: "Label" },
+  { label: "\\textbf", insert: "\\textbf{}", detail: "cmd", info: "Bold text" },
+  { label: "\\textit", insert: "\\textit{}", detail: "cmd", info: "Italic text" },
+  { label: "\\texttt", insert: "\\texttt{}", detail: "cmd", info: "Monospace text" }
+];
+
+function visualMathInlineHtml(content, mode = "inline") {
+  const text = String(content || "").trim() || "x";
+  return `<span class="visual-math-chip visual-math-${mode}" data-latex-math="${mode}" contenteditable="true" spellcheck="false">${visualLatexSourceHtml(text)}</span>`;
+}
+
 function visualInlineHtml(text) {
-  let html = escapeHtml(latexUnescapeText(text).replace(/\\\\\s*(?:\n|$)/g, "\uE000"));
+  const mathSegments = [];
+  const protectMath = (match, inlineA, inlineB, displayA) => {
+    const mode = displayA !== undefined ? "display" : "inline";
+    const content = inlineA ?? inlineB ?? displayA ?? "";
+    const marker = `\uE100${mathSegments.length}\uE101`;
+    mathSegments.push(visualMathInlineHtml(content, mode));
+    return marker;
+  };
+  const source = String(text || "")
+    .replace(/\\\(([\s\S]*?)\\\)|(?<!\\)\$([^$\n]+?)(?<!\\)\$|\\\[([\s\S]*?)\\\]/g, protectMath)
+    .replace(/\\\\\s*(?:\n|$)/g, "\uE000");
+  let html = escapeHtml(latexUnescapeText(source));
   html = html.replace(/\\textbf\{([^{}]*)\}/g, "<strong data-latex-inline=\"textbf\">$1</strong>");
   html = html.replace(/\\(?:textit|emph)\{([^{}]*)\}/g, "<em data-latex-inline=\"textit\">$1</em>");
   html = html.replace(/\\texttt\{([^{}]*)\}/g, "<code data-latex-inline=\"texttt\">$1</code>");
   html = html.replace(/\\(?:cite|citep|citet|parencite|textcite)\{([^{}]*)\}/g, "<span class=\"visual-chip\" data-latex-raw=\"\\\\cite{$1}\">cite:$1</span>");
   html = html.replace(/\\(?:ref|eqref|autoref|pageref)\{([^{}]*)\}/g, "<span class=\"visual-chip\" data-latex-raw=\"\\\\ref{$1}\">ref:$1</span>");
   html = html.replace(/\uE000/g, "<br />");
+  html = html.replace(/\uE100(\d+)\uE101/g, (_, index) => mathSegments[Number(index)] || "");
   return html;
 }
 
@@ -1090,6 +1407,11 @@ function inlineNodeToLatex(node) {
   if (node.nodeType !== Node.ELEMENT_NODE) return "";
   const raw = node.getAttribute("data-latex-raw");
   if (raw) return raw;
+  const mathMode = node.getAttribute("data-latex-math");
+  if (mathMode) {
+    const content = (node.textContent || "").trim() || "x";
+    return mathMode === "display" ? `\n\\[\n${content}\n\\]\n` : `\\(${content}\\)`;
+  }
   const children = [...node.childNodes].map(inlineNodeToLatex).join("");
   if (node.tagName === "BR") return "\\\\\n";
   if (node.tagName === "DIV" || node.tagName === "P") {
@@ -1179,6 +1501,30 @@ function parseLatexFigureBlock(text) {
   };
 }
 
+function parseLatexMathBlock(text) {
+  const source = String(text || "").trim();
+  const bracket = source.match(/^\\\[([\s\S]*?)\\\]$/);
+  if (bracket) {
+    return {
+      type: "math",
+      mode: "display",
+      syntax: "bracket",
+      text: bracket[1].trim() || "x"
+    };
+  }
+  const environment = source.match(/^\\begin\{(equation\*?|displaymath|align\*?|gather\*?|multline\*?)\}([\s\S]*?)\\end\{\1\}$/);
+  if (environment) {
+    return {
+      type: "math",
+      mode: "display",
+      syntax: "environment",
+      environment: environment[1],
+      text: environment[2].trim() || "x"
+    };
+  }
+  return null;
+}
+
 function visualTableToLatex(block) {
   const rows = [...block.querySelectorAll(".visual-table-grid tr")].map((row) =>
     [...row.querySelectorAll("td, th")].map((cell) => latexEscapeText(cell.textContent.trim()))
@@ -1206,6 +1552,16 @@ function visualTableToLatex(block) {
   ].filter(Boolean).join("\n");
 }
 
+function visualMathToLatex(block) {
+  const text = block.querySelector(".visual-math-input")?.textContent.trim() || "x";
+  const syntax = block.dataset.mathSyntax || "bracket";
+  const environment = block.dataset.mathEnvironment || "equation";
+  if (syntax === "environment") {
+    return [`\\begin{${environment}}`, text, `\\end{${environment}}`].join("\n");
+  }
+  return ["\\[", text, "\\]"].join("\n");
+}
+
 function visualFigureToLatex(block) {
   const image = stripLatexAssetQuotes(block.querySelector(".visual-figure-image")?.textContent.trim() || "image.png").replace(/"/g, "");
   const caption = latexEscapeText(block.querySelector(".visual-figure-caption")?.textContent.trim() || "Caption");
@@ -1220,6 +1576,27 @@ function visualFigureToLatex(block) {
     `  \\label{${label}}`,
     "\\end{figure}"
   ].join("\n");
+}
+
+function visualBlockToLatex(block) {
+  const type = block?.dataset?.visualType;
+  if (type === "heading") {
+    const level = block.dataset.headingLevel || "section";
+    const star = block.dataset.headingStarred === "1" ? "*" : "";
+    const text = block.querySelector(".visual-heading-input")?.textContent || "";
+    const label = block.querySelector(".visual-heading-label")?.textContent.trim() || "";
+    return `\\${level}${star}{${latexEscapeText(text.trim())}}${label ? `\\label{${label}}` : ""}`;
+  }
+  if (type === "paragraph") {
+    const input = block.querySelector(".visual-paragraph-input");
+    return blockContentToLatex(input || block);
+  }
+  if (type === "raw") return visualRawBlockText(block);
+  if (type === "blank") return "";
+  if (type === "table") return visualTableToLatex(block);
+  if (type === "math") return visualMathToLatex(block);
+  if (type === "figure") return visualFigureToLatex(block);
+  return "";
 }
 
 function keepVisualInsertionsInsideDocument(source) {
@@ -1250,9 +1627,11 @@ function parseVisualLatex(content) {
   const flushRaw = () => {
     if (!raw.length) return;
     const rawText = raw.join("\n");
-    const table = parseLatexTableBlock(rawText);
-    const figure = table ? null : parseLatexFigureBlock(rawText);
-    if (table) blocks.push({ ...table, line: rawStartLine });
+    const math = parseLatexMathBlock(rawText);
+    const table = math ? null : parseLatexTableBlock(rawText);
+    const figure = table || math ? null : parseLatexFigureBlock(rawText);
+    if (math) blocks.push({ ...math, line: rawStartLine });
+    else if (table) blocks.push({ ...table, line: rawStartLine });
     else if (figure) blocks.push({ ...figure, line: rawStartLine });
     else blocks.push({ type: "raw", text: rawText, line: rawStartLine });
     raw = [];
@@ -1261,6 +1640,7 @@ function parseVisualLatex(content) {
   const isPlainTextLine = (line) => {
     const trimmed = line.trim();
     if (!trimmed) return false;
+    if (/^\\\([^]*\\\)$/.test(trimmed) || /^(?<!\\)\$[^$]+(?<!\\)\$$/.test(trimmed)) return true;
     if (/^\\(?:textbf|textit|emph|texttt|cite|citep|citet|parencite|textcite|ref|eqref|autoref|pageref)\{/.test(trimmed)) return true;
     return !trimmed.startsWith("\\") && !trimmed.startsWith("%");
   };
@@ -1399,6 +1779,24 @@ function visualBlockMarkup(block, index) {
       </section>
     `;
   }
+  if (block.type === "math") {
+    const syntax = block.syntax || "bracket";
+    const environment = block.environment || "equation";
+    const opening = syntax === "environment" ? `\\begin{${environment}}` : "\\[";
+    const closing = syntax === "environment" ? `\\end{${environment}}` : "\\]";
+    return `
+      <section class="visual-block visual-math-block" data-visual-type="math" data-math-syntax="${escapeHtml(syntax)}" data-math-environment="${escapeHtml(environment)}">
+        ${visualLineNumberMarkup(block)}
+        <div class="visual-block-body visual-math-shell visual-latex-object visual-source-like-object">
+          <div class="visual-object-source visual-math-source">
+            ${visualSourceLineMarkup(opening)}
+            <div class="visual-math-input" contenteditable="true" spellcheck="false">${visualLatexSourceHtml(block.text || "x")}</div>
+            ${visualSourceLineMarkup(closing)}
+          </div>
+        </div>
+      </section>
+    `;
+  }
   if (block.type === "figure") {
     const placement = block.placement || "h";
     const options = block.options || "width=0.8\\linewidth";
@@ -1437,25 +1835,7 @@ function visualLatexMarkup(content) {
 function visualDomToLatex(host) {
   const blocks = [];
   host.querySelectorAll(".visual-block").forEach((block) => {
-    const type = block.dataset.visualType;
-    if (type === "heading") {
-      const level = block.dataset.headingLevel || "section";
-      const star = block.dataset.headingStarred === "1" ? "*" : "";
-      const text = block.querySelector(".visual-heading-input")?.textContent || "";
-      const label = block.querySelector(".visual-heading-label")?.textContent.trim() || "";
-      blocks.push(`\\${level}${star}{${latexEscapeText(text.trim())}}${label ? `\\label{${label}}` : ""}`);
-    } else if (type === "paragraph") {
-      const input = block.querySelector(".visual-paragraph-input");
-      blocks.push(blockContentToLatex(input || block));
-    } else if (type === "raw") {
-      blocks.push(visualRawBlockText(block));
-    } else if (type === "blank") {
-      blocks.push("");
-    } else if (type === "table") {
-      blocks.push(visualTableToLatex(block));
-    } else if (type === "figure") {
-      blocks.push(visualFigureToLatex(block));
-    }
+    blocks.push(visualBlockToLatex(block));
   });
   return keepVisualInsertionsInsideDocument(blocks.join("\n").replace(/\n{4,}/g, "\n\n\n"));
 }
@@ -1463,7 +1843,7 @@ function visualDomToLatex(host) {
 function editorBreadcrumbMarkup(file, selection) {
   const parts = String(file || "").split("/").filter(Boolean);
   const section = selection.canEditSelected
-    ? selection.outline.find((item) => item && item !== "No sections found")
+    ? selection.outline.find((item) => item?.title)?.title
     : "";
   const crumbs = parts.map((part, index) => {
     const isFile = index === parts.length - 1;
@@ -1473,21 +1853,29 @@ function editorBreadcrumbMarkup(file, selection) {
   return crumbs.length ? crumbs.join(`<i aria-hidden="true"></i>`) : `<span>No file selected</span>`;
 }
 
+function outlineTreeMarkup(outlineItems = [], currentTitle = "") {
+  if (!outlineItems.length) {
+    return `<div class="outline-empty">No sections found.</div>`;
+  }
+  return `
+    <div class="outline-tree" role="tree">
+      ${outlineItems.map((item, index) => {
+        const next = outlineItems[index + 1];
+        const hasChildren = Boolean(next && next.level > item.level);
+        const active = currentTitle && item.title === currentTitle;
+        return `
+          <button class="outline-row ${active ? "active" : ""}" type="button" role="treeitem" style="--outline-depth:${item.level}">
+            <span class="outline-caret" aria-hidden="true">${hasChildren ? "⌄" : ""}</span>
+            <span class="outline-title">${escapeHtml(item.title)}</span>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 function editorSurfaceMarkup(file, selectedMeta) {
   if (isEditableFile(selectedMeta)) {
-    if (local.editorMode === "visual") {
-      return `
-        <div class="editor-visual-mount" id="editorText" data-file="${escapeHtml(file)}">
-          <div class="visual-editor-intro">
-            <strong>Visual Editor</strong>
-            <span>Simple text and headings are editable here. Complex LaTeX stays in source blocks.</span>
-          </div>
-          <div class="visual-editor-document" id="visualEditorDocument">
-            ${visualLatexMarkup(local.editorContent)}
-          </div>
-        </div>
-      `;
-    }
     return `<div class="editor-code-mount" id="editorText" data-file="${escapeHtml(file)}"></div>`;
   }
   if (isPdfAsset(selectedMeta)) {
@@ -1497,6 +1885,39 @@ function editorSurfaceMarkup(file, selectedMeta) {
     return `<div class="asset-preview"><img src="${authUrl(`/api/asset?path=${encodeURIComponent(file)}`)}" alt="${escapeHtml(selectedMeta.name)}" /><span>${escapeHtml(file)}</span></div>`;
   }
   return `<div class="asset-preview asset-unsupported"><strong>Preview unavailable</strong><span>${escapeHtml(file || "No file selected")}</span></div>`;
+}
+
+const EDITOR_STYLE_OPTIONS = [
+  { value: "normal", label: "Normal text", className: "normal" },
+  { value: "section", label: "Section", className: "section" },
+  { value: "subsection", label: "Subsection", className: "subsection" },
+  { value: "subsubsection", label: "Subsubsection", className: "subsubsection" },
+  { value: "paragraph", label: "Paragraph", className: "paragraph" },
+  { value: "subparagraph", label: "Subparagraph", className: "subparagraph" }
+];
+
+function editorStyleDropdownMarkup() {
+  return `
+    <div class="editor-style-menu-wrap">
+      <button class="editor-style-button ${local.editorStyleMenuOpen ? "active" : ""}" id="editorStyleButton" type="button" title="Insert section command" aria-label="Insert section command" aria-haspopup="menu" aria-expanded="${local.editorStyleMenuOpen ? "true" : "false"}">
+        <span>Normal text</span>
+        <span class="style-chevron" aria-hidden="true"></span>
+      </button>
+      ${local.editorStyleMenuOpen ? editorStyleMenuMarkup() : ""}
+    </div>
+  `;
+}
+
+function editorStyleMenuMarkup() {
+  return `
+    <div class="editor-style-menu" role="menu" aria-label="Text style">
+      ${EDITOR_STYLE_OPTIONS.map((item) => `
+        <button type="button" class="editor-style-option ${escapeHtml(item.className)}" data-style-value="${escapeHtml(item.value)}" role="menuitem">
+          ${escapeHtml(item.label)}
+        </button>
+      `).join("")}
+    </div>
+  `;
 }
 
 function editorFormatToolbarMarkup() {
@@ -1510,18 +1931,12 @@ function editorFormatToolbarMarkup() {
       </button>
       ${tool("undo", editorToolIcon("undo"), "Undo")}
       ${tool("redo", editorToolIcon("redo"), "Redo")}
-      <select class="editor-style-select" id="editorStyleSelect" title="Insert section command" aria-label="Insert section command">
-        <option value="normal">Normal text</option>
-        <option value="chapter">Chapter</option>
-        <option value="section">Section</option>
-        <option value="subsection">Subsection</option>
-        <option value="subsubsection">Subsubsection</option>
-        <option value="paragraph">Paragraph</option>
-      </select>
+      ${editorStyleDropdownMarkup()}
       ${tool("bold", "<strong>B</strong>", "Bold")}
       ${tool("italic", "<em>I</em>", "Italic")}
       ${tool("monospace", editorToolIcon("monospace"), "Monospace")}
       ${tool("symbol", editorToolIcon("symbol"), "Insert symbol")}
+      ${tool("math", editorToolIcon("math"), "Insert formula")}
       ${tool("link", editorToolIcon("link"), "Insert link")}
       ${tool("ref", editorToolIcon("ref"), "Insert reference")}
       ${tool("cite", editorToolIcon("cite"), "Insert citation")}
@@ -1534,8 +1949,8 @@ function editorFormatToolbarMarkup() {
       ${tool("indent", editorToolIcon("indent"), "Indent")}
       ${tool("complete", editorToolIcon("complete"), "Open command autocomplete", "accent-tool")}
       <div class="editor-mode-toggle" role="tablist" aria-label="Editor mode">
-        <button class="editor-mode-pill ${local.editorMode === "code" ? "active" : ""}" data-editor-mode="code" role="tab" aria-selected="${local.editorMode === "code"}">Code Editor</button>
-        <button class="editor-mode-pill ${local.editorMode === "visual" ? "active" : ""}" data-editor-mode="visual" role="tab" aria-selected="${local.editorMode === "visual"}">Visual Editor</button>
+        <button class="editor-mode-pill active" type="button" role="tab" aria-selected="true">Code Editor</button>
+        <button class="editor-mode-pill coming-soon" type="button" role="tab" aria-selected="false" disabled title="Visual Editor is coming soon">Visual Editor <span>soon</span></button>
       </div>
       <button class="editor-tool-button ${local.searchOpen ? "active" : ""}" id="editorSearchToggle" title="Search and replace" aria-label="Search and replace">
         ${editorToolIcon("search")}
@@ -1964,6 +2379,7 @@ async function selectProjectFile(filePath) {
   if (!item || (!isEditableFile(item) && !isImageAsset(item))) return;
   await saveCurrentFile();
   local.selectedFile = filePath;
+  local.selectedFolder = "";
   expandToFile(filePath);
   local.saveStatus = "Saved";
   if (isEditableFile(item)) {
@@ -1972,6 +2388,7 @@ async function selectProjectFile(filePath) {
     local.editorContent = "";
   }
   updateEditorSourceUi();
+  updateSidebarUi();
   if (isEditableFile(item)) {
     sendCollab("open_file", { filePath });
   }
@@ -2008,9 +2425,10 @@ function editorView() {
             <h1>${escapeHtml(state.project.name)}</h1>
             <span class="editor-subtitle">${escapeHtml(local.saveStatus)}</span>
           </div>
-          <div class="toolbar-actions editor-run-actions">
-            <span class="main-file-pill">Main: ${escapeHtml(state.project.mainFile || "none")}</span>
-            <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling ? "disabled" : ""}>
+            <div class="toolbar-actions editor-run-actions">
+              <span class="main-file-pill">Main: ${escapeHtml(state.project.mainFile || "none")}</span>
+              ${updateCheckButtonMarkup("editorCheckUpdates", "Update", "editor-update-button")}
+              <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling ? "disabled" : ""}>
               <span class="compile-spinner"></span>
               <span>${isCompiling ? "Compiling..." : "Recompile"}</span>
             </button>
@@ -2035,13 +2453,11 @@ function editorView() {
               <button class="icon-button files-hide-button" id="hideFilesPanel" title="Hide files panel" aria-label="Hide files panel">${layoutGlyph("sidebar")}</button>
             </div>
             <div class="file-actions">
-              <button class="mini-button" id="newFile" title="New file">+</button>
-              <button class="mini-button" id="newFolder" title="New folder">Folder</button>
-              <button class="mini-button" id="uploadFile" title="Upload file">Upload</button>
-            </div>
-            <div class="file-actions file-actions-secondary">
-              <button class="mini-button" id="renameFile" title="Rename selected file">Rename</button>
-              <button class="mini-button danger-mini" id="deleteFile" title="Delete selected file">Delete</button>
+              <button class="mini-button icon-mini-button" id="newFile" title="New file" aria-label="New file">${editorToolIcon("newFile")}</button>
+              <button class="mini-button icon-mini-button" id="newFolder" title="New folder" aria-label="New folder">${editorToolIcon("newFolder")}</button>
+              <button class="mini-button icon-mini-button" id="uploadFile" title="Upload file" aria-label="Upload file">${editorToolIcon("upload")}</button>
+              <button class="mini-button icon-mini-button" id="renameFile" title="Rename selected item" aria-label="Rename selected item">${editorToolIcon("rename")}</button>
+              <button class="mini-button icon-mini-button danger-mini" id="deleteFile" title="Delete selected item" aria-label="Delete selected item">${editorToolIcon("delete")}</button>
             </div>
           </div>
           <div class="file-search">
@@ -2051,12 +2467,10 @@ function editorView() {
             ${renderProjectTree(state.project.files, file)}
             ${renderImageGroup(state.project.files, file)}
           </div>
-          <div class="outline ${selection.canEditSelected ? "" : "muted-outline"}">
-            <h3>File outline</h3>
-            <ol>
-              ${selection.canEditSelected ? selection.outline.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : `<li>Open a text file to view outline.</li>`}
-            </ol>
-          </div>
+            <div class="outline ${selection.canEditSelected ? "" : "muted-outline"}">
+              <h3>File outline</h3>
+              ${selection.canEditSelected ? outlineTreeMarkup(selection.outline, selection.outline.find((item) => item?.title)?.title || "") : `<div class="outline-empty">Open a text file to view outline.</div>`}
+            </div>
         </aside>
         <div class="sidebar-resizer" id="sidebarResizer" title="Resize file sidebar"></div>
 
@@ -2114,20 +2528,21 @@ function editorView() {
         </aside>
       </div>
 
-      <footer class="log-dock">
-        <div class="log-resizer" id="logResizer" title="Resize logs"></div>
-        <div class="log-tabs">
-          <button class="active">Logs</button>
-          ${compileLogSummaryMarkup(compileLogs)}
+        <footer class="log-dock">
+          <div class="log-resizer" id="logResizer" title="Resize logs"></div>
+          <div class="log-tabs">
+            <button class="active">Logs</button>
+            ${compileLogSummaryMarkup(compileLogs)}
         </div>
         <div class="log-output">
           <div class="log-pinned">${compilePinnedIssuesMarkup()}</div>
-          <div class="logs" aria-live="polite">${compileLogsMarkup(compileLogs)}</div>
-        </div>
-      </footer>
-    </section>
-  `;
-}
+            <div class="logs" aria-live="polite">${compileLogsMarkup(compileLogs)}</div>
+          </div>
+        </footer>
+        ${treeContextMenuMarkup()}
+      </section>
+    `;
+  }
 
 async function loadState() {
   local.appState = await api("/api/state");
@@ -2177,11 +2592,31 @@ function goBackHome() {
 function bindHome() {
   document.querySelector("#openCurrent")?.addEventListener("click", () => setView("project"));
   document.querySelector("#openCurrentCard")?.addEventListener("click", () => setView("project"));
-  document.querySelector("#openAnother")?.addEventListener("click", openProjectPrompt);
-  document.querySelector("#openProject")?.addEventListener("click", openProjectPrompt);
-  document.querySelector("#newProject")?.addEventListener("click", () => setView("project"));
+  document.querySelector("#newProject")?.addEventListener("click", createNewProject);
   document.querySelector("#importZip")?.addEventListener("click", importZipProject);
-  document.querySelector("#hostSession")?.addEventListener("click", startSession);
+  document.querySelector("#homeSessionAction")?.addEventListener("click", handleHomeSessionAction);
+  document.querySelector("#homeCheckUpdates")?.addEventListener("click", manualCheckForUpdates);
+}
+
+async function createNewProject() {
+  try {
+    local.appState = await api("/api/project/new", { method: "POST", body: {} });
+    local.selectedFile = local.appState.project.mainFile;
+    expandToFile(local.selectedFile);
+    await loadSelectedFile();
+    local.saveStatus = "New project";
+    setView("project");
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function handleHomeSessionAction() {
+  if (local.appState.session.status === "live") {
+    setView("session");
+    return;
+  }
+  await startSession();
 }
 
 async function openProjectPrompt() {
@@ -2255,6 +2690,7 @@ function bindSession() {
     setView("editor");
   });
   document.querySelector("#stopSession")?.addEventListener("click", stopSession);
+  document.querySelector("#backHome")?.addEventListener("click", () => setView("home"));
   document.querySelector("#goSession")?.addEventListener("click", () => setView("session"));
   document.querySelectorAll(".approve-request").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -2302,6 +2738,196 @@ function currentEditorText() {
   return local.editorContent;
 }
 
+function prepareEditorForPersistence() {
+  local.visualEditor?.flushTransientSourceBlocks?.({ includeActive: true, focusEmpty: false });
+}
+
+function canDropTreeItem(sourcePath, targetFolder) {
+  if (!sourcePath) return false;
+  const source = treeItem(sourcePath);
+  const target = targetFolder ? treeItem(targetFolder) : null;
+  if (!source) return false;
+  if (targetFolder && target?.type !== "directory") return false;
+  if (source.path === targetFolder) return false;
+  if (source.type === "directory" && targetFolder.startsWith(`${source.path}/`)) return false;
+  const nextPath = joinProjectPath(targetFolder, pathBasename(source.path));
+  if (projectPathExists(nextPath, source.path)) return false;
+  return pathDirname(source.path) !== targetFolder;
+}
+
+function pathAfterDirectoryMove(pathValue, from, to) {
+  if (pathValue === from) return to;
+  if (pathValue?.startsWith(`${from}/`)) return `${to}${pathValue.slice(from.length)}`;
+  return pathValue;
+}
+
+async function moveTreeItemToFolder(sourcePath, targetFolder) {
+  if (!canDropTreeItem(sourcePath, targetFolder)) return;
+  const source = treeItem(sourcePath);
+  const nextPath = joinProjectPath(targetFolder, pathBasename(source.path));
+  try {
+    const result = await api("/api/file/rename", {
+      method: "POST",
+      body: {
+        from: source.path,
+        to: nextPath
+      }
+    });
+    const movedPath = result.path;
+    const selectedFileWasInside = local.selectedFile === source.path || local.selectedFile?.startsWith(`${source.path}/`);
+    const selectedFolderWasInside = local.selectedFolder === source.path || local.selectedFolder?.startsWith(`${source.path}/`);
+    await loadState();
+    if (selectedFileWasInside) {
+      local.selectedFile = source.type === "directory"
+        ? pathAfterDirectoryMove(local.selectedFile, source.path, movedPath)
+        : movedPath;
+      expandToFile(local.selectedFile);
+      await loadSelectedFile();
+    }
+    if (selectedFolderWasInside) {
+      local.selectedFolder = pathAfterDirectoryMove(local.selectedFolder, source.path, movedPath);
+    }
+    local.collapsedFolders.delete(targetFolder);
+    local.saveStatus = "Moved";
+    render();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function closeTreeContextMenu() {
+  local.treeContextMenu = null;
+  document.querySelector(".tree-context-menu")?.remove();
+}
+
+function showTreeContextMenu(event, pathValue = "") {
+  event.preventDefault();
+  event.stopPropagation();
+  const entry = pathValue ? treeItem(pathValue) : null;
+  if (entry) {
+    if (entry.type === "directory") {
+      local.selectedFolder = entry.path;
+    } else {
+      local.selectedFolder = "";
+      local.selectedFile = entry.path;
+      expandToFile(entry.path);
+    }
+    updateSidebarUi();
+  }
+  const targetFolder = entry?.type === "directory" ? entry.path : entry ? pathDirname(entry.path) : "";
+  const width = 206;
+  const height = 350;
+  local.treeContextMenu = {
+    path: entry?.path || "",
+    targetFolder,
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8))
+  };
+  document.querySelector(".tree-context-menu")?.remove();
+  document.querySelector(".editor-shell")?.insertAdjacentHTML("beforeend", treeContextMenuMarkup());
+  bindTreeContextMenu();
+}
+
+function downloadTreeItem(pathValue) {
+  if (!pathValue) return;
+  const link = document.createElement("a");
+  link.href = authUrl(`/api/file/download?path=${encodeURIComponent(pathValue)}`);
+  link.download = "";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function copyTreeItemToFolder(sourcePath, targetFolder) {
+  if (!canPasteTreeItem(sourcePath, targetFolder)) return;
+  const source = treeItem(sourcePath);
+  const nextPath = uniqueCopyPath(sourcePath, targetFolder);
+  try {
+    const result = await api("/api/file/copy", {
+      method: "POST",
+      body: {
+        from: source.path,
+        to: nextPath
+      }
+    });
+    await loadState();
+    if (source.type === "directory") {
+      local.selectedFolder = result.path;
+      local.collapsedFolders.delete(result.path);
+    } else {
+      local.selectedFolder = "";
+      local.selectedFile = result.path;
+      expandToFile(result.path);
+      if (isEditableFile(fileMeta(result.path))) await loadSelectedFile();
+    }
+    local.saveStatus = "Copied";
+    updateSidebarUi();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function handleTreeContextMenuAction(action) {
+  const menu = local.treeContextMenu;
+  if (!menu) return;
+  const pathValue = menu.path;
+  const targetFolder = menu.targetFolder || "";
+  closeTreeContextMenu();
+
+  if (action === "rename") {
+    if (pathValue) startInlineRename(pathValue);
+    return;
+  }
+  if (action === "copy") {
+    if (pathValue && canCopyTreeItem(pathValue)) {
+      local.treeClipboardPath = pathValue;
+      local.saveStatus = "Copied";
+      const status = document.querySelector(".editor-subtitle");
+      if (status) status.textContent = local.saveStatus;
+    }
+    return;
+  }
+  if (action === "paste") {
+    await copyTreeItemToFolder(local.treeClipboardPath, targetFolder);
+    return;
+  }
+  if (action === "download") {
+    downloadTreeItem(pathValue);
+    return;
+  }
+  if (action === "set-main") {
+    if (pathValue) {
+      local.selectedFolder = "";
+      local.selectedFile = pathValue;
+      await setMainFile();
+    }
+    return;
+  }
+  if (action === "delete") {
+    if (pathValue) {
+      const entry = treeItem(pathValue);
+      if (entry?.type === "directory") local.selectedFolder = entry.path;
+      else {
+        local.selectedFolder = "";
+        local.selectedFile = entry?.path || pathValue;
+      }
+      await deleteSelectedFile();
+    }
+    return;
+  }
+  if (action === "new-file") {
+    await createFile(targetFolder);
+    return;
+  }
+  if (action === "new-folder") {
+    await createFolder(targetFolder);
+    return;
+  }
+  if (action === "upload") {
+    uploadProjectFile(targetFolder);
+  }
+}
+
 function isVisualEditableTarget(target) {
   if (!target) return false;
   if (target.classList?.contains("visual-raw-input")) return true;
@@ -2319,6 +2945,332 @@ function insertTabIntoVisualTarget(target) {
     return;
   }
   document.execCommand("insertText", false, tabText);
+}
+
+function insertVisualHtmlAtSelection(html) {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return false;
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const fragment = template.content;
+  const lastNode = fragment.lastChild;
+  range.insertNode(fragment);
+  if (lastNode) {
+    range.setStartAfter(lastNode);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  return true;
+}
+
+function normalizeVisualClipboardLatex(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .split("\n")
+    .filter((line, index, lines) => {
+      const trimmed = line.trim();
+      const next = (lines[index + 1] || "").trim();
+      if (/^\d+$/.test(trimmed) && /^\\/.test(next)) return false;
+      if (/^(LaTeX block|advanced source)$/i.test(trimmed)) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
+function parseVisualInlineMathPaste(text) {
+  const source = normalizeVisualClipboardLatex(text);
+  const inline = source.match(/^\\\(([\s\S]*?)\\\)$/) || source.match(/^(?<!\\)\$([^$\n]+?)(?<!\\)\$$/);
+  if (inline) return { mode: "inline", content: inline[1].trim() || "x" };
+  const display = source.match(/^\\\[([\s\S]*?)\\\]$/);
+  if (display) return { mode: "display", content: display[1].trim() || "x" };
+  return null;
+}
+
+function normalizeVisualMathClipboardContent(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n+/g, " ")
+    .replace(/\\([A-Za-z@]+)\s+(?=[{[_^A-Za-z0-9\\])/g, "\\$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function visualLatexBlocksFromSnippet(text) {
+  const source = normalizeVisualClipboardLatex(text);
+  if (!source) return [];
+  const direct = parseLatexMathBlock(source) || parseLatexTableBlock(source) || parseLatexFigureBlock(source);
+  if (direct) return [{ ...direct, line: "" }];
+  return parseVisualLatex(source).map((block) => ({ ...block, line: "" }));
+}
+
+function visualPasteShouldBecomeBlocks(text, target) {
+  const source = normalizeVisualClipboardLatex(text);
+  if (!source || target?.closest?.(".visual-math-chip, .visual-math-input, .visual-raw-block")) return false;
+  if (parseVisualInlineMathPaste(source)?.mode === "inline" || visualLooksLikeBareMathPaste(source)) return false;
+  const blocks = visualLatexBlocksFromSnippet(source);
+  if (!blocks.length) return false;
+  if (blocks.length > 1 && blocks.some((block) => block.type !== "paragraph" && block.type !== "blank")) return true;
+  return ["figure", "table", "math", "heading", "raw"].includes(blocks[0]?.type);
+}
+
+function visualLooksLikeBareMathPaste(text) {
+  const source = normalizeVisualClipboardLatex(text);
+  if (!source || /\n{2,}/.test(source) || /^\\(?:begin|end|chapter|section|subsection|caption|label|cite|ref)\b/.test(source)) {
+    return false;
+  }
+  if (parseVisualInlineMathPaste(source)?.mode === "display") return false;
+  const mathCommand = VISUAL_COMMAND_OPTIONS
+    .filter((option) => option.math && /^\\[A-Za-z@]+$/.test(option.label))
+    .map((option) => option.label.replace(/^\\/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  return new RegExp(`^\\\\(?:${mathCommand})(?:\\b|\\{|_|\\^|$)`).test(source) || (/[_^=]/.test(source) && /^[-+*/=.,;:(){}\[\]\s\\A-Za-z0-9_^]+$/.test(source));
+}
+
+function visualInlinePasteHtml(text) {
+  return visualInlineHtml(text).replace(/\n/g, "<br />");
+}
+
+function insertVisualLatexBlocksFromPaste(text, documentNode, getText, handleInput) {
+  if (!documentNode) return false;
+  const parsedBlocks = visualLatexBlocksFromSnippet(text);
+  const blocks = parsedBlocks.filter((block) => block.type !== "blank" || parsedBlocks.length > 1);
+  if (!blocks.length) return false;
+  const html = blocks.map(visualBlockMarkup).join("");
+  const target = visualInsertionTarget(documentNode);
+  target.node.insertAdjacentHTML(target.position, html);
+  const inserted = target.position === "beforeend" ? documentNode.lastElementChild : target.node.nextElementSibling;
+  local.visualInsertAfterBlock = inserted || local.visualInsertAfterBlock;
+  mountVisualRawEditors(documentNode.closest(".editor-visual-mount") || documentNode.parentElement, getText, handleInput, documentNode);
+  markEditorChanged(getText());
+  inserted?.querySelector?.("[contenteditable='true'], .visual-raw-input")?.focus?.();
+  return true;
+}
+
+function rangeIntersectsNode(range, node) {
+  try {
+    return range.intersectsNode(node);
+  } catch {
+    return false;
+  }
+}
+
+function visualSelectionNode(selection) {
+  const node = selection?.anchorNode;
+  return node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+}
+
+function visualSelectedBlocks(documentNode, range) {
+  if (!documentNode || !range) return [];
+  return [...documentNode.querySelectorAll(".visual-block")].filter((block) => rangeIntersectsNode(range, block));
+}
+
+function visualSelectionLatex(documentNode) {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || selection.isCollapsed || !documentNode?.contains(selection.anchorNode)) return "";
+  const range = selection.getRangeAt(0);
+  const selectedText = selection.toString().trim();
+  const anchor = visualSelectionNode(selection);
+  const math = anchor?.closest?.(".visual-math-chip, .visual-math-input");
+  if (math && documentNode.contains(math)) {
+    const mathText = math.textContent.trim();
+    const rawContent = selectedText && selectedText.length < mathText.length ? selectedText : mathText;
+    const content = normalizeVisualMathClipboardContent(rawContent) || "x";
+    const mode = math.getAttribute("data-latex-math") || (math.classList.contains("visual-math-input") ? "display" : "inline");
+    return mode === "display" ? `\\[\n${content}\n\\]` : `\\(${content}\\)`;
+  }
+
+  const fragment = range.cloneContents();
+  const hasMath = fragment.querySelector?.(".visual-math-chip, .visual-math-input");
+  const selectedBlocks = visualSelectedBlocks(documentNode, range);
+  const objectBlocks = selectedBlocks.filter((block) => ["figure", "table", "math"].includes(block.dataset.visualType || ""));
+  if (objectBlocks.length && /\\(?:begin|includegraphics|caption|label|\[|\])/.test(selectedText)) {
+    return objectBlocks.map(visualBlockToLatex).join("\n\n");
+  }
+  if (hasMath) {
+    return [...fragment.childNodes].map(inlineNodeToLatex).join("").trim();
+  }
+  return "";
+}
+
+function visualEditableContainer(target) {
+  return target?.closest?.(".visual-math-chip, .visual-math-input, .visual-paragraph-input, .visual-heading-input, .visual-table-grid td, .visual-table-caption, .visual-figure-caption") || null;
+}
+
+function visualCaretOffset(container) {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || !container?.contains(selection.anchorNode)) return 0;
+  const range = selection.getRangeAt(0).cloneRange();
+  range.selectNodeContents(container);
+  range.setEnd(selection.anchorNode, selection.anchorOffset);
+  return range.toString().length;
+}
+
+function visualCommandContext(target) {
+  const container = visualEditableContainer(target);
+  if (!container) return null;
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || !container.contains(selection.anchorNode)) return null;
+  const offset = visualCaretOffset(container);
+  const before = container.textContent.slice(0, offset);
+  const match = before.match(/\\[A-Za-z@]*$/);
+  if (!match) return null;
+  return {
+    container,
+    from: offset - match[0].length,
+    to: offset,
+    query: match[0].slice(1).toLowerCase(),
+    insideMath: Boolean(container.closest(".visual-math-chip, .visual-math-input"))
+  };
+}
+
+function visualDynamicCommandOptions() {
+  const suggestions = local.editorSuggestions || {};
+  const labels = (suggestions.labels || []).slice(0, 24).map((label) => ({
+    label: `\\ref{${label}}`,
+    insert: `\\ref{${label}}`,
+    detail: "ref",
+    info: "Project reference"
+  }));
+  const citations = (suggestions.citations || []).slice(0, 24).map((key) => ({
+    label: `\\cite{${key}}`,
+    insert: `\\cite{${key}}`,
+    detail: "cite",
+    info: "Bibliography citation"
+  }));
+  const macros = (suggestions.macros || []).slice(0, 24).map((macro) => ({
+    label: `\\${macro}`,
+    insert: `\\${macro}`,
+    detail: "macro",
+    info: "Project macro",
+    math: true
+  }));
+  return [...macros, ...labels, ...citations];
+}
+
+function visualCommandOptions(query = "") {
+  const options = [...visualDynamicCommandOptions(), ...VISUAL_COMMAND_OPTIONS];
+  const normalized = query.toLowerCase();
+  return options
+    .filter((option) => option.label.toLowerCase().startsWith(`\\${normalized}`))
+    .slice(0, 12);
+}
+
+function visualAutocompleteMarkup(options, activeIndex) {
+  return `
+    <div class="visual-autocomplete-popover" id="visualAutocompletePopover" role="listbox" aria-label="LaTeX command suggestions">
+      ${options.map((option, index) => `
+        <button type="button" class="visual-autocomplete-option ${index === activeIndex ? "active" : ""}" data-index="${index}" role="option" aria-selected="${index === activeIndex}">
+          <span>${escapeHtml(option.label)}</span>
+          <small>${escapeHtml(option.detail || "")}</small>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function hideVisualAutocomplete() {
+  document.querySelector("#visualAutocompletePopover")?.remove();
+  local.visualAutocomplete = null;
+}
+
+function showVisualAutocomplete(context) {
+  const options = visualCommandOptions(context.query);
+  if (!options.length) {
+    hideVisualAutocomplete();
+    return;
+  }
+  local.visualAutocomplete = { ...context, options, activeIndex: 0 };
+  document.querySelector("#visualAutocompletePopover")?.remove();
+  document.body.insertAdjacentHTML("beforeend", visualAutocompleteMarkup(options, 0));
+  const popover = document.querySelector("#visualAutocompletePopover");
+  const selection = window.getSelection();
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  const rect = range?.getBoundingClientRect();
+  const fallback = context.container.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - 300, Math.round((rect?.left || fallback.left) + window.scrollX)));
+  const top = Math.max(8, Math.min(window.innerHeight - 260, Math.round((rect?.bottom || fallback.bottom) + window.scrollY + 8)));
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+  popover.querySelectorAll(".visual-autocomplete-option").forEach((button) => {
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      applyVisualAutocomplete(Number(button.dataset.index || 0));
+    });
+  });
+}
+
+function refreshVisualAutocomplete(target) {
+  const context = visualCommandContext(target);
+  if (!context) {
+    hideVisualAutocomplete();
+    return;
+  }
+  showVisualAutocomplete(context);
+}
+
+function moveVisualAutocomplete(direction) {
+  const state = local.visualAutocomplete;
+  if (!state) return false;
+  state.activeIndex = (state.activeIndex + direction + state.options.length) % state.options.length;
+  const popover = document.querySelector("#visualAutocompletePopover");
+  popover?.querySelectorAll(".visual-autocomplete-option").forEach((button, index) => {
+    button.classList.toggle("active", index === state.activeIndex);
+    button.setAttribute("aria-selected", index === state.activeIndex ? "true" : "false");
+  });
+  return true;
+}
+
+function applyVisualAutocomplete(index = local.visualAutocomplete?.activeIndex || 0) {
+  const state = local.visualAutocomplete;
+  if (!state) return false;
+  const option = state.options[index] || state.options[0];
+  selectVisualTextRange(state.container, state.from, state.to);
+  if (option.display && !state.insideMath) {
+    const content = option.insert.replace(/^\\\[\s*/, "").replace(/\s*\\\]$/, "").trim() || "x";
+    insertVisualHtmlAtSelection(visualMathInlineHtml(content, "display"));
+  } else if (option.display) {
+    document.execCommand("insertText", false, option.insert);
+  } else if (option.math && !state.insideMath) {
+    insertVisualHtmlAtSelection(visualMathInlineHtml(option.insert, "inline"));
+  } else if (/^\\(?:cite|ref|label)\{/.test(option.insert) && !state.insideMath) {
+    const value = option.insert.replace(/^\\(?:cite|ref|label)\{/, "").replace(/\}$/, "");
+    const label = option.insert.startsWith("\\cite") ? `cite:${value}` : option.insert.startsWith("\\label") ? `label:${value}` : `ref:${value}`;
+    insertVisualHtmlAtSelection(`<span class="visual-chip" data-latex-raw="${escapeHtml(option.insert)}">${escapeHtml(label)}</span>`);
+  } else {
+    document.execCommand("insertText", false, option.insert);
+  }
+  hideVisualAutocomplete();
+  markEditorChanged(currentEditorText());
+  return true;
+}
+
+function normalizeVisualMathElement(element) {
+  if (!element || element.__normalizingMath) return;
+  const text = element.textContent || "x";
+  element.__normalizingMath = true;
+  element.innerHTML = visualLatexSourceHtml(text);
+  element.__normalizingMath = false;
+}
+
+function convertLatestTypedMath(target) {
+  const container = visualEditableContainer(target);
+  if (!container || container.closest(".visual-math-chip, .visual-math-input")) return false;
+  const offset = visualCaretOffset(container);
+  const before = container.textContent.slice(0, offset);
+  const match = before.match(/\\\(([\s\S]*?)\\\)$|(?<!\\)\$([^$\n]+?)(?<!\\)\$$|\\\[([\s\S]*?)\\\]$/);
+  if (!match) return false;
+  const content = match[1] ?? match[2] ?? match[3] ?? "x";
+  const mode = match[3] !== undefined ? "display" : "inline";
+  const raw = match[0];
+  selectVisualTextRange(container, offset - raw.length, offset);
+  insertVisualHtmlAtSelection(visualMathInlineHtml(content, mode));
+  markEditorChanged(currentEditorText());
+  return true;
 }
 
 function visualRawBlockText(block) {
@@ -2339,19 +3291,83 @@ function destroyVisualRawEditors(host) {
   });
 }
 
-function collapseVisualRawBlockIfStructured(block, getText) {
+function visualOffsetParsedBlockLines(blocks, originalLine) {
+  const baseLine = Number(originalLine);
+  return blocks.map((parsedBlock, index) => {
+    if (!Number.isFinite(baseLine)) {
+      return { ...parsedBlock, line: index === 0 ? originalLine : parsedBlock.line };
+    }
+    const parsedLine = Number(parsedBlock.line || 1);
+    return {
+      ...parsedBlock,
+      line: Number.isFinite(parsedLine) ? baseLine + parsedLine - 1 : baseLine + index
+    };
+  });
+}
+
+function visualSourceCollapseBlocks(source, originalLine) {
+  const normalizedSource = String(source || "").replace(/\r\n/g, "\n");
+  if (!normalizedSource.trim()) {
+    return {
+      blocks: [{ type: "blank", line: originalLine }],
+      shouldCollapse: true,
+      focusBlank: true
+    };
+  }
+
+  const parsed = visualOffsetParsedBlockLines(parseVisualLatex(normalizedSource), originalLine);
+  const hasRaw = parsed.some((block) => block.type === "raw");
+  if (hasRaw) {
+    return {
+      blocks: parsed,
+      shouldCollapse: false,
+      focusBlank: false
+    };
+  }
+
+  return {
+    blocks: parsed,
+    shouldCollapse: true,
+    focusBlank: parsed.length === 1 && parsed[0].type === "blank"
+  };
+}
+
+function replaceVisualBlockWithBlocks(block, replacementBlocks) {
+  const template = document.createElement("template");
+  template.innerHTML = replacementBlocks.map(visualBlockMarkup).join("");
+  const replacements = [...template.content.children];
+  block.replaceWith(...replacements);
+  return replacements;
+}
+
+function collapseVisualRawBlockIfStructured(block, getText, options = {}) {
   if (!block?.isConnected || !block.classList.contains("visual-expanded-source-block")) return false;
   syncVisualRawFallback(block);
   const source = visualRawBlockText(block);
-  const figure = parseLatexFigureBlock(source);
-  const table = figure ? null : parseLatexTableBlock(source);
-  const structured = figure || table;
-  if (!structured) return false;
   const line = block.querySelector(".visual-line-number")?.textContent.trim() || "";
+  const collapse = visualSourceCollapseBlocks(source, line);
+  if (!collapse.shouldCollapse) return false;
   destroyVisualRawEditors(block);
-  block.outerHTML = visualBlockMarkup({ ...structured, line }, 0);
+  const replacements = replaceVisualBlockWithBlocks(block, collapse.blocks);
+  if (replacements[0]) local.visualInsertAfterBlock = replacements[0];
+  if (options.focusEmpty && collapse.focusBlank) {
+    const input = replacements[0]?.querySelector?.(".visual-paragraph-input");
+    input?.focus();
+    if (input) selectVisualTextRange(input, 0, 0);
+  }
   markEditorChanged(getText());
   return true;
+}
+
+function collapseVisualExpandedSourceBlocks(documentNode, getText, options = {}) {
+  let collapsed = false;
+  documentNode?.querySelectorAll?.(".visual-expanded-source-block").forEach((block) => {
+    if (!block.isConnected || !documentNode.contains(block)) return;
+    const active = document.activeElement;
+    if (!options.includeActive && active && block.contains(active)) return;
+    collapsed = collapseVisualRawBlockIfStructured(block, getText, options) || collapsed;
+  });
+  return collapsed;
 }
 
 function scheduleVisualRawCollapse(block, getText, documentNode) {
@@ -2360,7 +3376,7 @@ function scheduleVisualRawCollapse(block, getText, documentNode) {
     if (!block.isConnected || !documentNode?.contains(block)) return;
     const active = document.activeElement;
     if (active && block.contains(active)) return;
-    collapseVisualRawBlockIfStructured(block, getText);
+    collapseVisualRawBlockIfStructured(block, getText, { focusEmpty: true });
   }, 180);
 }
 
@@ -2437,13 +3453,97 @@ function mountVisualEditor() {
   destroyCodeEditor();
   const documentNode = host.querySelector("#visualEditorDocument");
   const getText = () => visualDomToLatex(documentNode);
-  const handleInput = () => markEditorChanged(getText());
+  const handleInput = (event) => {
+    convertLatestTypedMath(event?.target);
+    refreshVisualAutocomplete(event?.target);
+    markEditorChanged(getText());
+  };
+  const handleCopy = (event) => {
+    const latex = visualSelectionLatex(documentNode);
+    if (!latex || !event.clipboardData) return;
+    event.clipboardData.setData("text/plain", latex);
+    event.clipboardData.setData("text/html", `<pre>${escapeHtml(latex)}</pre>`);
+    event.preventDefault();
+  };
+  const handlePaste = (event) => {
+    const target = event.target;
+    if (target?.closest?.(".visual-raw-code-mount .cm-editor, .visual-raw-input")) return;
+    const text = normalizeVisualClipboardLatex(event.clipboardData?.getData("text/plain") || "");
+    if (!text) return;
+
+    const active = visualEditableContainer(target) || currentVisualEditableElement();
+    const activeMath = active?.closest?.(".visual-math-chip, .visual-math-input");
+    const pastedMath = parseVisualInlineMathPaste(text);
+    if (activeMath) {
+      if (!pastedMath) return;
+      event.preventDefault();
+      document.execCommand("insertText", false, pastedMath.content);
+      normalizeVisualMathElement(activeMath);
+      markEditorChanged(getText());
+      return;
+    }
+
+    if (visualPasteShouldBecomeBlocks(text, target)) {
+      event.preventDefault();
+      hideVisualAutocomplete();
+      insertVisualLatexBlocksFromPaste(text, documentNode, getText, handleInput);
+      return;
+    }
+
+    if (active?.isContentEditable && pastedMath?.mode === "inline") {
+      event.preventDefault();
+      insertVisualHtmlAtSelection(visualMathInlineHtml(pastedMath.content, "inline"));
+      markEditorChanged(getText());
+      return;
+    }
+
+    if (active?.isContentEditable && visualLooksLikeBareMathPaste(text)) {
+      event.preventDefault();
+      insertVisualHtmlAtSelection(visualMathInlineHtml(text, "inline"));
+      markEditorChanged(getText());
+      return;
+    }
+
+    if (active?.isContentEditable && /\\\(|(?<!\\)\$[^$\n]+(?<!\\)\$|\\(?:textbf|textit|emph|texttt|cite|citep|citet|parencite|textcite|ref|eqref|autoref|pageref)\{/.test(text)) {
+      event.preventDefault();
+      insertVisualHtmlAtSelection(visualInlinePasteHtml(text));
+      markEditorChanged(getText());
+    }
+  };
   const handleKeyDown = (event) => {
     const target = event.target;
     if (target?.closest?.(".visual-raw-code-mount .cm-editor")) return;
+    if (local.visualAutocomplete) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveVisualAutocomplete(1);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveVisualAutocomplete(-1);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        applyVisualAutocomplete();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        hideVisualAutocomplete();
+        return;
+      }
+    }
     const mod = event.ctrlKey || event.metaKey;
     if (mod) {
       const key = event.key.toLowerCase();
+      if (key === " " || event.code === "Space") {
+        event.preventDefault();
+        const context = visualCommandContext(target);
+        if (context) showVisualAutocomplete(context);
+        return;
+      }
       if (key === "b" || key === "i" || key === "z" || key === "y") {
         event.preventDefault();
         const command = key === "b" ? "bold" : key === "i" ? "italic" : key === "z" && event.shiftKey ? "redo" : key === "z" ? "undo" : "redo";
@@ -2506,10 +3606,18 @@ function mountVisualEditor() {
     const block = document.activeElement?.closest?.(".visual-block");
     if (block && documentNode?.contains(block)) local.visualInsertAfterBlock = block;
   };
-  const handleFocusOut = () => {
+  const handleFocusOut = (event) => {
+    if (event.target?.closest?.(".visual-math-chip, .visual-math-input")) {
+      setTimeout(() => {
+        normalizeVisualMathElement(event.target.closest(".visual-math-chip, .visual-math-input"));
+        markEditorChanged(getText());
+      }, 0);
+    }
     local.editingNow = false;
   };
   documentNode?.addEventListener("input", handleInput);
+  documentNode?.addEventListener("copy", handleCopy);
+  documentNode?.addEventListener("paste", handlePaste);
   documentNode?.addEventListener("keydown", handleKeyDown);
   documentNode?.addEventListener("click", handleClick);
   documentNode?.addEventListener("change", handleChange);
@@ -2521,8 +3629,11 @@ function mountVisualEditor() {
   local.visualEditor = {
     host,
     destroy() {
+      hideVisualAutocomplete();
       destroyVisualRawEditors(host);
       documentNode?.removeEventListener("input", handleInput);
+      documentNode?.removeEventListener("copy", handleCopy);
+      documentNode?.removeEventListener("paste", handlePaste);
       documentNode?.removeEventListener("keydown", handleKeyDown);
       documentNode?.removeEventListener("click", handleClick);
       documentNode?.removeEventListener("change", handleChange);
@@ -2531,8 +3642,12 @@ function mountVisualEditor() {
       local.visualEditor = null;
     },
     getText,
+    flushTransientSourceBlocks(options = {}) {
+      return collapseVisualExpandedSourceBlocks(documentNode, getText, options);
+    },
     applyRemoteText(text) {
       if (!documentNode) return;
+      hideVisualAutocomplete();
       destroyVisualRawEditors(host);
       documentNode.innerHTML = visualLatexMarkup(text);
       mountVisualRawEditors(host, getText, handleInput, documentNode);
@@ -2544,7 +3659,7 @@ function mountVisualEditor() {
 }
 
 function execVisualCommand(command, value) {
-  const active = document.activeElement;
+  const active = currentVisualEditableElement();
   const insertText = (text) => {
     if (active && (active.isContentEditable || active.tagName === "TEXTAREA")) {
       document.execCommand("insertText", false, text);
@@ -2553,16 +3668,31 @@ function execVisualCommand(command, value) {
     }
     return false;
   };
+  const insertHtml = (html) => {
+    if (active && active.isContentEditable) {
+      insertVisualHtmlAtSelection(html);
+      markEditorChanged(currentEditorText());
+      return true;
+    }
+    return false;
+  };
+  const insertInlineMath = (content = "x") => {
+    if (active?.closest?.(".visual-math-chip, .visual-math-input")) return insertText(content);
+    if (insertHtml(visualMathInlineHtml(content, "inline"))) return true;
+    insertVisualMathBlock(content);
+    return true;
+  };
 
   if (command === "undo") document.execCommand("undo");
   else if (command === "redo") document.execCommand("redo");
   else if (command === "bold") document.execCommand("bold");
   else if (command === "italic") document.execCommand("italic");
-  else if (command === "monospace") document.execCommand("insertHTML", false, "<code data-latex-inline=\"texttt\">text</code>");
+  else if (command === "monospace") insertHtml("<code data-latex-inline=\"texttt\">text</code>");
   else if (command === "style" && value && value !== "normal") insertText(`\\${value}{Title}`);
   else if (command === "link") insertText("\\href{}{text}");
-  else if (command === "ref") insertText("\\ref{}");
-  else if (command === "cite") insertText("\\cite{}");
+  else if (command === "ref") insertHtml("<span class=\"visual-chip\" data-latex-raw=\"\\ref{}\">ref:</span>") || insertText("\\ref{}");
+  else if (command === "cite") insertHtml("<span class=\"visual-chip\" data-latex-raw=\"\\cite{}\">cite:</span>") || insertText("\\cite{}");
+  else if (command === "math") insertInlineMath("x");
   else if (command === "figure") {
     insertVisualFigure();
     return true;
@@ -2574,7 +3704,7 @@ function execVisualCommand(command, value) {
   }
   else if (command === "bulletList") insertText("\\begin{itemize}\n  \\item \n\\end{itemize}");
   else if (command === "numberedList") insertText("\\begin{enumerate}\n  \\item \n\\end{enumerate}");
-  else if (command === "symbol") insertText("\\alpha");
+  else if (command === "symbol") insertInlineMath("\\alpha");
   else if (command === "comment") insertText("% ");
   else if (command === "complete") {
     setEditorMode("code");
@@ -2586,17 +3716,29 @@ function execVisualCommand(command, value) {
 }
 
 function mountActiveEditor() {
-  if (local.editorMode === "visual") mountVisualEditor();
-  else mountCodeEditor();
+  mountCodeEditor();
 }
 
 function setEditorMode(mode) {
-  if (!["code", "visual"].includes(mode) || local.editorMode === mode) return;
+  if (mode !== "code" || local.editorMode === mode) return;
   local.editorContent = currentEditorText();
-  local.editorMode = mode;
+  local.editorMode = "code";
   local.tablePickerOpen = false;
-  localStorage.setItem("localleaf.editorMode", mode);
+  localStorage.setItem("localleaf.editorMode", "code");
   updateEditorSourceUi();
+}
+
+function currentVisualEditableElement() {
+  const active = document.activeElement;
+  if (active?.isContentEditable || active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) {
+    return active;
+  }
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return active;
+  const node = selection.anchorNode?.nodeType === Node.ELEMENT_NODE
+    ? selection.anchorNode
+    : selection.anchorNode?.parentElement;
+  return visualEditableContainer(node) || active;
 }
 
 function activeSearchOptions() {
@@ -2758,16 +3900,31 @@ function runEditorReplace(all = false) {
   updateSearchStatus({ count: didReplace ? 1 : 0 }, "replace");
 }
 
+function closeEditorSearchPanel() {
+  if (!local.searchOpen) return false;
+  local.searchOpen = false;
+  refreshEditorToolbarPanels();
+  local.codeEditor?.focus?.();
+  return true;
+}
+
 function refreshEditorToolbarPanels() {
   const topbar = document.querySelector(".editor-topbar");
   if (!topbar) return;
   document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
   document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
+  const styleButton = document.querySelector("#editorStyleButton");
+  styleButton?.classList.toggle("active", local.editorStyleMenuOpen);
+  styleButton?.setAttribute("aria-expanded", local.editorStyleMenuOpen ? "true" : "false");
+  const styleWrap = document.querySelector(".editor-style-menu-wrap");
+  styleWrap?.querySelector(".editor-style-menu")?.remove();
+  if (local.editorStyleMenuOpen) styleWrap?.insertAdjacentHTML("beforeend", editorStyleMenuMarkup());
   topbar.querySelector(".editor-search-popover")?.remove();
   topbar.querySelector(".editor-table-popover")?.remove();
   topbar.insertAdjacentHTML("beforeend", editorSearchPanelMarkup() + tablePickerMarkup());
   positionToolbarPopover(".editor-search-popover", "#editorSearchToggle", "center");
   positionToolbarPopover(".editor-table-popover", "#editorTableButton", "start");
+  bindEditorStyleMenu();
   bindEditorToolbarPanels();
 }
 
@@ -2841,6 +3998,25 @@ function insertVisualFigure() {
   local.visualInsertAfterBlock = target.position === "beforeend" ? documentNode.lastElementChild : target.node.nextElementSibling;
   markEditorChanged(currentEditorText());
   local.visualInsertAfterBlock?.querySelector?.(".visual-figure-image")?.focus();
+}
+
+function insertVisualMathBlock(text = "x") {
+  const documentNode = document.querySelector("#visualEditorDocument");
+  if (!documentNode) return;
+  const blockHtml = visualBlockMarkup({
+    type: "math",
+    mode: "display",
+    syntax: "bracket",
+    text,
+    line: ""
+  }, 0);
+  const target = visualInsertionTarget(documentNode);
+  target.node.insertAdjacentHTML(target.position, blockHtml);
+  local.visualInsertAfterBlock = target.position === "beforeend" ? documentNode.lastElementChild : target.node.nextElementSibling;
+  const input = local.visualInsertAfterBlock?.querySelector?.(".visual-math-input");
+  input?.focus();
+  if (input) selectVisualTextRange(input, 0, input.textContent.length);
+  markEditorChanged(currentEditorText());
 }
 
 function copyTextWithSelection(text) {
@@ -2986,17 +4162,12 @@ function bindEditor() {
   });
   document.querySelector("#compileButton")?.addEventListener("click", compile);
   document.querySelector("#exportButton")?.addEventListener("click", showExportModal);
+  document.querySelector("#editorCheckUpdates")?.addEventListener("click", manualCheckForUpdates);
   document.querySelector("#saveButton")?.addEventListener("click", saveAndCompile);
-  document.querySelector("#newFile")?.addEventListener("click", createFile);
-  document.querySelector("#newFolder")?.addEventListener("click", createFolder);
-  document.querySelector("#uploadFile")?.addEventListener("click", uploadProjectFile);
-  document.querySelector("#renameFile")?.addEventListener("click", renameSelectedFile);
-  document.querySelector("#deleteFile")?.addEventListener("click", deleteSelectedFile);
   document.querySelector("#setMainFile")?.addEventListener("click", setMainFile);
   document.querySelector("#toggleSourcePane")?.addEventListener("click", () => toggleLayoutPane("source"));
   document.querySelector("#togglePreviewPane")?.addEventListener("click", () => toggleLayoutPane("preview"));
   document.querySelector("#toggleLogs")?.addEventListener("click", () => toggleLayoutPane("logs"));
-  document.querySelector("#hideFilesPanel")?.addEventListener("click", () => setSidebarVisible(false));
   document.querySelector("#showFilesPanelInline")?.addEventListener("click", () => setSidebarVisible(true));
   document.querySelector("#hideChatRail")?.addEventListener("click", () => setRightRailVisible(false));
   document.querySelector("#showChatRail")?.addEventListener("click", () => setRightRailVisible(true));
@@ -3026,32 +4197,7 @@ function bindEditor() {
     document.body.classList.add("is-resizing-logs");
     event.currentTarget.setPointerCapture?.(event.pointerId);
   });
-  document.querySelectorAll(".file-button").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await selectProjectFile(button.dataset.file);
-    });
-  });
-  document.querySelectorAll(".folder-toggle").forEach((button) => {
-    button.addEventListener("click", () => {
-      const folder = button.dataset.folder;
-      if (local.collapsedFolders.has(folder)) local.collapsedFolders.delete(folder);
-      else local.collapsedFolders.add(folder);
-      updateSidebarUi();
-    });
-  });
-  document.querySelector(".image-section-toggle")?.addEventListener("click", () => {
-    local.imagesCollapsed = !local.imagesCollapsed;
-    updateSidebarUi();
-  });
-  document.querySelector("#fileSearch")?.addEventListener("input", (event) => {
-    local.fileFilter = event.target.value;
-    local.focusFileSearch = true;
-    if (local.fileFilter.trim()) {
-      local.collapsedFolders.clear();
-      local.imagesCollapsed = false;
-    }
-    updateSidebarUi();
-  });
+  bindSidebarControls();
 
   bindEditorToolbar();
   mountActiveEditor();
@@ -3070,24 +4216,81 @@ function bindEditor() {
 }
 
 function bindSidebarControls() {
-  document.querySelector("#newFile")?.addEventListener("click", createFile);
-  document.querySelector("#newFolder")?.addEventListener("click", createFolder);
-  document.querySelector("#uploadFile")?.addEventListener("click", uploadProjectFile);
-  document.querySelector("#renameFile")?.addEventListener("click", renameSelectedFile);
-  document.querySelector("#deleteFile")?.addEventListener("click", deleteSelectedFile);
-  document.querySelector("#hideFilesPanel")?.addEventListener("click", () => setSidebarVisible(false));
+  const bindClick = (selector, handler) => {
+    const element = document.querySelector(selector);
+    if (element) {
+      element.onclick = (event) => {
+        event.preventDefault();
+        handler();
+      };
+    }
+  };
+  bindClick("#newFile", createFile);
+  bindClick("#newFolder", createFolder);
+  bindClick("#uploadFile", uploadProjectFile);
+  bindClick("#renameFile", renameSelectedFile);
+  bindClick("#deleteFile", deleteSelectedFile);
+  bindClick("#hideFilesPanel", () => setSidebarVisible(false));
+  bindFileTreeInteractions();
+  bindTreeContextMenu();
+}
+
+function bindFileTreeInteractions() {
   document.querySelectorAll(".file-button").forEach((button) => {
-    button.addEventListener("click", async () => {
+    const requestRename = (event) => {
+      if (event.target?.closest?.(".tree-rename-wrap")) return;
+      if (button.dataset.selectable !== "1") return;
+      event.preventDefault();
+      event.stopPropagation();
+      startInlineRename(button.dataset.file);
+    };
+    button.addEventListener("mousedown", (event) => {
+      if (event.detail >= 2) requestRename(event);
+    });
+    button.addEventListener("dblclick", requestRename);
+    button.addEventListener("contextmenu", (event) => {
+      showTreeContextMenu(event, button.dataset.file);
+    });
+    button.addEventListener("click", async (event) => {
+      if (event.target?.closest?.(".tree-rename-wrap")) return;
+      if (button.dataset.selectable !== "1") return;
+      if (event.detail > 1) {
+        startInlineRename(button.dataset.file);
+        return;
+      }
       await selectProjectFile(button.dataset.file);
     });
   });
   document.querySelectorAll(".folder-toggle").forEach((button) => {
-    button.addEventListener("click", () => {
+    const requestRename = (event) => {
+      if (event.target.closest?.(".tree-rename-wrap")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      startInlineRename(button.dataset.folder);
+    };
+    button.addEventListener("mousedown", (event) => {
+      if (event.detail >= 2) requestRename(event);
+    });
+    button.addEventListener("dblclick", requestRename);
+    button.addEventListener("contextmenu", (event) => {
+      showTreeContextMenu(event, button.dataset.folder);
+    });
+    button.addEventListener("click", (event) => {
+      if (event.target.closest?.(".tree-rename-wrap")) return;
       const folder = button.dataset.folder;
+      if (event.detail > 1) {
+        startInlineRename(folder);
+        return;
+      }
+      local.selectedFolder = folder;
       if (local.collapsedFolders.has(folder)) local.collapsedFolders.delete(folder);
       else local.collapsedFolders.add(folder);
       updateSidebarUi();
     });
+  });
+  document.querySelector(".file-list")?.addEventListener("contextmenu", (event) => {
+    if (event.target.closest?.(".file-button, .tree-folder-row, .tree-rename-wrap")) return;
+    showTreeContextMenu(event, "");
   });
   document.querySelector(".image-section-toggle")?.addEventListener("click", () => {
     local.imagesCollapsed = !local.imagesCollapsed;
@@ -3101,6 +4304,111 @@ function bindSidebarControls() {
       local.imagesCollapsed = false;
     }
     updateSidebarUi();
+  });
+  document.querySelector("#fileSearch")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (local.fileFilter) {
+      event.preventDefault();
+      local.fileFilter = "";
+      local.focusFileSearch = true;
+      updateSidebarUi();
+    } else {
+      event.currentTarget.blur();
+    }
+  });
+  document.querySelectorAll(".tree-rename-input").forEach((input) => {
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("mousedown", (event) => event.stopPropagation());
+    input.closest(".tree-rename-wrap")?.addEventListener("mousedown", (event) => event.stopPropagation());
+    input.closest(".tree-rename-wrap")?.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("dragstart", (event) => event.stopPropagation());
+    input.addEventListener("keydown", async (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        await commitInlineRename(input);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancelInlineRename();
+      }
+    });
+    input.addEventListener("blur", () => {
+      setTimeout(() => {
+        if (document.activeElement?.classList?.contains("tree-rename-input")) return;
+        commitInlineRename(input);
+      }, 0);
+    });
+  });
+  bindTreeDragAndDrop();
+}
+
+function bindTreeContextMenu() {
+  const menu = document.querySelector(".tree-context-menu");
+  if (!menu) return;
+  menu.querySelectorAll("[data-tree-menu-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await handleTreeContextMenuAction(button.dataset.treeMenuAction);
+    });
+  });
+}
+
+function bindTreeDragAndDrop() {
+  document.querySelectorAll("[data-drag-path]").forEach((item) => {
+    item.addEventListener("dragstart", (event) => {
+      local.draggedTreePath = item.dataset.dragPath || "";
+      local.draggedTreeKind = item.dataset.dragKind || "";
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", local.draggedTreePath);
+      item.classList.add("dragging");
+    });
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      document.querySelectorAll(".tree-drop-target").forEach((target) => target.classList.remove("tree-drop-target"));
+      document.querySelector(".file-list")?.classList.remove("tree-root-drop-target");
+      local.draggedTreePath = "";
+      local.draggedTreeKind = "";
+    });
+  });
+
+  document.querySelectorAll("[data-drop-folder]").forEach((target) => {
+    target.addEventListener("dragover", (event) => {
+      if (!canDropTreeItem(local.draggedTreePath, target.dataset.dropFolder || "")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
+      target.classList.add("tree-drop-target");
+      document.querySelector(".file-list")?.classList.remove("tree-root-drop-target");
+    });
+    target.addEventListener("dragleave", () => {
+      target.classList.remove("tree-drop-target");
+    });
+    target.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      target.classList.remove("tree-drop-target");
+      const sourcePath = local.draggedTreePath || event.dataTransfer.getData("text/plain");
+      await moveTreeItemToFolder(sourcePath, target.dataset.dropFolder || "");
+    });
+  });
+
+  const root = document.querySelector(".file-list");
+  root?.addEventListener("dragover", (event) => {
+    if (event.target.closest?.("[data-drop-folder]")) return;
+    if (!canDropTreeItem(local.draggedTreePath, "")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    root.classList.add("tree-root-drop-target");
+  });
+  root?.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget && root.contains(event.relatedTarget)) return;
+    root.classList.remove("tree-root-drop-target");
+  });
+  root?.addEventListener("drop", async (event) => {
+    if (event.target.closest?.("[data-drop-folder]")) return;
+    event.preventDefault();
+    root.classList.remove("tree-root-drop-target");
+    const sourcePath = local.draggedTreePath || event.dataTransfer.getData("text/plain");
+    await moveTreeItemToFolder(sourcePath, "");
   });
 }
 
@@ -3119,23 +4427,38 @@ function bindEditorToolbar() {
       else local.visualEditor?.exec(command);
     });
   });
-  document.querySelector("#editorSearchToggle")?.addEventListener("click", () => {
-    local.searchOpen = !local.searchOpen;
-    local.tablePickerOpen = false;
-    refreshEditorToolbarPanels();
-    setTimeout(() => document.querySelector("#editorSearchInput")?.focus(), 0);
-  });
-  const styleSelect = document.querySelector("#editorStyleSelect");
-  styleSelect?.addEventListener("change", () => {
-    if (local.codeEditor) local.codeEditor.exec("style", styleSelect.value);
-    else local.visualEditor?.exec("style", styleSelect.value);
-    styleSelect.value = "normal";
-  });
-  document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
-  document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
+    document.querySelector("#editorSearchToggle")?.addEventListener("click", () => {
+      local.searchOpen = !local.searchOpen;
+      local.tablePickerOpen = false;
+      local.editorStyleMenuOpen = false;
+      refreshEditorToolbarPanels();
+      setTimeout(() => document.querySelector("#editorSearchInput")?.focus(), 0);
+    });
+    document.querySelector("#editorStyleButton")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      local.editorStyleMenuOpen = !local.editorStyleMenuOpen;
+      local.searchOpen = false;
+      local.tablePickerOpen = false;
+      refreshEditorToolbarPanels();
+    });
+    bindEditorStyleMenu();
+    document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
+    document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
   positionToolbarPopover(".editor-search-popover", "#editorSearchToggle", "center");
   positionToolbarPopover(".editor-table-popover", "#editorTableButton", "start");
-  bindEditorToolbarPanels();
+    bindEditorToolbarPanels();
+  }
+
+function bindEditorStyleMenu() {
+  document.querySelectorAll("[data-style-value]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.styleValue || "normal";
+      if (local.codeEditor) local.codeEditor.exec("style", value);
+      else local.visualEditor?.exec("style", value);
+      local.editorStyleMenuOpen = false;
+      refreshEditorToolbarPanels();
+    });
+  });
 }
 
 function bindEditorToolbarPanels() {
@@ -3153,8 +4476,8 @@ function bindEditorToolbarPanels() {
       event.preventDefault();
       runEditorSearch(event.shiftKey ? "prev" : "next");
     } else if (event.key === "Escape") {
-      local.searchOpen = false;
-      refreshEditorToolbarPanels();
+      event.preventDefault();
+      closeEditorSearchPanel();
     }
   });
   replaceInput?.addEventListener("input", (event) => {
@@ -3164,6 +4487,9 @@ function bindEditorToolbarPanels() {
     if (event.key === "Enter") {
       event.preventDefault();
       runEditorReplace(event.shiftKey);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeEditorSearchPanel();
     }
   });
   document.querySelector("#searchPrevious")?.addEventListener("click", () => runEditorSearch("prev"));
@@ -3171,8 +4497,7 @@ function bindEditorToolbarPanels() {
   document.querySelector("#replaceOne")?.addEventListener("click", () => runEditorReplace(false));
   document.querySelector("#replaceAll")?.addEventListener("click", () => runEditorReplace(true));
   document.querySelector("#closeSearchPanel")?.addEventListener("click", () => {
-    local.searchOpen = false;
-    refreshEditorToolbarPanels();
+    closeEditorSearchPanel();
   });
   document.querySelector("#searchMatchCase")?.addEventListener("click", () => {
     local.searchMatchCase = !local.searchMatchCase;
@@ -3299,16 +4624,15 @@ function updateEditorSourceUi() {
     button.classList.toggle("active", button.dataset.file === file);
   });
 
-  const outline = document.querySelector(".outline");
-  if (outline) {
-    outline.classList.toggle("muted-outline", !selection.canEditSelected);
-    const list = outline.querySelector("ol");
-    if (list) {
-      list.innerHTML = selection.canEditSelected
-        ? selection.outline.map((item) => `<li>${escapeHtml(item)}</li>`).join("")
-        : `<li>Open a text file to view outline.</li>`;
+    const outline = document.querySelector(".outline");
+    if (outline) {
+      outline.classList.toggle("muted-outline", !selection.canEditSelected);
+      const currentTitle = selection.outline.find((item) => item?.title)?.title || "";
+      outline.innerHTML = `
+        <h3>File outline</h3>
+        ${selection.canEditSelected ? outlineTreeMarkup(selection.outline, currentTitle) : `<div class="outline-empty">Open a text file to view outline.</div>`}
+      `;
     }
-  }
 
   const saveButton = document.querySelector("#saveButton");
   if (saveButton) saveButton.disabled = !selection.canEditSelected;
@@ -3485,11 +4809,14 @@ function settleEditorUi() {
     }
     local.focusFileSearch = false;
   }
+  focusRenameInput();
 }
 
 async function saveCurrentFile() {
   if (!local.selectedFile) return;
   if (!isEditableFile(fileMeta(local.selectedFile))) return;
+  prepareEditorForPersistence();
+  clearTimeout(local.saveTimer);
   local.editorContent = currentEditorText();
   if (local.saving) {
     local.pendingSave = true;
@@ -3535,9 +4862,108 @@ async function saveAndCompile() {
   await compile();
 }
 
-async function createFile() {
-  const filePath = prompt("New file path:", "chapter.tex");
-  if (!filePath) return;
+function focusRenameInput() {
+  if (!local.renamingTreePath) return;
+  const input = document.querySelector(".tree-rename-input");
+  if (!input) return;
+  input.focus();
+  input.select();
+}
+
+function startInlineRename(pathValue) {
+  const item = treeItem(pathValue);
+  if (!item || item.type === "binary") return;
+  if (item.type === "directory") {
+    local.selectedFolder = item.path;
+  } else {
+    local.selectedFolder = "";
+    local.selectedFile = item.path;
+    expandToFile(item.path);
+  }
+  local.renamingTreePath = item.path;
+  local.renamingTreeKind = item.type;
+  updateSidebarUi();
+}
+
+function cancelInlineRename() {
+  if (!local.renamingTreePath) return;
+  local.renamingTreePath = "";
+  local.renamingTreeKind = "";
+  local.renameSaving = false;
+  updateSidebarUi();
+}
+
+async function commitInlineRename(input) {
+  if (!input || local.renameSaving) return;
+  const from = input.dataset.renamePath || "";
+  if (!from || local.renamingTreePath !== from) return;
+  const entry = treeItem(from);
+  if (!entry) {
+    cancelInlineRename();
+    return;
+  }
+  const extension = input.dataset.renameExtension || "";
+  const nextStem = normalizeRenameStem(input.value, extension);
+  if (!nextStem) {
+    alert("Enter a file or folder name.");
+    focusRenameInput();
+    return;
+  }
+  if (/[\\/]/.test(nextStem)) {
+    alert("Use a name only. To move files, drag them into a folder.");
+    focusRenameInput();
+    return;
+  }
+  const nextName = `${nextStem}${extension}`;
+  const nextPath = joinProjectPath(pathDirname(entry.path), nextName);
+  if (nextPath === entry.path) {
+    local.renamingTreePath = "";
+    local.renamingTreeKind = "";
+    updateSidebarUi();
+    return;
+  }
+  if (projectPathExists(nextPath, entry.path)) {
+    alert("A file or folder with that name already exists here.");
+    focusRenameInput();
+    return;
+  }
+
+  local.renameSaving = true;
+  try {
+    const result = await api("/api/file/rename", {
+      method: "POST",
+      body: {
+        from: entry.path,
+        to: nextPath
+      }
+    });
+    await loadState();
+    if (entry.type === "directory") {
+      local.selectedFolder = result.path;
+      local.selectedFile = pathAfterDirectoryMove(local.selectedFile, entry.path, result.path);
+      expandToFile(local.selectedFile);
+      if (isEditableFile(fileMeta(local.selectedFile))) await loadSelectedFile();
+    } else {
+      local.selectedFile = result.path;
+      local.selectedFolder = "";
+      expandToFile(result.path);
+      await loadSelectedFile();
+    }
+    local.renamingTreePath = "";
+    local.renamingTreeKind = "";
+    local.renameSaving = false;
+    local.saveStatus = "Renamed";
+    render();
+  } catch (error) {
+    local.renameSaving = false;
+    alert(error.message);
+    focusRenameInput();
+  }
+}
+
+async function createFile(baseDirOverride = undefined) {
+  const baseDir = typeof baseDirOverride === "string" ? baseDirOverride : selectedDirectoryPath();
+  const filePath = uniqueProjectPath(baseDir, "new file.tex");
   try {
     const result = await api("/api/file/create", {
       method: "POST",
@@ -3548,8 +4974,11 @@ async function createFile() {
     });
     await loadState();
     local.selectedFile = result.path;
+    local.selectedFolder = "";
     expandToFile(result.path);
     await loadSelectedFile();
+    local.renamingTreePath = result.path;
+    local.renamingTreeKind = "text";
     local.saveStatus = "Created";
     render();
   } catch (error) {
@@ -3557,16 +4986,19 @@ async function createFile() {
   }
 }
 
-async function createFolder() {
-  const folderPath = prompt("New folder path:", "chapters");
-  if (!folderPath) return;
+async function createFolder(baseDirOverride = undefined) {
+  const baseDir = typeof baseDirOverride === "string" ? baseDirOverride : selectedDirectoryPath();
+  const folderPath = uniqueProjectPath(baseDir, "new folder");
   try {
     const result = await api("/api/folder/create", {
       method: "POST",
       body: { path: folderPath }
     });
     await loadState();
+    local.selectedFolder = result.path;
     local.collapsedFolders.delete(result.path);
+    local.renamingTreePath = result.path;
+    local.renamingTreeKind = "directory";
     local.saveStatus = "Folder created";
     render();
   } catch (error) {
@@ -3574,13 +5006,16 @@ async function createFolder() {
   }
 }
 
-async function uploadProjectFile() {
+async function uploadProjectFile(baseDirOverride = undefined) {
+  const baseDirOverridePath = typeof baseDirOverride === "string" ? baseDirOverride : undefined;
   const input = document.createElement("input");
   input.type = "file";
   input.addEventListener("change", async () => {
     const upload = input.files?.[0];
     if (!upload) return;
-    const targetPath = prompt("Upload to path:", upload.type.startsWith("image/") ? `images/${upload.name}` : upload.name);
+    const baseDir = baseDirOverridePath ?? selectedDirectoryPath();
+    const defaultName = upload.type.startsWith("image/") && !baseDir ? `images/${upload.name}` : joinProjectPath(baseDir, upload.name);
+    const targetPath = prompt("Upload to path:", defaultName);
     if (!targetPath) return;
     try {
       const buffer = await upload.arrayBuffer();
@@ -3594,6 +5029,7 @@ async function uploadProjectFile() {
       });
       await loadState();
       local.selectedFile = result.path;
+      local.selectedFolder = "";
       expandToFile(result.path);
       await loadSelectedFile();
       local.saveStatus = "Uploaded";
@@ -3606,38 +5042,23 @@ async function uploadProjectFile() {
 }
 
 async function renameSelectedFile() {
-  if (!local.selectedFile) return;
-  const nextPath = prompt("Rename selected file:", local.selectedFile);
-  if (!nextPath || nextPath === local.selectedFile) return;
-  try {
-    const result = await api("/api/file/rename", {
-      method: "POST",
-      body: {
-        from: local.selectedFile,
-        to: nextPath
-      }
-    });
-    await loadState();
-    local.selectedFile = result.path;
-    expandToFile(result.path);
-    await loadSelectedFile();
-    local.saveStatus = "Renamed";
-    render();
-  } catch (error) {
-    alert(error.message);
-  }
+  const entry = selectedTreeEntry();
+  if (!entry) return;
+  startInlineRename(entry.path);
 }
 
 async function deleteSelectedFile() {
-  if (!local.selectedFile) return;
-  const confirmed = confirm(`Delete ${local.selectedFile}? This removes it from the host project folder.`);
+  const entry = selectedTreeEntry();
+  if (!entry) return;
+  const confirmed = confirm(`Delete ${entry.path}? This removes it from the host project folder.`);
   if (!confirmed) return;
   try {
     await api("/api/file/delete", {
       method: "POST",
-      body: { path: local.selectedFile }
+      body: { path: entry.path }
     });
     await loadState();
+    local.selectedFolder = "";
     local.selectedFile = local.appState.project.mainFile || local.appState.project.files.find((file) => file.type === "text" || file.type === "image")?.path;
     expandToFile(local.selectedFile);
     await loadSelectedFile();
@@ -3812,7 +5233,43 @@ window.addEventListener("popstate", () => {
   render();
 });
 
+window.addEventListener("pointerdown", (event) => {
+  if (!local.treeContextMenu) return;
+  if (event.target.closest?.(".tree-context-menu")) return;
+  closeTreeContextMenu();
+});
+
+window.addEventListener("pointerdown", (event) => {
+  if (!local.editorStyleMenuOpen) return;
+  if (event.target.closest?.(".editor-style-menu-wrap")) return;
+  local.editorStyleMenuOpen = false;
+  refreshEditorToolbarPanels();
+});
+
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && route().view === "editor") {
+    if (local.treeContextMenu) {
+      event.preventDefault();
+      closeTreeContextMenu();
+      return;
+    }
+    if (local.editorStyleMenuOpen) {
+      event.preventDefault();
+      local.editorStyleMenuOpen = false;
+      refreshEditorToolbarPanels();
+      return;
+    }
+    if (closeEditorSearchPanel()) {
+      event.preventDefault();
+      return;
+    }
+    if (local.tablePickerOpen) {
+      event.preventDefault();
+      local.tablePickerOpen = false;
+      refreshEditorToolbarPanels();
+      return;
+    }
+  }
   const mod = event.ctrlKey || event.metaKey;
   if (!mod || route().view !== "editor") return;
   const key = event.key.toLowerCase();

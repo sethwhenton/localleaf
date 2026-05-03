@@ -137,15 +137,15 @@ function runProcess(command, args, options) {
       }
     }, options.timeoutMs);
 
-    child.stdout.on("data", (chunk) => {
-      output += chunk.toString();
-      options.onData?.(chunk.toString());
-    });
+    const handleOutput = (chunk) => {
+      const text = chunk.toString();
+      output += text;
+      const cleanText = filterCompilerOutput(text);
+      if (cleanText) options.onData?.(cleanText);
+    };
 
-    child.stderr.on("data", (chunk) => {
-      output += chunk.toString();
-      options.onData?.(chunk.toString());
-    });
+    child.stdout.on("data", handleOutput);
+    child.stderr.on("data", handleOutput);
 
     child.on("error", (error) => {
       clearTimeout(timer);
@@ -159,8 +159,18 @@ function runProcess(command, args, options) {
   });
 }
 
+function isIgnorableCompilerLogLine(line) {
+  return /^Fontconfig error: Cannot load default config file: No such file: \(null\)$/i.test(String(line || "").trim());
+}
+
+function filterCompilerOutput(output) {
+  const lines = String(output || "").split(/\r?\n/);
+  const kept = lines.filter((line) => line === "" || !isIgnorableCompilerLogLine(line));
+  return kept.join("\n");
+}
+
 function splitLogs(output) {
-  return String(output || "").split(/\r?\n/).filter(Boolean);
+  return String(output || "").split(/\r?\n/).filter((line) => line && !isIgnorableCompilerLogLine(line));
 }
 
 function expectedPdfPath(projectRoot, mainFile, outputDir = projectRoot) {

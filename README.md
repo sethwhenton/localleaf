@@ -13,7 +13,7 @@ When the host stops the session or closes the app, the room ends.
 
 ## Current Release
 
-Version `0.1.12` focuses on the visual editor's figure-source workflow, update prompts, and safer PDF/ZIP exports.
+Version `0.1.13` is the code-editor-first final MVP build: cleaner Home and Session Management flows, a stronger starter project, improved file-tree actions, update checks, and release-ready Windows/macOS download links.
 
 ## Features
 
@@ -22,10 +22,10 @@ Version `0.1.12` focuses on the visual editor's figure-source workflow, update p
 - Smart tunnel racing across available providers, using the first verified public URL.
 - Real `.zip` LaTeX project import with folders, images, bibliography files, and source files preserved.
 - File tree with folder grouping, image grouping, rename, delete, upload, and set-main-file support.
-- Real CodeMirror 6 LaTeX editor with line numbers, command highlighting, toolbar actions, shortcuts, and autocomplete.
-- Lightweight visual editor for simple text, headings, figures, and editable tables.
-- Overleaf-style figure source editing with LaTeX highlighting, command autocomplete, and automatic return to the visual figure block after editing.
-- Blended visual table and figure editing that keeps LaTeX context visible without noisy source cards.
+- Real CodeMirror 6 LaTeX code editor with line numbers, command highlighting, toolbar actions, shortcuts, and autocomplete.
+- Visual Editor is intentionally parked as coming soon while the code editor ships as the stable editing surface.
+- One-click New Project flow with a compile-safe starter template covering common LaTeX commands, figures, tables, math, labels, references, citations, macros, and bibliography.
+- File tree actions for new file, new folder, inline rename, double-click rename, copy/paste, drag into folders or back to root, download, delete, upload, and set-main-file support.
 - Search and replace panel for editor work, with case, regex, and whole-word toggles.
 - Keyboard shortcuts for save/recompile, bold, italic, undo, redo, comments, indentation, and autocomplete.
 - Real-time shared text editing over WebSockets with file-level presence, without cursor or selection sync.
@@ -35,7 +35,7 @@ Version `0.1.12` focuses on the visual editor's figure-source workflow, update p
 - PDF preview powered by PDF.js, with smooth zoom buttons, Ctrl+mouse-wheel zoom, and page/scroll preservation after recompiles.
 - Compile logs with pinned red error groups, clearable orange warning groups, and gray informational output.
 - Session management screen with invite copy feedback, user list, health status, and stop-session handling.
-- Host-only update prompt when a newer LocalLeaf release is available.
+- Host-only update prompt and manual update checks when a newer LocalLeaf release is available.
 - Guests are notified when the host ends the session.
 - Hosts can stop a session and continue editing locally without being bounced back to the ended-session screen.
 

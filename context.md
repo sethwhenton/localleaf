@@ -16,9 +16,9 @@ Core principle: the host machine is the source of truth. Project files stay on t
 - Landing page: `https://sethwhenton.github.io/localleaf/`
 - Workspace path: `E:\Programming\Overleaf clone`
 - Current package version at the time of this handoff: `0.1.12`
-- Last pushed release before this handoff update: `v0.1.11`
-- Last verified Windows installer before this handoff update: `release\LocalLeaf Host Setup 0.1.11.exe`
-- GitHub release assets for `v0.1.11` were verified:
+- Last pushed release before this handoff update: `v0.1.12`
+- Last verified Windows installer before this handoff update: `release\LocalLeaf Host Setup 0.1.12.exe`
+- GitHub release assets for `v0.1.12` were verified:
   - `LocalLeaf-Host-Setup.exe`
   - `LocalLeaf-Host-mac-arm64.dmg`
   - `LocalLeaf-Host-mac-x64.dmg`
@@ -48,13 +48,13 @@ The app uses Electron for the installed host app, Node for the local server, Cod
 
 - Host desktop app with a white/orange LocalLeaf design.
 - Home screen, project overview, and session management screens.
-- Project creation, project opening, and ZIP import.
+- One-click project creation from a bundled starter template, project opening, and ZIP import.
 - Real project file tree with folders and grouped images.
 - Editor opens only after a project exists.
 - Browser-based editor similar to Overleaf.
 - Code editor powered by CodeMirror 6.
-- Visual editor mode for simpler text/headings and selected LaTeX structures.
-- Code/visual editor toggle in the editor toolbar.
+- Visual editor prototype for simpler text/headings and selected LaTeX structures, currently parked behind a disabled "Visual Editor soon" pill for shipping.
+- Code editor remains the active editor surface.
 - Editor tabs removed; file switching is done through the left file tree.
 - Adjustable/hideable file sidebar, editor pane, PDF pane, chat/user rail, and logs panel.
 - Separate scrolling for file tree, editor, preview, chat, and logs.
@@ -217,32 +217,115 @@ The next visual-editor request was also implemented:
 - Restored the Overleaf-style dark circular edit button on figure blocks.
 - Rebuilt client bundles and ran `npm test`.
 
-## Files Likely Needed For The Pending Request
+The following visual editor math pass was implemented after that:
 
-- `public/app.js`
-  - Export modal lives around `showExportModal()`.
-  - Header ZIP button uses `downloadZipButton`.
-  - Session-ended ZIP download link also needs a real `.zip` filename.
-  - Add update-toast state, markup, render/bind logic, and one-time update check.
+- Added a Visual Editor formula tool to the main editor toolbar.
+- Inline formulas can be inserted while typing and serialize back to `\(...\)`.
+- Typed `\(...\)`, `$...$`, and `\[...\]` patterns convert into editable visual math elements.
+- Display math serializes back on separate LaTeX lines so it does not glue to paragraph text.
+- Visual Editor now has a lightweight `\` command autocomplete popup with math commands plus project labels, citations, and macros.
+- Choosing math commands outside math inserts a real math chip; choosing them inside math inserts the command text.
+- Existing display math blocks like `\[...\]`, `equation`, and `align` parse into editable visual math blocks.
+- Browser smoke test covered formula insertion, typed display math conversion, `\al` autocomplete, save serialization, and compile success on a temporary project.
+- Rebuilt Windows locally and reopened `release\win-unpacked\LocalLeaf Host.exe`.
 
-- `public/styles.css`
-  - Add top-right update card/toast styles.
+The next Visual Editor paste-consistency pass was implemented:
 
-- `src/server/index.js`
-  - Export routes:
-    - `/api/export/pdf`
-    - `/api/export/zip`
-  - Existing helpers:
-    - `safeDownloadName(name, extension)`
-    - `attachmentHeaders(filename, contentType)`
-  - Add stronger `filename` and `filename*` content disposition.
-  - Add host-only update-check API, likely `/api/update/latest`, backed by GitHub latest release metadata.
+- Added Visual Editor copy normalization so selected formulas copy as real LaTeX, for example `\(\frac{a}{b}\)`.
+- Added paste normalization so inline formulas, display math, figure blocks, table blocks, headings, and raw LaTeX snippets rebuild into the same visual objects instead of being dumped as mismatched text.
+- Bare math command pastes such as `\frac{a}{b}` now become inline math chips with orange LaTeX highlighting.
+- Display math pastes such as `\[...\]` now become display math blocks, not inline chips.
+- Figure source pastes now become Overleaf-style figure visual blocks and save back as `\begin{figure}...\end{figure}`.
+- Browser smoke test verified inline math paste/copy, display math paste, figure paste, and saved LaTeX serialization.
+- Ran `node --check public\app.js`, `npm test`, rebuilt the Windows package, refreshed `release\LocalLeaf-Host-Setup.exe`, and reopened `release\win-unpacked\LocalLeaf Host.exe`.
 
-- `package.json` / `package-lock.json`
-  - Bump patch version if releasing the change.
+The next Visual Editor source-block exit pass was implemented:
 
-- `README.md` and `landing-page/`
-  - Update release notes/version copy if publishing a new release.
+- Expanded figure source blocks now collapse back to normal Visual Editor blocks when their source is empty, plain text, display math, figure, table, heading, or otherwise parseable by the visual parser.
+- Empty source becomes a blank numbered paragraph row and receives focus after clicking outside.
+- Plain text source becomes a normal paragraph.
+- Valid display math source becomes a math block.
+- Invalid/partial complex LaTeX, such as an unclosed `\begin{figure}`, stays in source mode so the user does not lose work.
+- Save/recompile now flushes empty or parseable expanded source blocks before writing the file.
+- Browser smoke test covered empty blur, plain text blur, display math blur, invalid partial source preservation, and empty source save persistence.
+
+The Visual Editor was then parked for shipping:
+
+- The editor now always opens in Code Editor mode, even if old browser storage says `localleaf.editorMode=visual`.
+- The editor surface always mounts the CodeMirror code editor for editable files.
+- The toolbar keeps a disabled "Visual Editor soon" pill so the direction is visible without exposing the unstable visual editor.
+- Code editor smoke testing confirmed stale Visual Editor preference cannot reopen visual mode, CodeMirror mounts correctly, line numbers render, `\` autocomplete opens, toolbar insertions work, and compile succeeds.
+- Research check matched the code-editor MVP against CodeMirror 6 official docs and Overleaf's editor expectations: line numbers, LaTeX syntax highlighting, command autocomplete, keyboard shortcuts, search/replace, source ZIP/PDF export, compile logs, PDF preview, and collaboration remain the shipping path.
+
+The Home and starter template rework was then implemented:
+
+- Home now focuses on New Project, Import ZIP Project, Open Current Project, and Host Online Session.
+- The manual Open Project button and Open Another Project link were removed from Home.
+- If a session is already live, Home changes the session action to Manage Current Session.
+- Added host-only `POST /api/project/new`.
+- New Project creates a unique `LocalLeaf Project`, `LocalLeaf Project 2`, etc. under the user's LocalLeaf projects directory and opens it immediately.
+- App startup now uses the new `LocalLeaf Project` starter path instead of the old `Thesis Draft` folder, so stale or manually edited old sample files are not treated as the base default.
+- The bundled starter template in `samples/thesis` is now a compact compile-safe LaTeX tour with examples of document setup, sections, formatting, lists, links, footnotes, labels/refs, citations, math, figures, tables, macros, and bibliography.
+- The starter includes a local PNG asset at `samples/thesis/assets/localleaf-icon.png` so `\includegraphics` works offline.
+- Session Management no longer has a top-right Open Editor button; the editor CTA is now a long full-width button below the session cards.
+- The known harmless Tectonic/Windows `Fontconfig error: Cannot load default config file` line is filtered out of live and final compile logs so it is not shown as a scary compile error.
+- Validation covered `node --check`, `npm test`, `git diff --check`, a real bundled-Tectonic starter compile, Windows packaging, reopening the fresh Windows build, and compiling the running app's default starter project successfully.
+
+The file tree toolbar was then tightened:
+
+- Search/replace can now be closed with Escape from the search inputs or globally while the editor is focused.
+- The file toolbar uses compact icon buttons with hover labels for New File, New Folder, Upload, Rename, and Delete.
+- Folder rows are selectable, so Rename/Delete can target either the selected folder or selected file.
+- New File, New Folder, and Upload default to the selected folder context, or the selected file's parent folder.
+- `/api/file/rename` now supports both files and folders, including moving a file into a folder.
+- Files and folders can be dragged in the tree and dropped onto folders to move them.
+- Folder delete is supported while preventing deletion of the last editable text file.
+- Validation covered `node --check`, `npm test`, Windows packaging, and reopening the fresh Windows build.
+
+The inline file-tree create/rename pass was then implemented:
+
+- Rename no longer opens a prompt. The selected file or folder row turns into an inline highlighted input with the current name selected.
+- New File creates a unique `new file.tex`, `new file 2.tex`, etc. in the current tree context and immediately selects the new row name for inline renaming.
+- New Folder creates a unique `new folder`, `new folder 2`, etc. in the current tree context and immediately selects the new folder name for inline renaming.
+- Inline rename rejects empty names, path separators, and duplicate file/folder names in the same directory before calling the server.
+- Server-side duplicate checks still protect create/rename/delete operations.
+- API smoke testing covered new file creation, new folder creation, duplicate rejection, rename-to-existing rejection, file delete, and folder delete.
+
+The inline rename UX was then refined:
+
+- File renaming now edits only the filename stem while showing the extension, such as `.tex`, `.bib`, or `.png`, as a protected suffix.
+- Pasting a full name like `paper.tex` into the stem field is normalized back to `paper` plus the protected `.tex` suffix.
+- Double-clicking a file or folder row starts inline rename.
+- Pressing Enter commits the inline name, while Escape cancels it.
+- The file tree now has subtle vertical guide lines and elbows for nested folders/files so the structure is easier to read.
+
+The file-tree context menu and drag/drop pass was then implemented:
+
+- Right-clicking a file, folder, or the tree background opens a custom LocalLeaf context menu.
+- Menu actions include Rename, Copy, Paste, Download, Set as main document, Delete, New file, New folder, and Upload, with invalid actions disabled.
+- Copy/Paste duplicates files or folders inside the project using unique `copy` names and server-side collision checks.
+- Added `POST /api/file/copy` for project item duplication.
+- Added `GET /api/file/download?path=...` for raw file downloads and folder ZIP downloads.
+- Dragging items onto folders still moves them into that folder; dragging a nested item onto the tree background moves it back to project root.
+- Drag targets now show clearer feedback: the root tree gets an orange root drop outline, and folder rows get an orange circular target on the caret.
+- Tests now cover file/folder copy, duplicate copy rejection, raw file download, and folder ZIP download.
+
+The editor toolbar and outline polish pass was then implemented:
+
+- Fixed a toolbar regression where New File/New Folder/Upload could receive a click `PointerEvent` as the target path, creating a bad `[object PointerEvent]` folder.
+- Removed the bad generated `[object PointerEvent]` folder from the user's LocalLeaf projects directory.
+- The text-style control is now a custom dark dropdown styled like Overleaf's hierarchy menu, with larger Section/Subsection/Subsubsection/Paragraph/Subparagraph options.
+- The file outline now parses `chapter`, `section`, `subsection`, `subsubsection`, `paragraph`, and `subparagraph`.
+- File outline rendering is now a nested tree-style list with guide lines, active highlight, and bounded scroll for long documents.
+
+The update-check flow was then refined:
+
+- LocalLeaf still checks for updates automatically when the app opens.
+- Startup update checks are silent; if there is no internet connection or GitHub cannot be reached, no popup or error is shown.
+- Added a Home `Check for updates` button.
+- Added a compact editor top-bar `Update` button.
+- Manual checks can run even after the startup check has already happened.
+- Manual checks show the existing update toast if a release is available, and briefly show `Up to date` on the button when the app is current.
 
 ## User Preferences And UI Direction
 
