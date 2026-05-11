@@ -667,7 +667,7 @@ section[id] {
 }
 
 .preview-section {
-  height: clamp(2600px, 360vh, 4400px);
+  height: clamp(2200px, 300vh, 3600px);
   width: var(--section-width);
   margin-top: clamp(-118px, -9svh, -56px);
   padding: 0;
@@ -2340,7 +2340,7 @@ details p {
 
   .preview-section {
     width: var(--section-width);
-    height: clamp(2400px, 350vh, 3300px);
+    height: clamp(2100px, 290vh, 2800px);
     margin-top: clamp(-74px, -7svh, -38px);
   }
 
