@@ -132,7 +132,7 @@ const updateScrollPreview = () => {
   const rect = previewSection.getBoundingClientRect();
   const distance = Math.max(1, rect.height - window.innerHeight);
   const progress = Math.min(1, Math.max(0, -rect.top / distance));
-  const index = Math.min(previewStates.length - 1, Math.floor(progress * previewStates.length));
+  const index = Math.min(previewStates.length - 1, Math.floor((progress + 0.181) / 0.28));
   setPreview(index);
 };
 
