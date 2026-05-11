@@ -2549,6 +2549,7 @@ details p {
 
   .collab-flow-section {
     width: 100vw;
+    margin-top: 0;
   }
 
   .split-proof,
