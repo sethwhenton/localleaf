@@ -138,8 +138,9 @@ const updateScrollPreview = () => {
 
 const updateCollabFlowMotion = () => {
   if (!collabFlowSection) return;
+  const hasStatementPanel = Boolean(collabFlowSection.querySelector(".statement-section"));
 
-  if (prefersReducedMotion.matches) {
+  if (prefersReducedMotion.matches || !hasStatementPanel) {
     collabFlowSection.style.setProperty("--statement-panel-x", "0px");
     collabFlowSection.style.setProperty("--flow-panel-x", "0px");
     collabFlowSection.style.setProperty("--flow-panel-scale", "1");
@@ -181,7 +182,25 @@ const updateScrollReveals = () => {
     const qaSection = item.closest(".qa-section");
     const finalRevealSection = item.closest(".final-cta");
 
-    if (statementRevealSection && collabFlowSection) {
+    if (statementRevealSection && !statementRevealSection.closest(".collab-flow-section")) {
+      const sectionRect = statementRevealSection.getBoundingClientRect();
+      const statementIndex = Number(item.dataset.statementRevealIndex || 0);
+      const triggerLine = 0.8 - statementIndex * 0.13;
+      const progress = clamp(
+        (window.innerHeight * triggerLine - sectionRect.top) / (window.innerHeight * 0.3)
+      );
+      const eased = easeScroll(progress);
+      const lift = (1 - eased) * 56;
+      const blur = (1 - eased) * 10;
+      const scale = 0.97 + eased * 0.03;
+
+      item.style.opacity = eased.toFixed(3);
+      item.style.transform = `translate3d(0, ${lift.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`;
+      item.style.filter = blur > 0.12 ? `blur(${blur.toFixed(2)}px)` : "none";
+      return;
+    }
+
+    if (statementRevealSection?.closest(".collab-flow-section") && collabFlowSection) {
       const sceneRect = collabFlowSection.getBoundingClientRect();
       const sceneDistance = Math.max(1, sceneRect.height - window.innerHeight);
       const sceneProgress = clamp(-sceneRect.top / sceneDistance);

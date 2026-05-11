@@ -824,11 +824,11 @@ section[id] {
 
 .collab-flow-section {
   --statement-panel-x: 0px;
-  --flow-panel-x: -100vw;
-  --flow-panel-scale: 0.985;
+  --flow-panel-x: 0px;
+  --flow-panel-scale: 1;
   width: 100vw;
-  min-height: clamp(2100px, 390svh, 4400px);
-  margin-top: clamp(-440px, -45svh, -320px);
+  min-height: var(--section-min);
+  margin-top: 0;
   margin-left: calc(50% - 50vw);
   margin-right: calc(50% - 50vw);
   position: relative;
@@ -838,31 +838,33 @@ section[id] {
 }
 
 .collab-flow-stage {
-  position: sticky;
-  top: 0;
-  height: 100svh;
-  min-height: 100svh;
+  position: relative;
+  min-height: var(--section-min);
   display: grid;
   align-items: center;
-  overflow: hidden;
+  overflow: visible;
   background: #fff;
 }
 
 .collab-flow-panel {
   grid-area: 1 / 1;
   width: 100%;
-  min-height: 100svh;
-  overflow: hidden;
+  min-height: var(--section-min);
+  overflow: visible;
   background: #fff;
   will-change: transform;
 }
 
 .statement-section {
+  width: var(--section-width);
+  min-height: var(--section-min);
+  margin: 0 auto;
   display: grid;
   align-content: center;
+  border-top: 1px solid var(--line);
   padding: var(--section-pad) 0;
   overflow: visible;
-  transform: translate3d(var(--statement-panel-x), 0, 0);
+  transform: none;
   z-index: 1;
 }
 
@@ -978,7 +980,7 @@ section[id] {
   align-content: center;
   padding: 0;
   overflow: visible;
-  transform: translate3d(var(--flow-panel-x), 0, 0);
+  transform: none;
   z-index: 2;
 }
 
@@ -2290,7 +2292,7 @@ details p {
   }
 
   .collab-flow-section {
-    min-height: clamp(1900px, 350svh, 3800px);
+    min-height: var(--section-min);
   }
 
   .flow-section {
@@ -2617,7 +2619,7 @@ details p {
   }
 
   .collab-flow-section {
-    min-height: clamp(1800px, 310svh, 3000px);
+    min-height: var(--section-min);
   }
 
   .flow-section {
