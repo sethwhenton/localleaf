@@ -147,33 +147,35 @@
           </div>
         </section>
 
-        <section class="statement-section">
-          <div class="statement-shell">
-            <article class="statement reveal">
-              <span class="statement-icon link-icon" aria-hidden="true"></span>
-              <p>Open a project, share a link, approve collaborators, and write together.</p>
-            </article>
-            <article class="statement reveal">
-              <span class="statement-icon lock-icon" aria-hidden="true"></span>
-              <p>No accounts. No monthly server. No cloud storage.</p>
-            </article>
-            <article class="statement reveal">
-              <span class="statement-icon leaf-icon" aria-hidden="true"></span>
-              <p>Your draft stays on the host computer from first edit to final PDF.</p>
-            </article>
-          </div>
-        </section>
-
-        <section class="flow-section" id="flow" aria-labelledby="flow-title">
-          <div class="flow-shell">
-            <div class="flow-copy">
-              <div class="section-heading">
-                <p>Flow</p>
-                <h2 id="flow-title">A collaboration session without the cloud detour.</h2>
+        <section class="collab-flow-section" id="flow" aria-labelledby="flow-title">
+          <div class="collab-flow-stage">
+            <section class="statement-section collab-flow-panel" aria-label="LocalLeaf collaboration promise">
+              <div class="statement-shell">
+                <article class="statement reveal">
+                  <span class="statement-icon link-icon" aria-hidden="true"></span>
+                  <p>Open a project, share a link, approve collaborators, and write together.</p>
+                </article>
+                <article class="statement reveal">
+                  <span class="statement-icon lock-icon" aria-hidden="true"></span>
+                  <p>No accounts. No monthly server. No cloud storage.</p>
+                </article>
+                <article class="statement reveal">
+                  <span class="statement-icon leaf-icon" aria-hidden="true"></span>
+                  <p>Your draft stays on the host computer from first edit to final PDF.</p>
+                </article>
               </div>
+            </section>
 
-              <div class="flow-track" aria-label="LocalLeaf collaboration flow">
-                <svg class="flow-current" viewBox="0 0 520 610" aria-hidden="true" preserveAspectRatio="none">
+            <section class="flow-section collab-flow-panel" aria-labelledby="flow-title">
+              <div class="flow-shell">
+                <div class="flow-copy">
+                  <div class="section-heading">
+                    <p>Flow</p>
+                    <h2 id="flow-title">A collaboration session without the cloud detour.</h2>
+                  </div>
+
+                  <div class="flow-track" aria-label="LocalLeaf collaboration flow">
+                    <svg class="flow-current" viewBox="0 0 520 610" aria-hidden="true" preserveAspectRatio="none">
                   <defs>
                     <linearGradient id="flow-current-gradient" x1="0" y1="0" x2="1" y2="1">
                       <stop offset="0" stop-color="#ff6700" stop-opacity="0.18" />
@@ -303,8 +305,9 @@
                   <path d="M620 122c12 14 28 14 40 0M620 106c12 14 28 14 40 0" />
                 </g>
               </svg>
-              <figcaption>LocalLeaf uses secure temporary tunnels to connect collaborators to the host laptop, so your project stays local without renting a server.</figcaption>
-            </figure>
+                <figcaption>LocalLeaf uses secure temporary tunnels to connect collaborators to the host laptop, so your project stays local without renting a server.</figcaption>
+              </figure>
+            </section>
           </div>
         </section>
 

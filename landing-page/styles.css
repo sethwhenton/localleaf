@@ -631,8 +631,7 @@ h1 {
 }
 
 .preview-section,
-.statement-section,
-.flow-section,
+.collab-flow-section,
 .split-proof,
 .qa-section,
 .final-cta,
@@ -823,21 +822,45 @@ section[id] {
   backdrop-filter: blur(12px);
 }
 
+.collab-flow-section {
+  --statement-panel-x: 0px;
+  --flow-panel-x: -100vw;
+  --flow-panel-scale: 0.985;
+  min-height: clamp(1360px, 205svh, 2260px);
+  position: relative;
+  border-top: 1px solid var(--line);
+  overflow: clip;
+}
+
+.collab-flow-stage {
+  position: sticky;
+  top: 0;
+  height: 100svh;
+  min-height: 100svh;
+  display: grid;
+  align-items: center;
+  overflow: visible;
+}
+
+.collab-flow-panel {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-height: 100svh;
+  will-change: transform;
+}
+
 .statement-section {
-  --statement-shift: 0px;
-  min-height: var(--section-min);
   display: grid;
   align-content: center;
   padding: var(--section-pad) 0;
-  border-top: 1px solid var(--line);
-  overflow: clip;
+  overflow: visible;
+  transform: translate3d(var(--statement-panel-x), 0, 0);
+  z-index: 1;
 }
 
 .statement-shell {
   display: grid;
   gap: clamp(34px, 6svh, 92px);
-  transform: translate3d(var(--statement-shift), 0, 0);
-  will-change: transform;
 }
 
 .statement {
@@ -941,13 +964,12 @@ section[id] {
 }
 
 .flow-section {
-  --flow-shift: 0px;
-  --flow-scale: 1;
-  min-height: clamp(980px, 150svh, 1740px);
-  display: block;
+  display: grid;
+  align-content: center;
   padding: 0;
-  border-top: 1px solid var(--line);
-  overflow: clip;
+  overflow: visible;
+  transform: translate3d(var(--flow-panel-x), 0, 0);
+  z-index: 2;
 }
 
 .flow-shell {
@@ -955,18 +977,11 @@ section[id] {
   grid-template-columns: minmax(390px, 0.92fr) minmax(0, 1.08fr);
   gap: clamp(32px, 5vw, 96px);
   align-items: center;
-  min-height: calc(100svh - var(--sticky-top));
-  padding: var(--section-pad-tight) 0;
-  transform: translate3d(var(--flow-shift), 0, 0) scale(var(--flow-scale));
+  min-height: 100svh;
+  padding: clamp(24px, 4.4svh, 54px) 0;
+  transform: scale(var(--flow-panel-scale));
   transform-origin: center;
   will-change: transform;
-}
-
-@media (min-width: 1121px) {
-  .flow-shell {
-    position: sticky;
-    top: var(--sticky-top);
-  }
 }
 
 .flow-copy .section-heading {
@@ -980,13 +995,13 @@ section[id] {
 }
 
 .flow-copy .section-heading h2 {
-  font-size: clamp(38px, 4.1vw, 76px);
+  font-size: clamp(36px, 3.85vw, 68px);
   line-height: 0.98;
 }
 
 .flow-track {
   position: relative;
-  min-height: clamp(420px, 54svh, 620px);
+  min-height: clamp(390px, 50svh, 560px);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -1097,7 +1112,7 @@ section[id] {
   position: relative;
   display: grid;
   place-items: center;
-  min-height: clamp(500px, 64svh, 760px);
+  min-height: clamp(430px, 56svh, 660px);
   margin: 0;
   padding: clamp(22px, 3.2vw, 42px);
   overflow: hidden;
@@ -2262,9 +2277,13 @@ details p {
     font-size: clamp(46px, 6.2vw, 70px);
   }
 
+  .collab-flow-section {
+    min-height: clamp(1320px, 196svh, 2120px);
+  }
+
   .flow-section {
-    min-height: auto;
-    padding: var(--section-pad-tight) 0;
+    min-height: 100svh;
+    padding: 0;
   }
 
   .preview-theater,
@@ -2284,8 +2303,8 @@ details p {
   .flow-shell {
     grid-template-columns: 1fr;
     gap: 34px;
-    min-height: auto;
-    padding: 0;
+    min-height: 100svh;
+    padding: var(--section-pad-tight) 0;
   }
 
   .flow-copy .section-heading {
@@ -2516,8 +2535,7 @@ details p {
     width: 100%;
   }
 
-  .statement-section,
-  .flow-section,
+  .collab-flow-section,
   .split-proof,
   .qa-section,
   .final-cta,
@@ -2582,13 +2600,23 @@ details p {
     font-size: clamp(32px, 9vw, 42px);
   }
 
+  .collab-flow-section {
+    min-height: clamp(1180px, 185svh, 1580px);
+  }
+
   .flow-section {
-    min-height: auto;
-    padding: var(--section-pad-tight) 0;
+    min-height: 100svh;
+    padding: 0;
+  }
+
+  .flow-shell {
+    min-height: 100svh;
+    gap: clamp(12px, 2.4svh, 20px);
+    padding: clamp(12px, 2.2svh, 22px) 0;
   }
 
   .flow-copy .section-heading {
-    margin-bottom: 20px;
+    margin-bottom: 12px;
     text-align: left;
   }
 
@@ -2597,24 +2625,25 @@ details p {
   }
 
   .flow-copy .section-heading h2 {
-    font-size: clamp(32px, 8.8vw, 38px);
+    font-size: clamp(28px, 7.4vw, 34px);
+    line-height: 0.96;
   }
 
   .flow-track {
     min-height: auto;
     display: grid;
-    gap: 14px;
-    padding: 6px 0 6px 18px;
+    gap: 8px;
+    padding: 4px 0 4px 14px;
   }
 
   .flow-track::before {
     content: "";
     position: absolute;
-    left: 38px;
-    top: 22px;
-    bottom: 22px;
+    left: 30px;
+    top: 18px;
+    bottom: 18px;
     z-index: 0;
-    width: 5px;
+    width: 4px;
     border-radius: 999px;
     background: linear-gradient(180deg, rgba(255, 103, 0, 0.14), var(--orange), rgba(31, 168, 97, 0.36));
   }
@@ -2628,30 +2657,47 @@ details p {
   .flow-step:nth-of-type(even) {
     width: 100%;
     align-self: stretch;
-    grid-template-columns: 50px 1fr;
+    grid-template-columns: 42px 1fr;
     margin: 0;
-    padding: 13px 14px;
+    padding: 8px 10px;
   }
 
   .flow-number {
-    width: 40px;
-    height: 40px;
+    width: 34px;
+    height: 34px;
     font-size: 12px;
     box-shadow:
-      0 0 0 6px #fff,
-      0 12px 24px rgba(255, 103, 0, 0.22);
+      0 0 0 5px #fff,
+      0 10px 20px rgba(255, 103, 0, 0.2);
   }
 
   .flow-step h3 {
-    font-size: 22px;
+    margin-bottom: 3px;
+    font-size: 18px;
   }
 
   .flow-step p {
-    font-size: 13px;
+    font-size: 12px;
+    line-height: 1.25;
   }
 
   .flow-art {
-    min-height: clamp(360px, 55svh, 470px);
+    min-height: clamp(190px, 25svh, 250px);
+    padding: 10px;
+  }
+
+  .tunnel-art {
+    height: clamp(150px, 22svh, 210px);
+    margin-bottom: 24px;
+  }
+
+  .flow-art figcaption {
+    left: 14px;
+    right: 14px;
+    bottom: 12px;
+    max-width: none;
+    font-size: 10px;
+    line-height: 1.18;
   }
 
   .flow-art-device {
@@ -2794,12 +2840,17 @@ details p {
   }
 
   .flow-step {
-    gap: 12px;
-    padding: 12px;
+    gap: 10px;
+    padding: 8px 10px;
   }
 
   .flow-art {
-    min-height: clamp(360px, 53svh, 420px);
+    min-height: clamp(185px, 24svh, 230px);
+  }
+
+  .tunnel-art {
+    height: clamp(142px, 21svh, 186px);
+    margin-bottom: 22px;
   }
 
   .flow-art-device {
@@ -2824,7 +2875,7 @@ details p {
   }
 
   .flow-art figcaption {
-    right: 20px;
-    max-width: 210px;
+    right: 14px;
+    max-width: none;
   }
 }

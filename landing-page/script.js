@@ -7,8 +7,7 @@ const previewStep = document.querySelector("[data-preview-step]");
 const previewTitle = document.querySelector("[data-preview-title]");
 const previewCopy = document.querySelector("[data-preview-copy]");
 const previewWindowTitle = document.querySelector("[data-preview-window-title]");
-const statementSection = document.querySelector(".statement-section");
-const flowSection = document.querySelector(".flow-section");
+const collabFlowSection = document.querySelector(".collab-flow-section");
 const finalCta = document.querySelector(".final-cta");
 
 const previewStates = [
@@ -51,6 +50,8 @@ let smoothScrollFrame = 0;
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 
 const easeScroll = (progress) => 1 - Math.pow(1 - progress, 3.4);
+const easeInOut = (progress) =>
+  progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
 
 const initSmoothScroll = () => {
   if (prefersReducedMotion.matches || typeof window.Lenis !== "function") return null;
@@ -135,45 +136,28 @@ const updateScrollPreview = () => {
   setPreview(index);
 };
 
-const updateStatementMotion = () => {
-  if (!statementSection) return;
+const updateCollabFlowMotion = () => {
+  if (!collabFlowSection) return;
 
   if (prefersReducedMotion.matches) {
-    statementSection.style.setProperty("--statement-shift", "0px");
+    collabFlowSection.style.setProperty("--statement-panel-x", "0px");
+    collabFlowSection.style.setProperty("--flow-panel-x", "0px");
+    collabFlowSection.style.setProperty("--flow-panel-scale", "1");
     return;
   }
 
-  const rect = statementSection.getBoundingClientRect();
-  const start = window.innerHeight * 0.08;
-  const end = window.innerHeight * 0.64;
-  const progress = clamp((-rect.top - start) / Math.max(1, end - start));
-  const eased = 1 - Math.pow(1 - progress, 2.2);
-  const maxShift = Math.min(window.innerWidth <= 820 ? 120 : 420, window.innerWidth * 0.32);
-  const shift = eased * maxShift;
+  const rect = collabFlowSection.getBoundingClientRect();
+  const scrollDistance = Math.max(1, rect.height - window.innerHeight);
+  const progress = clamp(-rect.top / scrollDistance);
+  const handoff = easeInOut(clamp((progress - 0.34) / 0.48));
+  const panelDistance = Math.min(window.innerWidth <= 820 ? 540 : 1180, window.innerWidth * 1.08);
+  const statementX = handoff * panelDistance;
+  const flowX = (handoff - 1) * panelDistance;
+  const flowScale = 0.985 + handoff * 0.015;
 
-  statementSection.style.setProperty("--statement-shift", `${shift.toFixed(1)}px`);
-};
-
-const updateFlowMotion = () => {
-  if (!flowSection) return;
-
-  if (prefersReducedMotion.matches) {
-    flowSection.style.setProperty("--flow-shift", "0px");
-    flowSection.style.setProperty("--flow-scale", "1");
-    return;
-  }
-
-  const rect = flowSection.getBoundingClientRect();
-  const start = window.innerHeight * 1.05;
-  const end = window.innerHeight * 0.02;
-  const progress = clamp((start - rect.top) / Math.max(1, start - end));
-  const eased = 1 - Math.pow(1 - progress, 1.55);
-  const maxShift = Math.min(window.innerWidth <= 820 ? 150 : 620, window.innerWidth * 0.42);
-  const shift = (eased - 1) * maxShift;
-  const scale = 0.985 + eased * 0.015;
-
-  flowSection.style.setProperty("--flow-shift", `${shift.toFixed(1)}px`);
-  flowSection.style.setProperty("--flow-scale", scale.toFixed(3));
+  collabFlowSection.style.setProperty("--statement-panel-x", `${statementX.toFixed(1)}px`);
+  collabFlowSection.style.setProperty("--flow-panel-x", `${flowX.toFixed(1)}px`);
+  collabFlowSection.style.setProperty("--flow-panel-scale", flowScale.toFixed(3));
 };
 
 const updateScrollReveals = () => {
@@ -233,8 +217,7 @@ const updateOnScroll = () => {
   window.requestAnimationFrame(() => {
     updateHeader();
     updateScrollPreview();
-    updateStatementMotion();
-    updateFlowMotion();
+    updateCollabFlowMotion();
     updateSectionAnimationStates();
     updateScrollReveals();
     ticking = false;
@@ -267,7 +250,6 @@ prefersReducedMotion.addEventListener?.("change", () => {
 updateHeader();
 setPreview(0);
 updateScrollPreview();
-updateStatementMotion();
-updateFlowMotion();
+updateCollabFlowMotion();
 updateSectionAnimationStates();
 updateScrollReveals();
