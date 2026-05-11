@@ -150,7 +150,7 @@ const updateCollabFlowMotion = () => {
   const scrollDistance = Math.max(1, rect.height - window.innerHeight);
   const progress = clamp(-rect.top / scrollDistance);
   const handoff = easeInOut(clamp((progress - 0.34) / 0.48));
-  const panelDistance = Math.min(window.innerWidth <= 820 ? 540 : 1180, window.innerWidth * 1.08);
+  const panelDistance = window.innerWidth;
   const statementX = handoff * panelDistance;
   const flowX = (handoff - 1) * panelDistance;
   const flowScale = 0.985 + handoff * 0.015;

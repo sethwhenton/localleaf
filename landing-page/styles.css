@@ -826,10 +826,14 @@ section[id] {
   --statement-panel-x: 0px;
   --flow-panel-x: -100vw;
   --flow-panel-scale: 0.985;
+  width: 100vw;
   min-height: clamp(1360px, 205svh, 2260px);
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
   position: relative;
   border-top: 1px solid var(--line);
   overflow: clip;
+  background: #fff;
 }
 
 .collab-flow-stage {
@@ -839,13 +843,16 @@ section[id] {
   min-height: 100svh;
   display: grid;
   align-items: center;
-  overflow: visible;
+  overflow: hidden;
+  background: #fff;
 }
 
 .collab-flow-panel {
   grid-area: 1 / 1;
   width: 100%;
   min-height: 100svh;
+  overflow: hidden;
+  background: #fff;
   will-change: transform;
 }
 
@@ -859,6 +866,8 @@ section[id] {
 }
 
 .statement-shell {
+  width: var(--section-width);
+  margin: 0 auto;
   display: grid;
   gap: clamp(34px, 6svh, 92px);
 }
@@ -973,6 +982,8 @@ section[id] {
 }
 
 .flow-shell {
+  width: var(--section-width);
+  margin: 0 auto;
   display: grid;
   grid-template-columns: minmax(390px, 0.92fr) minmax(0, 1.08fr);
   gap: clamp(32px, 5vw, 96px);
@@ -2535,7 +2546,10 @@ details p {
     width: 100%;
   }
 
-  .collab-flow-section,
+  .collab-flow-section {
+    width: 100vw;
+  }
+
   .split-proof,
   .qa-section,
   .final-cta,
