@@ -25,10 +25,33 @@ html {
   scroll-behavior: smooth;
 }
 
+html.js-enabled,
+html.lenis.lenis-smooth {
+  scroll-behavior: auto;
+}
+
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+
+html.lenis.lenis-smooth [data-lenis-prevent] {
+  overscroll-behavior: contain;
+}
+
+html.lenis.lenis-stopped {
+  overflow: clip;
+}
+
+html.lenis.lenis-smooth iframe {
+  pointer-events: none;
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  overscroll-behavior-y: none;
 }
 
 a {

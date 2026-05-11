@@ -44,10 +44,52 @@ let activePreview = 0;
 let lastScrollY = window.scrollY;
 let ticking = false;
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+let smoothScrollFrame = 0;
 
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 
 const easeScroll = (progress) => 1 - Math.pow(1 - progress, 3.4);
+
+const initSmoothScroll = () => {
+  if (prefersReducedMotion.matches || typeof window.Lenis !== "function") return null;
+
+  const isMobile =
+    window.matchMedia("(max-width: 768px)").matches ||
+    "ontouchstart" in window ||
+    navigator.maxTouchPoints > 0;
+
+  const lenis = new window.Lenis({
+    lerp: isMobile ? 0.18 : 0.025,
+    duration: isMobile ? 0.12 : 1.15,
+    easing: (t) => 1 - Math.pow(1 - t, 4),
+    smoothWheel: !isMobile,
+    smoothTouch: false,
+    syncTouch: false,
+    touchMultiplier: isMobile ? 1.6 : 0.9,
+    wheelMultiplier: 1,
+    normalizeWheel: true,
+    infinite: false,
+    anchors: {
+      offset: -88,
+      duration: 1.1,
+      easing: (t) => 1 - Math.pow(1 - t, 4),
+    },
+    prevent: (node) =>
+      node.closest?.(".nav-links") ||
+      node.closest?.("details") ||
+      node.closest?.("[data-lenis-prevent]"),
+  });
+
+  const raf = (time) => {
+    lenis.raf(time);
+    smoothScrollFrame = window.requestAnimationFrame(raf);
+  };
+
+  smoothScrollFrame = window.requestAnimationFrame(raf);
+  lenis.on("scroll", updateOnScroll);
+  window.localLeafLenis = lenis;
+  return lenis;
+};
 
 const updateHeader = () => {
   if (!header) return;
@@ -154,9 +196,18 @@ document.querySelectorAll(".final-cta .reveal").forEach((item, index) => {
   item.dataset.revealOffset = `${index * 0.035}`;
 });
 
+const smoothScroller = initSmoothScroll();
+
 window.addEventListener("scroll", updateOnScroll, { passive: true });
 window.addEventListener("resize", updateOnScroll);
-prefersReducedMotion.addEventListener?.("change", updateOnScroll);
+window.addEventListener("load", () => smoothScroller?.resize?.(), { once: true });
+prefersReducedMotion.addEventListener?.("change", () => {
+  if (prefersReducedMotion.matches) {
+    smoothScroller?.destroy?.();
+    if (smoothScrollFrame) window.cancelAnimationFrame(smoothScrollFrame);
+  }
+  updateOnScroll();
+});
 updateHeader();
 setPreview(0);
 updateScrollPreview();
