@@ -149,7 +149,7 @@ const updateCollabFlowMotion = () => {
   const rect = collabFlowSection.getBoundingClientRect();
   const scrollDistance = Math.max(1, rect.height - window.innerHeight);
   const progress = clamp(-rect.top / scrollDistance);
-  const handoff = easeInOut(clamp((progress - 0.4) / 0.58));
+  const handoff = easeInOut(clamp((progress - 0.6) / 0.4));
   const panelDistance = window.innerWidth;
   const statementX = handoff * panelDistance;
   const flowX = (handoff - 1) * panelDistance;
@@ -180,6 +180,24 @@ const updateScrollReveals = () => {
     const statementRevealSection = item.closest(".statement-section");
     const qaSection = item.closest(".qa-section");
     const finalRevealSection = item.closest(".final-cta");
+
+    if (statementRevealSection && collabFlowSection) {
+      const sceneRect = collabFlowSection.getBoundingClientRect();
+      const sceneDistance = Math.max(1, sceneRect.height - window.innerHeight);
+      const sceneProgress = clamp(-sceneRect.top / sceneDistance);
+      const statementIndex = Number(item.dataset.statementRevealIndex || 0);
+      const progress = clamp((sceneProgress - (0.1 + statementIndex * 0.09)) / 0.22);
+      const eased = easeScroll(progress);
+      const lift = (1 - eased) * 64;
+      const blur = (1 - eased) * 11;
+      const scale = 0.965 + eased * 0.035;
+
+      item.style.opacity = eased.toFixed(3);
+      item.style.transform = `translate3d(0, ${lift.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`;
+      item.style.filter = blur > 0.12 ? `blur(${blur.toFixed(2)}px)` : "none";
+      return;
+    }
+
     const centerSnapSection = item.closest(".statement-section, .flow-section, .qa-section, .final-cta");
     const sectionRect = centerSnapSection?.getBoundingClientRect();
     const centerThreshold = qaSection ? 0.52 : statementRevealSection ? 0.46 : finalRevealSection ? 0.56 : 0.34;
@@ -226,6 +244,10 @@ const updateOnScroll = () => {
 
 document.querySelectorAll(".flow-step").forEach((step, index) => {
   step.dataset.revealOffset = `${index * 0.025}`;
+});
+
+document.querySelectorAll(".statement-section .reveal").forEach((item, index) => {
+  item.dataset.statementRevealIndex = `${index}`;
 });
 
 document.querySelectorAll(".final-cta .reveal").forEach((item, index) => {

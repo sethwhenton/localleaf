@@ -827,7 +827,7 @@ section[id] {
   --flow-panel-x: -100vw;
   --flow-panel-scale: 0.985;
   width: 100vw;
-  min-height: clamp(1480px, 222svh, 2480px);
+  min-height: clamp(1720px, 275svh, 3180px);
   margin-left: calc(50% - 50vw);
   margin-right: calc(50% - 50vw);
   position: relative;
@@ -2289,7 +2289,7 @@ details p {
   }
 
   .collab-flow-section {
-    min-height: clamp(1400px, 212svh, 2300px);
+    min-height: clamp(1540px, 252svh, 2720px);
   }
 
   .flow-section {
@@ -2615,7 +2615,7 @@ details p {
   }
 
   .collab-flow-section {
-    min-height: clamp(1260px, 198svh, 1720px);
+    min-height: clamp(1420px, 236svh, 2060px);
   }
 
   .flow-section {
