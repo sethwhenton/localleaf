@@ -149,7 +149,7 @@ const updateCollabFlowMotion = () => {
   const rect = collabFlowSection.getBoundingClientRect();
   const scrollDistance = Math.max(1, rect.height - window.innerHeight);
   const progress = clamp(-rect.top / scrollDistance);
-  const handoff = easeInOut(clamp((progress - 0.7) / 0.3));
+  const handoff = easeInOut(clamp((progress - 0.66) / 0.32));
   const panelDistance = window.innerWidth;
   const statementX = handoff * panelDistance;
   const flowX = (handoff - 1) * panelDistance;
@@ -186,7 +186,7 @@ const updateScrollReveals = () => {
       const sceneDistance = Math.max(1, sceneRect.height - window.innerHeight);
       const sceneProgress = clamp(-sceneRect.top / sceneDistance);
       const statementIndex = Number(item.dataset.statementRevealIndex || 0);
-      const progress = clamp((sceneProgress - (0.16 + statementIndex * 0.1)) / 0.28);
+      const progress = clamp((sceneProgress - (0.13 + statementIndex * 0.075)) / 0.22);
       const eased = easeScroll(progress);
       const lift = (1 - eased) * 64;
       const blur = (1 - eased) * 11;
