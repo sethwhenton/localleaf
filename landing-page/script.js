@@ -173,13 +173,17 @@ const updateScrollReveals = () => {
     const rect = item.getBoundingClientRect();
     const offset = Number(item.dataset.revealOffset || 0);
     const isFlowStep = item.classList.contains("flow-step");
-    const centerSnapSection = item.closest(".flow-section, .final-cta");
+    const qaSection = item.closest(".qa-section");
+    const centerSnapSection = item.closest(".flow-section, .qa-section, .final-cta");
     const sectionRect = centerSnapSection?.getBoundingClientRect();
+    const centerThreshold = qaSection ? 0.52 : 0.34;
     const sectionIsCentered = sectionRect
-      ? Math.abs(sectionRect.top + sectionRect.height / 2 - window.innerHeight / 2) <= window.innerHeight * 0.34
+      ? Math.abs(sectionRect.top + sectionRect.height / 2 - window.innerHeight / 2) <=
+        window.innerHeight * centerThreshold
       : false;
     const peekOpacity = item.classList.contains("reveal-peek") ? 0.24 : isFlowStep ? 0.18 : 0;
-    const rawProgress = (start - rect.top) / Math.max(1, start - end) - offset;
+    const revealBoost = qaSection ? 0.3 : 0;
+    const rawProgress = (start - rect.top) / Math.max(1, start - end) - offset + revealBoost;
     const progress = sectionIsCentered ? 1 : clamp(rawProgress);
     const eased = easeScroll(progress);
     const lift = (1 - eased) * (isFlowStep ? 28 : 56);
