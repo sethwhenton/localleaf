@@ -7,6 +7,7 @@ const previewStep = document.querySelector("[data-preview-step]");
 const previewTitle = document.querySelector("[data-preview-title]");
 const previewCopy = document.querySelector("[data-preview-copy]");
 const previewWindowTitle = document.querySelector("[data-preview-window-title]");
+const flowSection = document.querySelector(".flow-section");
 const finalCta = document.querySelector(".final-cta");
 
 const previewStates = [
@@ -133,6 +134,28 @@ const updateScrollPreview = () => {
   setPreview(index);
 };
 
+const updateFlowMotion = () => {
+  if (!flowSection) return;
+
+  if (prefersReducedMotion.matches) {
+    flowSection.style.setProperty("--flow-shift", "0px");
+    flowSection.style.setProperty("--flow-scale", "1");
+    return;
+  }
+
+  const rect = flowSection.getBoundingClientRect();
+  const start = window.innerHeight * 1.05;
+  const end = window.innerHeight * 0.02;
+  const progress = clamp((start - rect.top) / Math.max(1, start - end));
+  const eased = 1 - Math.pow(1 - progress, 1.55);
+  const maxShift = Math.min(window.innerWidth <= 820 ? 150 : 620, window.innerWidth * 0.42);
+  const shift = (1 - eased) * maxShift;
+  const scale = 0.985 + eased * 0.015;
+
+  flowSection.style.setProperty("--flow-shift", `${shift.toFixed(1)}px`);
+  flowSection.style.setProperty("--flow-scale", scale.toFixed(3));
+};
+
 const updateScrollReveals = () => {
   if (prefersReducedMotion.matches) {
     revealItems.forEach((item) => {
@@ -182,6 +205,7 @@ const updateOnScroll = () => {
   window.requestAnimationFrame(() => {
     updateHeader();
     updateScrollPreview();
+    updateFlowMotion();
     updateSectionAnimationStates();
     updateScrollReveals();
     ticking = false;
@@ -214,5 +238,6 @@ prefersReducedMotion.addEventListener?.("change", () => {
 updateHeader();
 setPreview(0);
 updateScrollPreview();
+updateFlowMotion();
 updateSectionAnimationStates();
 updateScrollReveals();

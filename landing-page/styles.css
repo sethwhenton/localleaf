@@ -933,12 +933,13 @@ section[id] {
 }
 
 .flow-section {
-  min-height: var(--section-min);
-  display: grid;
-  align-content: center;
-  padding: var(--section-pad-tight) 0;
+  --flow-shift: 0px;
+  --flow-scale: 1;
+  min-height: clamp(980px, 150svh, 1740px);
+  display: block;
+  padding: 0;
   border-top: 1px solid var(--line);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .flow-shell {
@@ -946,6 +947,18 @@ section[id] {
   grid-template-columns: minmax(390px, 0.92fr) minmax(0, 1.08fr);
   gap: clamp(32px, 5vw, 96px);
   align-items: center;
+  min-height: calc(100svh - var(--sticky-top));
+  padding: var(--section-pad-tight) 0;
+  transform: translate3d(var(--flow-shift), 0, 0) scale(var(--flow-scale));
+  transform-origin: center;
+  will-change: transform;
+}
+
+@media (min-width: 1121px) {
+  .flow-shell {
+    position: sticky;
+    top: var(--sticky-top);
+  }
 }
 
 .flow-copy .section-heading {
@@ -1024,7 +1037,6 @@ section[id] {
     rgba(255, 255, 255, 0.94);
   box-shadow: 0 22px 64px rgba(17, 17, 17, 0.08);
   backdrop-filter: blur(16px);
-  transition-delay: var(--reveal-delay, 0ms);
 }
 
 .flow-step:nth-of-type(odd) {
@@ -1085,7 +1097,6 @@ section[id] {
     radial-gradient(circle at 24% 78%, rgba(31, 168, 97, 0.13), transparent 28%),
     linear-gradient(145deg, #fff, #fff9f5 48%, #fff);
   box-shadow: 0 38px 100px rgba(17, 17, 17, 0.08);
-  transition-delay: 120ms;
 }
 
 .flow-art::before {
@@ -2082,6 +2093,11 @@ details p {
     font-size: clamp(46px, 6.2vw, 70px);
   }
 
+  .flow-section {
+    min-height: auto;
+    padding: var(--section-pad-tight) 0;
+  }
+
   .preview-theater,
   .split-proof,
   .qa-section {
@@ -2099,6 +2115,8 @@ details p {
   .flow-shell {
     grid-template-columns: 1fr;
     gap: 34px;
+    min-height: auto;
+    padding: 0;
   }
 
   .flow-copy .section-heading {
@@ -2396,6 +2414,7 @@ details p {
   }
 
   .flow-section {
+    min-height: auto;
     padding: var(--section-pad-tight) 0;
   }
 
