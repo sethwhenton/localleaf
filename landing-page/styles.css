@@ -1804,6 +1804,7 @@ details p {
   text-align: center;
   border-top: 1px solid var(--line);
   overflow: hidden;
+  contain: paint;
 }
 
 .final-cta > * {
@@ -1816,7 +1817,8 @@ details p {
   height: auto;
   margin: 0 auto 26px;
   overflow: visible;
-  filter: drop-shadow(0 18px 34px rgba(255, 103, 0, 0.18));
+  transform: translateZ(0);
+  will-change: transform, opacity;
 }
 
 .final-logo-outline,
@@ -1841,6 +1843,7 @@ details p {
 .final-logo-leaf {
   transform-box: view-box;
   transform-origin: 48px 34px;
+  will-change: transform, opacity;
 }
 
 .final-logo-leaf path:first-child {
@@ -1891,7 +1894,8 @@ details p {
   margin: 0 auto 30px;
   overflow: hidden;
   border-radius: 8px;
-  filter: drop-shadow(0 22px 36px rgba(17, 17, 17, 0.08));
+  transform: translateZ(0);
+  will-change: transform, opacity;
   animation: wordmarkSettle 5600ms ease-in-out infinite;
 }
 
@@ -1902,11 +1906,12 @@ details p {
 
 .final-wordmark-flare {
   position: absolute;
-  inset: -35% auto -35% -55%;
+  inset: -35% auto -35% 0;
   width: 42%;
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.84), rgba(255, 103, 0, 0.3), transparent);
   transform: rotate(15deg);
-  mix-blend-mode: screen;
+  opacity: 0.88;
+  will-change: transform;
   animation: wordmarkFlare 3600ms ease-in-out infinite;
 }
 
@@ -1934,15 +1939,17 @@ details p {
 .final-cta .download-button {
   position: relative;
   overflow: hidden;
+  contain: paint;
 }
 
 .final-cta .download-button::after {
   content: "";
   position: absolute;
-  inset: -80% auto -80% -55%;
+  inset: -80% auto -80% 0;
   width: 42%;
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.42), transparent);
-  transform: rotate(18deg);
+  transform: translate3d(-140%, 0, 0) rotate(18deg);
+  will-change: transform;
   animation: buttonSweep 4600ms ease-in-out infinite;
 }
 
@@ -1989,6 +1996,12 @@ details p {
   transform: translateY(56px) scale(0.97);
   filter: blur(10px);
   will-change: opacity, transform, filter;
+}
+
+.js-enabled .final-cta .reveal {
+  transform: translateY(30px) scale(0.985);
+  filter: none;
+  will-change: opacity, transform;
 }
 
 .js-enabled .reveal-peek {
@@ -2049,24 +2062,24 @@ details p {
 @keyframes wordmarkFlare {
   0%,
   46% {
-    left: -55%;
+    transform: translate3d(-140%, 0, 0) rotate(15deg);
   }
 
   72%,
   100% {
-    left: 118%;
+    transform: translate3d(340%, 0, 0) rotate(15deg);
   }
 }
 
 @keyframes buttonSweep {
   0%,
   54% {
-    left: -55%;
+    transform: translate3d(-140%, 0, 0) rotate(18deg);
   }
 
   72%,
   100% {
-    left: 120%;
+    transform: translate3d(340%, 0, 0) rotate(18deg);
   }
 }
 

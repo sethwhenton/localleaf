@@ -195,21 +195,24 @@ const updateScrollReveals = () => {
     const isFlowStep = item.classList.contains("flow-step");
     const statementRevealSection = item.closest(".statement-section");
     const qaSection = item.closest(".qa-section");
+    const finalRevealSection = item.closest(".final-cta");
     const centerSnapSection = item.closest(".statement-section, .flow-section, .qa-section, .final-cta");
     const sectionRect = centerSnapSection?.getBoundingClientRect();
-    const centerThreshold = qaSection ? 0.52 : statementRevealSection ? 0.46 : 0.34;
+    const centerThreshold = qaSection ? 0.52 : statementRevealSection ? 0.46 : finalRevealSection ? 0.56 : 0.34;
     const sectionIsCentered = sectionRect
       ? Math.abs(sectionRect.top + sectionRect.height / 2 - window.innerHeight / 2) <=
         window.innerHeight * centerThreshold
       : false;
     const peekOpacity = item.classList.contains("reveal-peek") ? 0.24 : isFlowStep ? 0.18 : 0;
-    const revealBoost = qaSection ? 0.3 : statementRevealSection ? 0.34 : 0;
+    const revealBoost = qaSection ? 0.3 : statementRevealSection ? 0.34 : finalRevealSection ? 0.3 : 0;
     const rawProgress = (start - rect.top) / Math.max(1, start - end) - offset + revealBoost;
     const progress = sectionIsCentered ? 1 : clamp(rawProgress);
     const eased = easeScroll(progress);
-    const lift = (1 - eased) * (isFlowStep ? 28 : 56);
-    const blur = (1 - eased) * (isFlowStep ? 5 : 10);
-    const scale = 0.97 + eased * 0.03;
+    const lift = (1 - eased) * (finalRevealSection ? 30 : isFlowStep ? 28 : 56);
+    const blurMax = finalRevealSection ? 0 : isFlowStep ? 5 : 10;
+    const blur = (1 - eased) * blurMax;
+    const scaleBase = finalRevealSection ? 0.985 : 0.97;
+    const scale = scaleBase + eased * (1 - scaleBase);
 
     item.style.opacity = Math.max(peekOpacity, eased).toFixed(3);
     item.style.transform = `translate3d(0, ${lift.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`;
@@ -221,7 +224,7 @@ const updateSectionAnimationStates = () => {
   if (!finalCta) return;
   const rect = finalCta.getBoundingClientRect();
   const isVisible = rect.top < window.innerHeight * 0.72 && rect.bottom > window.innerHeight * 0.2;
-  finalCta.classList.toggle("is-final-visible", isVisible);
+  if (isVisible) finalCta.classList.add("is-final-visible");
 };
 
 const updateOnScroll = () => {
