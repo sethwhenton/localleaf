@@ -11,8 +11,14 @@
   --orange-soft: #fff3eb;
   --green: #178c47;
   --shadow: 0 32px 90px rgba(17, 17, 17, 0.11);
-  --max: 1220px;
-  --page-x: max(24px, calc((100vw - var(--max)) / 2));
+  --max: clamp(1120px, 82vw, 1560px);
+  --page-gutter: clamp(18px, 3vw, 56px);
+  --page-x: max(var(--page-gutter), calc((100vw - var(--max)) / 2));
+  --section-width: min(100% - (var(--page-gutter) * 2), var(--max));
+  --sticky-top: clamp(68px, 7svh, 96px);
+  --section-min: max(680px, 100svh);
+  --section-pad: clamp(58px, 8svh, 132px);
+  --section-pad-tight: clamp(42px, 6.5svh, 104px);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -51,6 +57,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  overflow-x: clip;
   overscroll-behavior-y: none;
 }
 
@@ -82,7 +89,7 @@ a {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: 28px;
+  gap: clamp(18px, 1.8vw, 36px);
   padding: 0 var(--page-x);
   background: rgba(255, 255, 255, 0.86);
   backdrop-filter: blur(18px);
@@ -122,7 +129,7 @@ a {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 26px;
+  gap: clamp(18px, 1.55vw, 30px);
   color: #1b1b1b;
   font-size: 13px;
   font-weight: 850;
@@ -138,18 +145,18 @@ a {
 }
 
 .download-button {
-  min-height: 48px;
+  min-height: clamp(44px, 3vw, 52px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
-  padding: 0 20px;
+  padding: 0 clamp(16px, 1.35vw, 24px);
   border: 1px solid #0f0f0f;
   border-radius: 8px;
   background: #0f0f0f;
   color: #fff;
   text-decoration: none;
-  font-size: 14px;
+  font-size: clamp(13px, 0.78vw, 15px);
   font-weight: 900;
   line-height: 1;
   box-shadow: 0 18px 38px rgba(17, 17, 17, 0.18);
@@ -192,8 +199,8 @@ a {
 }
 
 .header-download {
-  min-height: 42px;
-  padding: 0 16px;
+  min-height: clamp(40px, 2.6vw, 46px);
+  padding: 0 clamp(14px, 1vw, 18px);
   justify-self: end;
   border-color: var(--orange);
   background: var(--orange);
@@ -241,15 +248,15 @@ a {
 }
 
 .hero {
-  min-height: 88svh;
+  min-height: clamp(680px, 88svh, 1320px);
   display: grid;
   place-items: center;
-  padding: clamp(96px, 13svh, 140px) var(--page-x) 64px;
+  padding: clamp(82px, 12svh, 156px) var(--page-x) clamp(42px, 7svh, 90px);
   text-align: center;
 }
 
 .hero-copy {
-  width: min(100%, 1010px);
+  width: min(100%, clamp(840px, 70vw, 1180px));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -264,7 +271,7 @@ a {
 }
 
 .hero-logo-build {
-  width: clamp(88px, 7.8vw, 118px);
+  width: clamp(82px, 6.4vw, 132px);
   height: auto;
   overflow: visible;
 }
@@ -319,7 +326,7 @@ a {
 .brand-line {
   margin: 0 0 26px;
   color: #171717;
-  font-size: 26px;
+  font-size: clamp(20px, 1.8vw, 30px);
   font-weight: 950;
   line-height: 1.15;
 }
@@ -334,8 +341,8 @@ p {
 }
 
 h1 {
-  margin-bottom: 64px;
-  font-size: 88px;
+  margin-bottom: clamp(40px, 6.2svh, 72px);
+  font-size: clamp(50px, 6vw, 118px);
   line-height: 0.98;
   font-weight: 950;
 }
@@ -609,17 +616,17 @@ h1 {
   justify-content: center;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: clamp(10px, 1vw, 14px);
 }
 
 .download-cluster.centered {
-  margin-top: 28px;
+  margin-top: clamp(24px, 3.6svh, 40px);
 }
 
 .release-note {
   margin: 18px 0 0;
   color: var(--faint);
-  font-size: 13px;
+  font-size: clamp(12px, 0.78vw, 14px);
   font-weight: 750;
 }
 
@@ -630,7 +637,7 @@ h1 {
 .qa-section,
 .final-cta,
 .site-footer {
-  width: min(100% - 48px, var(--max));
+  width: var(--section-width);
   margin: 0 auto;
 }
 
@@ -639,7 +646,7 @@ section[id] {
 }
 
 .section-heading {
-  margin-bottom: 34px;
+  margin-bottom: clamp(24px, 3.2svh, 40px);
   text-align: center;
 }
 
@@ -653,36 +660,36 @@ section[id] {
 
 .section-heading h2 {
   margin: 0 auto;
-  max-width: 780px;
-  font-size: 48px;
+  max-width: min(780px, 100%);
+  font-size: clamp(36px, 3.2vw, 64px);
   line-height: 1.05;
   font-weight: 950;
 }
 
 .preview-section {
-  height: 385vh;
-  width: min(100% - 48px, var(--max));
-  margin-top: clamp(-132px, -10svh, -84px);
+  height: clamp(2600px, 360vh, 4400px);
+  width: var(--section-width);
+  margin-top: clamp(-118px, -9svh, -56px);
   padding: 0;
 }
 
 .preview-sticky {
   position: sticky;
-  top: 86px;
-  min-height: calc(100vh - 86px);
+  top: var(--sticky-top);
+  min-height: calc(100svh - var(--sticky-top));
   display: grid;
   align-content: center;
-  padding: 44px 0 52px;
+  padding: clamp(32px, 5svh, 58px) 0 clamp(38px, 5.5svh, 66px);
 }
 
 .preview-theater {
   position: relative;
   display: grid;
-  grid-template-columns: 310px minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: minmax(260px, 0.28fr) minmax(0, 1fr);
+  gap: clamp(18px, 2vw, 36px);
   align-items: stretch;
-  min-height: 650px;
-  padding: 24px;
+  min-height: clamp(500px, 66svh, 780px);
+  padding: clamp(14px, 1.8vw, 30px);
   border: 1px solid #eeeeee;
   border-radius: 8px;
   background:
@@ -698,15 +705,15 @@ section[id] {
 
 .preview-kicker {
   display: block;
-  margin-bottom: 22px;
+  margin-bottom: clamp(14px, 2.2svh, 24px);
   color: var(--orange);
   font-size: 13px;
   font-weight: 950;
 }
 
 .preview-copy h3 {
-  margin-bottom: 18px;
-  font-size: 44px;
+  margin-bottom: clamp(12px, 1.8svh, 20px);
+  font-size: clamp(34px, 3vw, 56px);
   line-height: 1.02;
   font-weight: 950;
 }
@@ -714,7 +721,7 @@ section[id] {
 .preview-copy p {
   margin: 0;
   color: #4c4c4c;
-  font-size: 18px;
+  font-size: clamp(16px, 1vw, 20px);
   line-height: 1.55;
   font-weight: 620;
 }
@@ -731,7 +738,7 @@ section[id] {
 .preview-window {
   position: relative;
   min-width: 0;
-  min-height: 610px;
+  min-height: clamp(440px, 62svh, 720px);
 }
 
 .window-top {
@@ -770,7 +777,7 @@ section[id] {
 .screen-stack {
   position: relative;
   height: calc(100% - 40px);
-  min-height: 610px;
+  min-height: clamp(400px, 57svh, 680px);
 }
 
 .screen {
@@ -817,18 +824,18 @@ section[id] {
 }
 
 .statement-section {
-  min-height: 100svh;
+  min-height: var(--section-min);
   display: grid;
   align-content: center;
-  gap: clamp(54px, 7svh, 86px);
-  padding: clamp(88px, 10svh, 128px) 0;
+  gap: clamp(34px, 6svh, 92px);
+  padding: var(--section-pad) 0;
   border-top: 1px solid var(--line);
 }
 
 .statement {
   display: grid;
-  grid-template-columns: 92px 1fr;
-  gap: 38px;
+  grid-template-columns: clamp(64px, 6vw, 104px) 1fr;
+  gap: clamp(22px, 3vw, 44px);
   align-items: start;
 }
 
@@ -843,15 +850,15 @@ section[id] {
 .statement p {
   max-width: 940px;
   margin: 0;
-  font-size: 62px;
+  font-size: clamp(40px, 4.4vw, 78px);
   line-height: 1.02;
   font-weight: 950;
 }
 
 .statement-icon {
   position: relative;
-  width: 78px;
-  height: 78px;
+  width: clamp(64px, 5.6vw, 88px);
+  height: clamp(64px, 5.6vw, 88px);
   border: 4px solid #111;
   border-radius: 8px;
   background: #fff;
@@ -926,18 +933,18 @@ section[id] {
 }
 
 .flow-section {
-  min-height: 100svh;
+  min-height: var(--section-min);
   display: grid;
   align-content: center;
-  padding: clamp(62px, 7svh, 96px) 0;
+  padding: var(--section-pad-tight) 0;
   border-top: 1px solid var(--line);
   overflow: hidden;
 }
 
 .flow-shell {
   display: grid;
-  grid-template-columns: minmax(430px, 0.92fr) minmax(0, 1.08fr);
-  gap: clamp(42px, 6vw, 86px);
+  grid-template-columns: minmax(390px, 0.92fr) minmax(0, 1.08fr);
+  gap: clamp(32px, 5vw, 96px);
   align-items: center;
 }
 
@@ -952,17 +959,17 @@ section[id] {
 }
 
 .flow-copy .section-heading h2 {
-  font-size: clamp(43px, 4.7vw, 70px);
+  font-size: clamp(38px, 4.1vw, 76px);
   line-height: 0.98;
 }
 
 .flow-track {
   position: relative;
-  min-height: clamp(430px, 53svh, 540px);
+  min-height: clamp(420px, 54svh, 620px);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 12px 42px 12px 54px;
+  padding: clamp(8px, 1.2vw, 14px) clamp(30px, 3.2vw, 54px) clamp(8px, 1.2vw, 14px) clamp(42px, 3.6vw, 64px);
 }
 
 .flow-current {
@@ -1003,13 +1010,13 @@ section[id] {
 .flow-step {
   position: relative;
   z-index: 1;
-  width: min(78%, 460px);
+  width: min(78%, clamp(420px, 28vw, 500px));
   min-height: 0;
   display: grid;
-  grid-template-columns: 58px 1fr;
-  gap: 16px;
+  grid-template-columns: clamp(50px, 3.4vw, 62px) 1fr;
+  gap: clamp(12px, 1.1vw, 18px);
   align-items: center;
-  padding: 12px 17px;
+  padding: clamp(10px, 1vw, 15px) clamp(14px, 1.2vw, 19px);
   border: 1px solid #ececec;
   border-radius: 8px;
   background:
@@ -1053,7 +1060,7 @@ section[id] {
 
 .flow-step h3 {
   margin-bottom: 6px;
-  font-size: 24px;
+  font-size: clamp(21px, 1.45vw, 27px);
   line-height: 1;
   font-weight: 950;
 }
@@ -1061,14 +1068,14 @@ section[id] {
 .flow-step p {
   margin: 0;
   color: #555;
-  font-size: 14px;
+  font-size: clamp(13px, 0.86vw, 15px);
   line-height: 1.38;
   font-weight: 650;
 }
 
 .flow-art {
   position: relative;
-  min-height: clamp(520px, 66svh, 650px);
+  min-height: clamp(500px, 64svh, 760px);
   margin: 0;
   overflow: hidden;
   border: 1px solid #ececec;
@@ -1469,12 +1476,12 @@ section[id] {
 }
 
 .split-proof {
-  min-height: 100svh;
+  min-height: var(--section-min);
   display: grid;
   grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
-  gap: 56px;
+  gap: clamp(34px, 5vw, 76px);
   align-items: center;
-  padding: clamp(88px, 10svh, 126px) 0;
+  padding: var(--section-pad) 0;
   border-top: 1px solid var(--line);
 }
 
@@ -1503,7 +1510,7 @@ section[id] {
 
 .proof-copy h2 {
   margin-bottom: 20px;
-  font-size: 58px;
+  font-size: clamp(40px, 4vw, 72px);
   line-height: 1.04;
   font-weight: 950;
 }
@@ -1511,7 +1518,7 @@ section[id] {
 .proof-copy p {
   margin: 0;
   color: #555;
-  font-size: 18px;
+  font-size: clamp(16px, 1.1vw, 20px);
   line-height: 1.6;
   font-weight: 650;
 }
@@ -1548,12 +1555,12 @@ section[id] {
 }
 
 .qa-section {
-  min-height: 100svh;
+  min-height: var(--section-min);
   display: grid;
-  grid-template-columns: 430px minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
   align-items: center;
-  gap: 48px;
-  padding: clamp(88px, 10svh, 126px) 0;
+  gap: clamp(28px, 4vw, 64px);
+  padding: var(--section-pad) 0;
   border-top: 1px solid var(--line);
 }
 
@@ -1584,8 +1591,8 @@ summary {
   position: relative;
   display: block;
   cursor: pointer;
-  padding: 22px 58px 22px 22px;
-  font-size: 19px;
+  padding: clamp(18px, 1.5vw, 24px) clamp(52px, 4vw, 64px) clamp(18px, 1.5vw, 24px) clamp(18px, 1.5vw, 24px);
+  font-size: clamp(17px, 1.15vw, 21px);
   font-weight: 950;
   list-style: none;
 }
@@ -1622,11 +1629,11 @@ details p {
 
 .final-cta {
   position: relative;
-  min-height: 100svh;
+  min-height: var(--section-min);
   display: grid;
   align-content: center;
   justify-items: center;
-  padding: clamp(88px, 10svh, 126px) 24px;
+  padding: var(--section-pad) var(--page-gutter);
   text-align: center;
   border-top: 1px solid var(--line);
   overflow: hidden;
@@ -1638,7 +1645,7 @@ details p {
 }
 
 .final-logo-build {
-  width: clamp(82px, 7.4vw, 112px);
+  width: clamp(76px, 6.6vw, 128px);
   height: auto;
   margin: 0 auto 26px;
   overflow: visible;
@@ -1712,7 +1719,7 @@ details p {
 
 .final-wordmark-wrap {
   position: relative;
-  width: min(260px, 72vw);
+  width: clamp(220px, 18vw, 340px);
   display: block;
   margin: 0 auto 30px;
   overflow: hidden;
@@ -1739,7 +1746,7 @@ details p {
 .final-cta h2 {
   max-width: 860px;
   margin: 0 auto 8px;
-  font-size: 72px;
+  font-size: clamp(44px, 5.2vw, 96px);
   line-height: 0.98;
   font-weight: 950;
 }
@@ -1748,7 +1755,7 @@ details p {
   max-width: 520px;
   margin: 0 auto;
   color: #5b5b5b;
-  font-size: 19px;
+  font-size: clamp(17px, 1.15vw, 20px);
   line-height: 1.5;
   font-weight: 650;
 }
@@ -2072,7 +2079,7 @@ details p {
 
 @media (max-width: 1120px) {
   h1 {
-    font-size: 70px;
+    font-size: clamp(46px, 6.2vw, 70px);
   }
 
   .preview-theater,
@@ -2112,18 +2119,103 @@ details p {
 
   .flow-art {
     width: min(740px, 100%);
-    min-height: 530px;
+    min-height: clamp(500px, 60svh, 620px);
     margin: 0 auto;
   }
 
   .statement p {
-    font-size: 52px;
+    font-size: clamp(38px, 5.2vw, 52px);
+  }
+}
+
+@media (min-width: 1600px) and (min-height: 900px) {
+  :root {
+    --max: min(1560px, 84vw);
+  }
+
+  .preview-theater {
+    min-height: clamp(680px, 68svh, 860px);
+  }
+
+  .preview-window {
+    min-height: clamp(620px, 63svh, 780px);
+  }
+
+  .screen-stack {
+    min-height: clamp(580px, 58svh, 740px);
+  }
+}
+
+@media (min-width: 821px) and (max-height: 820px) {
+  :root {
+    --section-min: clamp(600px, 100svh, 820px);
+    --section-pad: clamp(42px, 6svh, 72px);
+    --section-pad-tight: clamp(36px, 5svh, 64px);
+    --sticky-top: clamp(62px, 7svh, 76px);
+  }
+
+  .hero {
+    min-height: clamp(600px, 86svh, 820px);
+    padding-top: clamp(76px, 10svh, 106px);
+    padding-bottom: clamp(34px, 6svh, 58px);
+  }
+
+  .hero-logo-build {
+    width: clamp(72px, 5vw, 96px);
+  }
+
+  .hero-brand-lockup,
+  .brand-line {
+    margin-bottom: clamp(14px, 2svh, 22px);
+  }
+
+  h1 {
+    margin-bottom: clamp(28px, 5svh, 42px);
+    font-size: clamp(46px, 5.2vw, 82px);
+  }
+
+  .preview-section {
+    margin-top: clamp(-86px, -7svh, -40px);
+  }
+
+  .preview-sticky {
+    padding-top: clamp(24px, 4svh, 38px);
+    padding-bottom: clamp(24px, 4svh, 38px);
+  }
+
+  .preview-theater {
+    min-height: clamp(440px, 64svh, 590px);
+  }
+
+  .preview-window {
+    min-height: clamp(390px, 58svh, 540px);
+  }
+
+  .screen-stack {
+    min-height: clamp(350px, 53svh, 500px);
+  }
+
+  .statement p {
+    font-size: clamp(36px, 4vw, 58px);
+  }
+
+  .flow-track {
+    min-height: clamp(390px, 52svh, 510px);
+  }
+
+  .flow-art {
+    min-height: clamp(430px, 61svh, 560px);
   }
 }
 
 @media (max-width: 820px) {
   :root {
-    --page-x: 18px;
+    --page-gutter: 14px;
+    --page-x: var(--page-gutter);
+    --section-min: auto;
+    --section-pad: clamp(58px, 9svh, 86px);
+    --section-pad-tight: clamp(54px, 8svh, 82px);
+    --sticky-top: 18px;
   }
 
   .site-header {
@@ -2154,13 +2246,13 @@ details p {
   }
 
   .hero {
-    min-height: 86svh;
-    padding-top: 112px;
-    padding-bottom: 72px;
+    min-height: min(86svh, 760px);
+    padding-top: clamp(88px, 13svh, 118px);
+    padding-bottom: clamp(48px, 8svh, 76px);
   }
 
   .brand-line {
-    font-size: 20px;
+    font-size: clamp(18px, 5vw, 21px);
   }
 
   .hero-brand-lockup {
@@ -2168,13 +2260,13 @@ details p {
   }
 
   .hero-logo-build {
-    width: 86px;
+    width: clamp(72px, 20vw, 88px);
   }
 
   h1 {
-    font-size: 46px;
+    font-size: clamp(40px, 11vw, 52px);
     line-height: 1;
-    margin-bottom: 48px;
+    margin-bottom: clamp(34px, 6svh, 48px);
   }
 
   .you-accent {
@@ -2243,12 +2335,13 @@ details p {
   .qa-section,
   .final-cta,
   .site-footer {
-    width: min(100% - 28px, var(--max));
+    width: var(--section-width);
   }
 
   .preview-section {
-    width: min(100% - 28px, var(--max));
-    height: 385vh;
+    width: var(--section-width);
+    height: clamp(2400px, 350vh, 3300px);
+    margin-top: clamp(-74px, -7svh, -38px);
   }
 
   .section-heading {
@@ -2258,21 +2351,21 @@ details p {
   .section-heading h2,
   .preview-copy h3,
   .proof-copy h2 {
-    font-size: 34px;
+    font-size: clamp(32px, 8.8vw, 38px);
   }
 
   .preview-theater {
     grid-template-columns: 1fr;
     min-height: auto;
-    padding: 14px;
+    padding: clamp(12px, 3.6vw, 16px);
   }
 
   .preview-window {
-    min-height: 390px;
+    min-height: clamp(320px, 48svh, 430px);
   }
 
   .screen-stack {
-    min-height: 350px;
+    min-height: clamp(280px, 43svh, 390px);
   }
 
   .screen img {
@@ -2280,8 +2373,8 @@ details p {
   }
 
   .statement-section {
-    gap: 58px;
-    padding: 60px 0 82px;
+    gap: clamp(34px, 7svh, 58px);
+    padding: var(--section-pad) 0;
   }
 
   .statement,
@@ -2299,11 +2392,11 @@ details p {
   }
 
   .statement p {
-    font-size: 37px;
+    font-size: clamp(32px, 9vw, 42px);
   }
 
   .flow-section {
-    padding: 60px 0 82px;
+    padding: var(--section-pad-tight) 0;
   }
 
   .flow-copy .section-heading {
@@ -2316,7 +2409,7 @@ details p {
   }
 
   .flow-copy .section-heading h2 {
-    font-size: 34px;
+    font-size: clamp(32px, 8.8vw, 38px);
   }
 
   .flow-track {
@@ -2370,7 +2463,7 @@ details p {
   }
 
   .flow-art {
-    min-height: 460px;
+    min-height: clamp(360px, 55svh, 470px);
   }
 
   .flow-art-device {
@@ -2416,11 +2509,12 @@ details p {
   }
 
   .qa-section {
-    padding: 60px 0 82px;
+    padding: var(--section-pad) 0;
   }
 
   .split-proof {
     gap: 28px;
+    padding: var(--section-pad) 0;
   }
 
   .proof-photo {
@@ -2429,7 +2523,7 @@ details p {
   }
 
   .proof-copy h2 {
-    font-size: 38px;
+    font-size: clamp(34px, 9vw, 42px);
   }
 
   .proof-control div {
@@ -2442,11 +2536,12 @@ details p {
   }
 
   .final-cta {
-    padding: 76px 0 84px;
+    min-height: min(100svh, 780px);
+    padding: var(--section-pad) 0;
   }
 
   .final-cta h2 {
-    font-size: 44px;
+    font-size: clamp(40px, 11vw, 50px);
   }
 
   .final-wordmark-wrap {
@@ -2470,7 +2565,7 @@ details p {
 
 @media (max-width: 430px) {
   h1 {
-    font-size: 40px;
+    font-size: clamp(36px, 10.5vw, 42px);
   }
 
   .you-accent {
@@ -2499,15 +2594,15 @@ details p {
   }
 
   .preview-window {
-    min-height: 330px;
+    min-height: clamp(300px, 45svh, 350px);
   }
 
   .screen-stack {
-    min-height: 290px;
+    min-height: clamp(260px, 40svh, 310px);
   }
 
   .statement p {
-    font-size: 32px;
+    font-size: clamp(30px, 8.7vw, 34px);
   }
 
   .flow-step {
@@ -2516,7 +2611,7 @@ details p {
   }
 
   .flow-art {
-    min-height: 410px;
+    min-height: clamp(360px, 53svh, 420px);
   }
 
   .flow-art-device {

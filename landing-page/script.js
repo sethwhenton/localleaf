@@ -199,7 +199,10 @@ document.querySelectorAll(".final-cta .reveal").forEach((item, index) => {
 const smoothScroller = initSmoothScroll();
 
 window.addEventListener("scroll", updateOnScroll, { passive: true });
-window.addEventListener("resize", updateOnScroll);
+window.addEventListener("resize", () => {
+  smoothScroller?.resize?.();
+  updateOnScroll();
+});
 window.addEventListener("load", () => smoothScroller?.resize?.(), { once: true });
 prefersReducedMotion.addEventListener?.("change", () => {
   if (prefersReducedMotion.matches) {
