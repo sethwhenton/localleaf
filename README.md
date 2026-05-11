@@ -13,7 +13,7 @@ When the host stops the session or closes the app, the room ends.
 
 ## Current Release
 
-Version `0.1.14` is the hardened code-editor-first MVP build: cleaner editor actions behind a top-bar menu, host-token protected admin APIs, safer ZIP import/export, revoked guest access after session stop, and release-ready Windows/macOS download links.
+Version `0.1.15` is the dark-mode polish build: a full dark shell across home, session management, editor, chat, logs, menus, modals, and desktop window controls, plus the hardened code-editor-first MVP features from the previous release.
 
 ## Features
 
@@ -38,6 +38,7 @@ Version `0.1.14` is the hardened code-editor-first MVP build: cleaner editor act
 - Compile logs with pinned red error groups, clearable orange warning groups, and gray informational output.
 - Session management screen with invite copy feedback, user list, health status, and stop-session handling.
 - Host-only update prompt and manual update checks when a newer LocalLeaf release is available.
+- Light/dark appearance setting with a polished dark mode across app panels, buttons, chat, and native desktop controls.
 - Guests are notified when the host ends the session.
 - Hosts can stop a session and continue editing locally without being bounced back to the ended-session screen.
 - ZIP imports enforce entry-count, expanded-size, per-file-size, and nesting limits, and exports skip hidden/system folders such as dotfiles and `node_modules`.

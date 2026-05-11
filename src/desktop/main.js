@@ -1,9 +1,26 @@
 const path = require("node:path");
-const { app, BrowserWindow, Menu, nativeImage, nativeTheme, shell } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, nativeImage, nativeTheme, shell } = require("electron");
 const { createLocalLeafServer } = require("../server/index");
 
 let hostServer;
 let mainWindow;
+
+function titleBarTheme(theme) {
+  return theme === "dark"
+    ? { color: "#10110f", symbolColor: "#f4eee6", height: 44 }
+    : { color: "#ffffff", symbolColor: "#6b625a", height: 44 };
+}
+
+function applyDesktopTheme(theme, targetWindow = mainWindow) {
+  const nextTheme = theme === "dark" ? "dark" : "light";
+  const overlay = titleBarTheme(nextTheme);
+  nativeTheme.themeSource = nextTheme;
+  if (!targetWindow) return;
+  targetWindow.setBackgroundColor(overlay.color);
+  if (typeof targetWindow.setTitleBarOverlay === "function") {
+    targetWindow.setTitleBarOverlay(overlay);
+  }
+}
 
 function iconPath() {
   return process.platform === "win32"
@@ -26,19 +43,16 @@ function createWindow(url) {
     minHeight: 640,
     title: "LocalLeaf Host",
     icon: windowIcon,
-    backgroundColor: "#ffffff",
+    backgroundColor: "#10110f",
     autoHideMenuBar: true,
     titleBarStyle: "hidden",
-    titleBarOverlay: {
-      color: "#ffffff",
-      symbolColor: "#6b625a",
-      height: 44
-    },
+    titleBarOverlay: titleBarTheme("dark"),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       plugins: true,
-      sandbox: true
+      sandbox: true,
+      preload: path.join(__dirname, "preload.js")
     }
   });
   mainWindow.setAutoHideMenuBar(true);
@@ -53,9 +67,20 @@ function createWindow(url) {
   mainWindow.loadURL(url);
 }
 
+ipcMain.on("localleaf:maximize", (event) => {
+  const targetWindow = BrowserWindow.fromWebContents(event.sender);
+  if (targetWindow && !targetWindow.isMaximized()) {
+    targetWindow.maximize();
+  }
+});
+
+ipcMain.on("localleaf:theme", (event, theme) => {
+  applyDesktopTheme(theme, BrowserWindow.fromWebContents(event.sender));
+});
+
 app.whenReady().then(async () => {
   app.setAppUserModelId("dev.localleaf.host");
-  nativeTheme.themeSource = "light";
+  nativeTheme.themeSource = "dark";
   Menu.setApplicationMenu(null);
   const url = await startHostServer();
   createWindow(url);

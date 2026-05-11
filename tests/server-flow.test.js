@@ -320,6 +320,79 @@ test("creates new projects from the bundled starter template", async () => {
   }
 });
 
+test("imports loose files as a new project", async () => {
+  const previousProjectsDir = process.env.LOCALLEAF_PROJECTS_DIR;
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-loose-imports-"));
+  const initialRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-initial-"));
+  process.env.LOCALLEAF_PROJECTS_DIR = projectsRoot;
+  fs.writeFileSync(path.join(initialRoot, "main.tex"), "\\documentclass{article}\\begin{document}Initial\\end{document}", "utf8");
+
+  const app = createLocalLeafServer({ port: 0, projectRoot: initialRoot, autoStartTunnel: false });
+  app.server.listen(0);
+  await once(app.server, "listening");
+  const port = app.server.address().port;
+  app.state.port = port;
+  const baseUrl = hostBaseUrl(app, port);
+
+  try {
+    const mainTex = "\\documentclass{article}\\begin{document}Loose Import\\cite{leaf}\\end{document}";
+    const imported = await rawRequest(baseUrl, "/api/project/import-files", {
+      method: "POST",
+      rawBody: JSON.stringify({
+        projectName: "loose-report",
+        files: [
+          {
+            path: "main.tex",
+            name: "main.tex",
+            contentBase64: Buffer.from(mainTex, "utf8").toString("base64")
+          },
+          {
+            path: "references.bib",
+            name: "references.bib",
+            contentBase64: Buffer.from("@article{leaf,title={LocalLeaf}}", "utf8").toString("base64")
+          },
+          {
+            path: "images/tiny.png",
+            name: "tiny.png",
+            contentBase64: Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/l8p4VwAAAABJRU5ErkJggg==",
+              "base64"
+            ).toString("base64")
+          }
+        ]
+      })
+    });
+
+    assert.equal(imported.response.status, 200);
+    assert.equal(imported.payload.project.name, "loose-report");
+    assert.equal(imported.payload.project.mainFile, "main.tex");
+    assert.ok(imported.payload.project.files.some((file) => file.path === "main.tex" && file.type === "text"));
+    assert.ok(imported.payload.project.files.some((file) => file.path === "references.bib" && file.type === "text"));
+    assert.ok(imported.payload.project.files.some((file) => file.path === "images/tiny.png" && file.type === "image"));
+    assert.match(fs.readFileSync(path.join(imported.payload.project.root, "main.tex"), "utf8"), /Loose Import/);
+
+    const duplicate = await rawRequest(baseUrl, "/api/project/import-files", {
+      method: "POST",
+      rawBody: JSON.stringify({
+        files: [
+          { path: "main.tex", contentBase64: Buffer.from(mainTex, "utf8").toString("base64") },
+          { path: "MAIN.tex", contentBase64: Buffer.from(mainTex, "utf8").toString("base64") }
+        ]
+      })
+    });
+    assert.equal(duplicate.response.status, 400);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectsRoot, { recursive: true, force: true });
+    fs.rmSync(initialRoot, { recursive: true, force: true });
+    if (previousProjectsDir === undefined) {
+      delete process.env.LOCALLEAF_PROJECTS_DIR;
+    } else {
+      process.env.LOCALLEAF_PROJECTS_DIR = previousProjectsDir;
+    }
+  }
+});
+
 test("supports the host, join, edit, compile, chat, import, stop flow", async () => {
   const previousForcePreview = process.env.LOCALLEAF_FORCE_PREVIEW;
   const previousProjectsDir = process.env.LOCALLEAF_PROJECTS_DIR;

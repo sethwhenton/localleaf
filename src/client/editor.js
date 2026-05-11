@@ -266,8 +266,8 @@ const localLeafTheme = EditorView.theme(
     "&": {
       height: "100%",
       minHeight: "0",
-      background: "#ffffff",
-      color: "#241b15",
+      background: "var(--editor-code-bg, #ffffff)",
+      color: "var(--text, #241b15)",
       fontSize: "13px"
     },
     ".cm-scroller": {
@@ -278,37 +278,39 @@ const localLeafTheme = EditorView.theme(
     ".cm-content": {
       padding: "14px 18px",
       minHeight: "100%",
-      caretColor: "#ff6700"
+      caretColor: "var(--orange, #ff6700)"
     },
     ".cm-line": {
       padding: "0 8px"
     },
     ".cm-gutters": {
-      background: "#fbfaf8",
-      borderRight: "1px solid #eee7df",
-      color: "#9f958d"
+      background: "var(--editor-code-gutter, #fbfaf8)",
+      borderRight: "1px solid var(--line, #eee7df)",
+      color: "var(--editor-code-gutter-text, #9f958d)"
     },
     ".cm-activeLineGutter": {
-      background: "#fff2e8",
-      color: "#ff6700"
+      background: "var(--editor-code-line, #fff2e8)",
+      color: "var(--orange, #ff6700)"
     },
     ".cm-activeLine": {
-      background: "rgba(255, 103, 0, 0.055)"
+      background: "var(--editor-code-line, rgba(255, 103, 0, 0.055))"
     },
     ".cm-selectionBackground, .cm-content ::selection": {
-      background: "rgba(255, 103, 0, 0.18) !important"
+      background: "var(--editor-code-selection, rgba(255, 103, 0, 0.18)) !important"
     },
     ".cm-cursor": {
-      borderLeftColor: "#ff6700"
+      borderLeftColor: "var(--orange, #ff6700)"
     },
     ".cm-latex-command": {
-      color: "#ff6700",
+      color: "var(--orange, #ff6700)",
       fontWeight: "700"
     },
     ".cm-tooltip": {
-      border: "1px solid #ded7d0",
+      border: "1px solid var(--line, #ded7d0)",
       borderRadius: "8px",
       boxShadow: "0 18px 46px rgba(23, 17, 13, 0.16)",
+      background: "var(--panel, #ffffff)",
+      color: "var(--text, #241b15)",
       overflow: "hidden"
     },
     ".cm-tooltip-autocomplete": {
@@ -322,11 +324,11 @@ const localLeafTheme = EditorView.theme(
       padding: "2px 10px"
     },
     ".cm-tooltip-autocomplete ul li[aria-selected]": {
-      background: "#fff0e5",
-      color: "#19120d"
+      background: "var(--orange-soft, #fff0e5)",
+      color: "var(--text, #19120d)"
     },
     ".cm-completionDetail": {
-      color: "#ff6700",
+      color: "var(--orange, #ff6700)",
       marginLeft: "18px",
       fontFamily: 'Inter, "Segoe UI", sans-serif',
       fontSize: "11px",
@@ -335,20 +337,20 @@ const localLeafTheme = EditorView.theme(
     ".cm-completionInfo": {
       padding: "8px 10px",
       maxWidth: "260px",
-      color: "#5d554e"
+      color: "var(--muted, #5d554e)"
     }
   },
   { dark: false }
 );
 
 const latexHighlightStyle = HighlightStyle.define([
-  { tag: t.keyword, color: "#ff6700", fontWeight: "700" },
-  { tag: t.atom, color: "#0b7c43" },
-  { tag: t.string, color: "#1269a8" },
-  { tag: t.bracket, color: "#806f63" },
-  { tag: t.comment, color: "#8a8179", fontStyle: "italic" },
-  { tag: t.number, color: "#8b4ab8" },
-  { tag: t.variableName, color: "#245f9f" }
+  { tag: t.keyword, color: "var(--orange, #ff6700)", fontWeight: "700" },
+  { tag: t.atom, color: "var(--green, #0b7c43)" },
+  { tag: t.string, color: "var(--cm-string, #1269a8)" },
+  { tag: t.bracket, color: "var(--cm-bracket, #806f63)" },
+  { tag: t.comment, color: "var(--cm-comment, #8a8179)", fontStyle: "italic" },
+  { tag: t.number, color: "var(--cm-number, #8b4ab8)" },
+  { tag: t.variableName, color: "var(--cm-variable, #245f9f)" }
 ]);
 
 function createEditor(parent, options = {}) {

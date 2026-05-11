@@ -4,6 +4,16 @@ const initialHostToken = initialParams.get("host") || initialParams.get("hostTok
 if (initialHostToken) sessionStorage.setItem("localleaf.hostToken", initialHostToken);
 const startsNarrow = window.matchMedia("(max-width: 1020px)").matches;
 const startsMobile = window.matchMedia("(max-width: 640px)").matches;
+const platformName = String(navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
+const SIDEBAR_SECTION_LAYOUT_VERSION = "2";
+const shouldResetSidebarSectionLayout = localStorage.getItem("localleaf.sidebarSectionLayoutVersion") !== SIDEBAR_SECTION_LAYOUT_VERSION;
+const initialTheme = localStorage.getItem("localleaf.theme") === "dark" ? "dark" : "light";
+document.documentElement.classList.toggle("runtime-electron", /\bElectron\//i.test(navigator.userAgent));
+document.documentElement.classList.toggle("platform-mac", platformName.includes("mac"));
+document.documentElement.classList.toggle("platform-win", platformName.includes("win"));
+document.documentElement.classList.toggle("theme-dark", initialTheme === "dark");
+document.documentElement.classList.toggle("theme-light", initialTheme !== "dark");
+requestAnimationFrame(() => syncDesktopTheme(initialTheme));
 localStorage.setItem("localleaf.editorMode", "code");
 
 const app = document.querySelector("#app");
@@ -52,7 +62,13 @@ const local = {
   sourcePaneWidth: Number(localStorage.getItem("localleaf.sourcePaneWidth") || 0),
   rightRailWidth: Number(localStorage.getItem("localleaf.rightRailWidth") || 280),
   logsHeight: Number(localStorage.getItem("localleaf.logsHeight") || 124),
+  fileSectionHeight: shouldResetSidebarSectionLayout ? 0 : Number(localStorage.getItem("localleaf.fileSectionHeight") || 0),
+  imageSectionHeight: shouldResetSidebarSectionLayout ? 0 : Number(localStorage.getItem("localleaf.imageSectionHeight") || 0),
+  sidebarSectionLayoutNeedsDefault: shouldResetSidebarSectionLayout,
+  sidebarSectionLayoutAutoSized: shouldResetSidebarSectionLayout,
+  editorOpenLayoutPrepared: false,
   resizingSidebar: false,
+  resizingSidebarSection: "",
   resizingSplit: false,
   resizingRightRail: false,
   resizingLogs: false,
@@ -83,6 +99,12 @@ const local = {
   updateCheckStarted: false,
   updateChecking: false,
   updateDismissedVersion: localStorage.getItem("localleaf.updateDismissedVersion") || "",
+  autoUpdateChecks: localStorage.getItem("localleaf.autoUpdateChecks") !== "0",
+  theme: initialTheme,
+  homeImportFiles: [],
+  homeImportDragActive: false,
+  homeImportBusy: false,
+  homeImportStatus: "",
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
 };
@@ -108,11 +130,24 @@ async function api(path, options = {}) {
     headers["x-localleaf-host-token"] = local.hostToken;
   }
 
-  const response = await fetch(path, {
-    method: options.method || "GET",
-    headers,
-    body: options.rawBody || (options.body ? JSON.stringify(options.body) : undefined)
-  });
+  const controller = options.timeoutMs ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
+  let response;
+  try {
+    response = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      signal: controller?.signal,
+      body: options.rawBody || (options.body ? JSON.stringify(options.body) : undefined)
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Request timed out.");
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
@@ -331,6 +366,7 @@ function handleCollabMessage(payload) {
 }
 
 function setView(view, extra = {}) {
+  const previousView = route().view;
   const params = new URLSearchParams();
   params.set("view", view);
   if (local.hostToken) params.set("host", local.hostToken);
@@ -342,7 +378,25 @@ function setView(view, extra = {}) {
   if (extra.name) local.userName = extra.name;
   if (extra.token) connectEvents();
   if (view !== "editor") closeCollab();
+  if (view === "editor") {
+    if (previousView !== "editor") prepareEditorOpenLayout();
+    requestEditorMaximize();
+  } else {
+    local.editorOpenLayoutPrepared = false;
+  }
   render();
+}
+
+function requestEditorMaximize() {
+  window.localleafDesktop?.maximize?.();
+}
+
+function prepareEditorOpenLayout() {
+  local.fileSectionHeight = 0;
+  local.imageSectionHeight = 0;
+  local.sidebarSectionLayoutNeedsDefault = true;
+  local.sidebarSectionLayoutAutoSized = true;
+  local.editorOpenLayoutPrepared = true;
 }
 
 function escapeHtml(value) {
@@ -384,6 +438,7 @@ function icon(name) {
     compile: uiGlyph("compile"),
     chat: uiGlyph("chat"),
     download: uiGlyph("download"),
+    refresh: uiGlyph("refresh"),
     settings: uiGlyph("settings"),
     ended: `<span class="plug-glyph" aria-hidden="true"></span>`
   };
@@ -474,10 +529,90 @@ function activeFileForUser(userId) {
 
 function updateCheckButtonMarkup(id, label = "Check for updates", extraClass = "") {
   return `
-    <button class="btn update-check-button ${extraClass}" id="${escapeHtml(id)}" data-check-updates data-default-label="${escapeHtml(label)}" type="button" title="Check for updates" aria-label="Check for updates">
-      ${icon("download")}
-      <span data-update-label>${local.updateChecking ? "Checking..." : escapeHtml(label)}</span>
+    <button class="btn update-check-button ${extraClass} ${local.updateChecking ? "is-checking" : ""}" id="${escapeHtml(id)}" data-check-updates data-default-label="${escapeHtml(label)}" type="button" title="Check for updates" aria-label="Check for updates" aria-busy="${local.updateChecking ? "true" : "false"}">
+      <span class="update-check-icon">${icon("refresh")}</span>
+      <span class="update-check-copy">
+        <span data-update-label>${local.updateChecking ? "Checking for updates..." : escapeHtml(label)}</span>
+        <small>Latest LocalLeaf build</small>
+      </span>
     </button>
+  `;
+}
+
+function isZipImportFile(file) {
+  return /\.zip$/i.test(file?.name || "") || file?.type === "application/zip" || file?.type === "application/x-zip-compressed";
+}
+
+function stagedImportPath(file) {
+  return file?.webkitRelativePath || file?.relativePath || file?.name || "Untitled";
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function homeImportTrayMarkup() {
+  const files = local.homeImportFiles || [];
+  const hasFiles = files.length > 0;
+  const zipFiles = files.filter(isZipImportFile);
+  const invalidZipMix = zipFiles.length > 0 && files.length > 1;
+  const title = hasFiles
+    ? invalidZipMix
+      ? "ZIP imports must be selected alone"
+      : zipFiles.length
+        ? "ZIP ready to open"
+        : `${files.length} file${files.length === 1 ? "" : "s"} ready to open`
+    : "Drop files or a ZIP here";
+  const detail = hasFiles
+    ? zipFiles.length
+      ? "LocalLeaf will unpack this ZIP as a project."
+      : "LocalLeaf will create a project from these files."
+    : "Use a .zip for full projects, or select .tex, .bib, images, and supporting files together.";
+
+  return `
+    <section class="home-import-panel">
+      <div class="home-import-head">
+        <div>
+          <strong>Drop project files</strong>
+          <span>Drag a ZIP or loose LaTeX files into the box</span>
+        </div>
+      </div>
+      <div class="home-import-drop ${local.homeImportDragActive ? "drag-active" : ""} ${hasFiles ? "has-files" : ""}" id="homeImportDropZone">
+        <div class="home-import-drop-icon">${uiGlyph("upload")}</div>
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(detail)}</span>
+        </div>
+      </div>
+      ${hasFiles ? `
+        <div class="home-import-staged">
+          <div class="home-import-staged-head">
+            <div>
+              <strong>${escapeHtml(zipFiles.length ? zipFiles[0].name : `${files.length} selected files`)}</strong>
+              <span>${escapeHtml(zipFiles.length ? formatFileSize(zipFiles[0].size) : `${formatFileSize(files.reduce((total, file) => total + Number(file.size || 0), 0))} total`)}</span>
+            </div>
+            <div class="home-import-actions">
+              <button class="btn btn-primary" id="openHomeImport" ${local.homeImportBusy || invalidZipMix ? "disabled" : ""}>${local.homeImportBusy ? "Opening..." : "Open import"}</button>
+              <button class="btn" id="clearHomeImport" ${local.homeImportBusy ? "disabled" : ""}>Clear</button>
+            </div>
+          </div>
+          <div class="home-import-file-list" aria-label="Files to import">
+            ${files.slice(0, 12).map((file) => `
+              <div class="home-import-file-row">
+                <span>${isZipImportFile(file) ? "zip" : "file"}</span>
+                <strong title="${escapeHtml(stagedImportPath(file))}">${escapeHtml(stagedImportPath(file))}</strong>
+                <small>${escapeHtml(formatFileSize(file.size))}</small>
+              </div>
+            `).join("")}
+            ${files.length > 12 ? `<div class="home-import-file-more">+ ${files.length - 12} more file${files.length - 12 === 1 ? "" : "s"}</div>` : ""}
+          </div>
+        </div>
+      ` : ""}
+      ${local.homeImportStatus ? `<div class="home-import-status">${escapeHtml(local.homeImportStatus)}</div>` : ""}
+    </section>
   `;
 }
 
@@ -498,9 +633,10 @@ function homeView() {
           <div class="home-action-grid">
             <button class="btn btn-primary" id="newProject">${icon("plus")} New Project</button>
             <button class="btn" id="importZip">${uiGlyph("folder")} Import ZIP Project</button>
-            <button class="btn" id="openCurrent">Open Current Project</button>
+            <button class="btn" id="importFiles">${uiGlyph("upload")} Import Files</button>
             <button class="btn btn-outline-orange" id="homeSessionAction">${uiGlyph("users")} ${sessionActionLabel}</button>
           </div>
+          ${homeImportTrayMarkup()}
         </section>
 
         <section class="home-current-panel">
@@ -769,8 +905,10 @@ function renderUpdateToast() {
 function updateUpdateCheckButtons() {
   document.querySelectorAll("[data-check-updates]").forEach((button) => {
     button.disabled = local.updateChecking;
+    button.classList.toggle("is-checking", local.updateChecking);
+    button.setAttribute("aria-busy", local.updateChecking ? "true" : "false");
     const label = button.querySelector("[data-update-label]");
-    if (label) label.textContent = local.updateChecking ? "Checking..." : button.dataset.defaultLabel || "Check for updates";
+    if (label) label.textContent = local.updateChecking ? "Checking for updates..." : button.dataset.defaultLabel || "Check for updates";
   });
 }
 
@@ -787,13 +925,14 @@ function markUpdateButtonFeedback(button, message) {
 
 async function checkForUpdates(options = {}) {
   const manual = Boolean(options.manual);
+  if (!manual && !local.autoUpdateChecks) return "disabled";
   if (isGuestClient() || local.updateChecking) return "skipped";
   if (!manual && local.updateCheckStarted) return "skipped";
   if (!manual) local.updateCheckStarted = true;
   local.updateChecking = true;
-  if (manual) updateUpdateCheckButtons();
+  updateUpdateCheckButtons();
   try {
-    const info = await api("/api/update/latest");
+    const info = await api("/api/update/latest", { timeoutMs: 9000 });
     if (!info || info.error) return "silent";
     local.updateInfo = info;
     if (info?.updateAvailable) {
@@ -809,7 +948,7 @@ async function checkForUpdates(options = {}) {
     return "silent";
   } finally {
     local.updateChecking = false;
-    if (manual) updateUpdateCheckButtons();
+    updateUpdateCheckButtons();
   }
 }
 
@@ -817,7 +956,90 @@ async function manualCheckForUpdates(event) {
   const result = await checkForUpdates({ manual: true });
   if (result === "current") {
     markUpdateButtonFeedback(event?.currentTarget, "Up to date");
+  } else if (result === "available") {
+    markUpdateButtonFeedback(event?.currentTarget, "Update ready");
+  } else if (result === "silent") {
+    markUpdateButtonFeedback(event?.currentTarget, "Could not check");
   }
+}
+
+function applyTheme(theme) {
+  const nextTheme = theme === "dark" ? "dark" : "light";
+  local.theme = nextTheme;
+  localStorage.setItem("localleaf.theme", nextTheme);
+  document.documentElement.classList.toggle("theme-dark", nextTheme === "dark");
+  document.documentElement.classList.toggle("theme-light", nextTheme !== "dark");
+  syncDesktopTheme(nextTheme);
+}
+
+function syncDesktopTheme(theme) {
+  window.localleafDesktop?.setTheme?.(theme === "dark" ? "dark" : "light");
+}
+
+function setAutoUpdateChecks(enabled) {
+  local.autoUpdateChecks = Boolean(enabled);
+  localStorage.setItem("localleaf.autoUpdateChecks", local.autoUpdateChecks ? "1" : "0");
+}
+
+function hideSettingsModal() {
+  document.querySelector(".settings-modal-backdrop")?.remove();
+}
+
+function showSettingsModal() {
+  hideSettingsModal();
+  const shell = document.querySelector(".editor-shell") || app;
+  shell.insertAdjacentHTML("beforeend", `
+    <div class="settings-modal-backdrop" role="presentation">
+      <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="settings-modal-head">
+          <div>
+            <h2 id="settingsTitle">LocalLeaf Settings</h2>
+            <p>Simple workspace preferences for this app.</p>
+          </div>
+          <button class="icon-button" data-close-settings title="Close settings" aria-label="Close settings">x</button>
+        </div>
+        <div class="settings-options">
+          <section class="settings-group" aria-labelledby="appearanceTitle">
+            <div>
+              <h3 id="appearanceTitle">Appearance</h3>
+              <p>Choose how LocalLeaf looks on this computer.</p>
+            </div>
+            <div class="settings-segment" role="group" aria-label="Theme">
+              <button type="button" class="${local.theme === "light" ? "active" : ""}" data-theme-option="light">Light</button>
+              <button type="button" class="${local.theme === "dark" ? "active" : ""}" data-theme-option="dark">Dark</button>
+            </div>
+          </section>
+          <section class="settings-group settings-toggle-row" aria-labelledby="updatesTitle">
+            <div>
+              <h3 id="updatesTitle">Automatic update checks</h3>
+              <p>Check once when LocalLeaf opens. Manual checks still work.</p>
+            </div>
+            <label class="settings-switch">
+              <input type="checkbox" id="autoUpdateChecks" ${local.autoUpdateChecks ? "checked" : ""} />
+              <span></span>
+            </label>
+          </section>
+        </div>
+      </section>
+    </div>
+  `);
+
+  const modal = document.querySelector(".settings-modal-backdrop");
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) hideSettingsModal();
+  });
+  modal?.querySelector("[data-close-settings]")?.addEventListener("click", hideSettingsModal);
+  modal?.querySelectorAll("[data-theme-option]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyTheme(button.dataset.themeOption);
+      modal.querySelectorAll("[data-theme-option]").forEach((option) => {
+        option.classList.toggle("active", option === button);
+      });
+    });
+  });
+  modal?.querySelector("#autoUpdateChecks")?.addEventListener("change", (event) => {
+    setAutoUpdateChecks(event.currentTarget.checked);
+  });
 }
 
 function joinView(code) {
@@ -1191,9 +1413,7 @@ function renderProjectTree(files, selectedFile) {
 
 function renderImageGroup(files, selectedFile) {
   const images = files.filter((item) => item.type === "image");
-  if (!images.length) {
-    return "";
-  }
+  const isEmpty = images.length === 0;
 
   return `
     <div class="image-group">
@@ -1203,6 +1423,7 @@ function renderImageGroup(files, selectedFile) {
         <span class="folder-count">${images.length}</span>
       </button>
         ${local.imagesCollapsed ? "" : `<div class="tree-children">
+          ${isEmpty ? `<div class="tree-empty">No images in this project.</div>` : ""}
           ${images.map((item) => `
             <button class="file-button tree-file image-file ${item.path === selectedFile && !local.selectedFolder ? "active" : ""} nested"
             data-file="${escapeHtml(item.path)}"
@@ -2269,7 +2490,9 @@ function editorInlineStyle() {
   const styles = [
     `--sidebar-width:${local.sidebarWidth}px`,
     `--right-rail-width:${local.rightRailWidth}px`,
-    `--logs-height:${local.logsHeight}px`
+    `--logs-height:${local.logsHeight}px`,
+    `--files-section-height:${local.fileSectionHeight}px`,
+    `--images-section-height:${local.imageSectionHeight}px`
   ];
   if (local.sourcePaneWidth > 0) {
     styles.push(`--source-width:${local.sourcePaneWidth}px`);
@@ -2292,26 +2515,43 @@ function editorMoreMenuMarkup(state, selection) {
       class="editor-more-item ${options.active ? "active" : ""} ${options.danger ? "danger" : ""}"
       data-editor-more-action="${escapeHtml(action)}"
       ${options.disabled ? "disabled" : ""}>
-      <span>${escapeHtml(label)}</span>
-      ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+      ${options.icon ? `<span class="editor-menu-icon">${options.icon}</span>` : ""}
+      <span class="editor-menu-copy">
+        <span>${escapeHtml(label)}</span>
+        ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+      </span>
+      ${options.active !== undefined ? `<span class="editor-menu-state">${options.active ? "On" : "Off"}</span>` : ""}
     </button>
   `;
+  const layoutButton = (action, label, detail, glyph, active) =>
+    menuButton(action, label, detail, { active, icon: layoutGlyph(glyph) });
   return `
     <section class="editor-more-menu" role="menu" aria-label="Editor actions">
+      <div class="editor-more-header">
+        <strong>Workspace</strong>
+        <span>${escapeHtml(state.project.name)}</span>
+      </div>
       <div class="editor-more-section">
+        ${menuButton("settings", "Settings", "Theme and update checks", { icon: icon("settings") })}
         ${updateCheckButtonMarkup("editorCheckUpdates", "Check for updates", "editor-more-update")}
-        ${menuButton("set-main", "Set current file as main", state.project.mainFile || "No main file", { disabled: !selection.canSetMain })}
+        ${menuButton("set-main", "Set as main file", state.project.mainFile || "No main file", { disabled: !selection.canSetMain, icon: editorToolIcon("ref") })}
         <a class="editor-more-item" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" role="menuitem">
-          <span>Download ZIP</span>
-          <small>Save the whole project</small>
+          <span class="editor-menu-icon">${icon("download")}</span>
+          <span class="editor-menu-copy">
+            <span>Download ZIP</span>
+            <small>Save the whole project</small>
+          </span>
         </a>
       </div>
       <div class="editor-more-section">
-        ${menuButton("toggle-files", local.sidebarVisible ? "Hide files panel" : "Show files panel", "Project tree", { active: local.sidebarVisible })}
-        ${menuButton("toggle-editor", local.sourcePaneVisible ? "Hide editor pane" : "Show editor pane", "Source", { active: local.sourcePaneVisible })}
-        ${menuButton("toggle-pdf", local.previewPaneVisible ? "Hide PDF pane" : "Show PDF pane", "Preview", { active: local.previewPaneVisible })}
-        ${menuButton("toggle-logs", local.logsVisible ? "Hide logs" : "Show logs", "Compiler output", { active: local.logsVisible })}
-        ${menuButton("toggle-chat", local.rightRailVisible ? "Hide chat/users" : "Show chat/users", "Collaboration rail", { active: local.rightRailVisible })}
+        <div class="editor-more-section-title">Layout</div>
+        <div class="editor-more-toggle-grid">
+          ${layoutButton("toggle-files", "Files", "Project tree", "sidebar", local.sidebarVisible)}
+          ${layoutButton("toggle-editor", "Editor", "Source pane", "editor", local.sourcePaneVisible)}
+          ${layoutButton("toggle-pdf", "PDF", "Preview pane", "preview", local.previewPaneVisible)}
+          ${layoutButton("toggle-logs", "Logs", "Compiler output", "bottom", local.logsVisible)}
+          ${layoutButton("toggle-chat", "Chat", "Users and messages", "right", local.rightRailVisible)}
+        </div>
       </div>
     </section>
   `;
@@ -2463,6 +2703,10 @@ function editorView() {
             <button class="icon-button editor-back-button" id="backToProject" title="Back" aria-label="Back">
               <span class="chevron-left" aria-hidden="true"></span>
             </button>
+            <button class="icon-button editor-more-button ${local.editorMoreMenuOpen ? "active" : ""}" id="editorMoreButton" title="More editor actions" aria-label="More editor actions" aria-expanded="${local.editorMoreMenuOpen ? "true" : "false"}">
+              ${editorToolIcon("menu")}
+            </button>
+            ${editorMoreMenuMarkup(state, selection)}
             <button class="btn editor-save-button" id="saveButton" ${selection.canEditSelected ? "" : "disabled"}>
               <span class="save-glyph" aria-hidden="true"></span>
               <span>Save</span>
@@ -2478,10 +2722,6 @@ function editorView() {
               <span>${isCompiling ? "Compiling..." : "Recompile"}</span>
             </button>
             <button class="btn" id="exportButton" style="height:32px">Export</button>
-            <button class="icon-button editor-more-button ${local.editorMoreMenuOpen ? "active" : ""}" id="editorMoreButton" title="More editor actions" aria-label="More editor actions" aria-expanded="${local.editorMoreMenuOpen ? "true" : "false"}">
-              ${editorToolIcon("menu")}
-            </button>
-            ${editorMoreMenuMarkup(state, selection)}
           </div>
         </div>
         ${editorFormatToolbarMarkup()}
@@ -2510,12 +2750,16 @@ function editorView() {
           </div>
           <div class="file-list tree-list">
             ${renderProjectTree(state.project.files, file)}
-            ${renderImageGroup(state.project.files, file)}
           </div>
-            <div class="outline ${selection.canEditSelected ? "" : "muted-outline"}">
-              <h3>File outline</h3>
-              ${selection.canEditSelected ? outlineTreeMarkup(selection.outline, selection.outline.find((item) => item?.title)?.title || "") : `<div class="outline-empty">Open a text file to view outline.</div>`}
-            </div>
+          <div class="sidebar-section-resizer" data-sidebar-section-resizer="files" title="Resize files and images"></div>
+          <section class="sidebar-images-panel tree-list" aria-label="Images">
+            ${renderImageGroup(state.project.files, file)}
+          </section>
+          <div class="sidebar-section-resizer" data-sidebar-section-resizer="images" title="Resize images and outline"></div>
+          <div class="outline ${selection.canEditSelected ? "" : "muted-outline"}">
+            <h3>File outline</h3>
+            ${selection.canEditSelected ? outlineTreeMarkup(selection.outline, selection.outline.find((item) => item?.title)?.title || "") : `<div class="outline-empty">Open a text file to view outline.</div>`}
+          </div>
         </aside>
         <div class="sidebar-resizer" id="sidebarResizer" title="Resize file sidebar"></div>
 
@@ -2635,12 +2879,13 @@ function goBackHome() {
 }
 
 function bindHome() {
-  document.querySelector("#openCurrent")?.addEventListener("click", () => setView("project"));
   document.querySelector("#openCurrentCard")?.addEventListener("click", () => setView("project"));
   document.querySelector("#newProject")?.addEventListener("click", createNewProject);
   document.querySelector("#importZip")?.addEventListener("click", importZipProject);
+  document.querySelector("#importFiles")?.addEventListener("click", openHomeImportPicker);
   document.querySelector("#homeSessionAction")?.addEventListener("click", handleHomeSessionAction);
   document.querySelector("#homeCheckUpdates")?.addEventListener("click", manualCheckForUpdates);
+  bindHomeImportTray();
 }
 
 async function createNewProject() {
@@ -2678,6 +2923,123 @@ async function openProjectPrompt() {
   }
 }
 
+function bindHomeImportTray() {
+  document.querySelector("#openHomeImport")?.addEventListener("click", importStagedHomeFiles);
+  document.querySelector("#clearHomeImport")?.addEventListener("click", () => {
+    local.homeImportFiles = [];
+    local.homeImportStatus = "";
+    render();
+  });
+
+  const dropZone = document.querySelector("#homeImportDropZone");
+  if (!dropZone) return;
+  const setDragActive = (active) => {
+    local.homeImportDragActive = active;
+    dropZone.classList.toggle("drag-active", active);
+  };
+  dropZone.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    setDragActive(true);
+  });
+  dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragActive(true);
+  });
+  dropZone.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget && dropZone.contains(event.relatedTarget)) return;
+    setDragActive(false);
+  });
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    setDragActive(false);
+    setHomeImportFiles(event.dataTransfer.files);
+  });
+}
+
+function openHomeImportPicker() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.accept = ".zip,.tex,.latex,.bib,.bst,.cls,.sty,.clo,.cfg,.def,.ldf,.bbx,.cbx,.bbl,.txt,.md,.tikz,.csv,.dat,.json,.asy,.py,.png,.jpg,.jpeg,.gif,.webp,.svg,.pdf,.eps";
+  input.addEventListener("change", () => setHomeImportFiles(input.files));
+  input.click();
+}
+
+function setHomeImportFiles(fileList) {
+  const files = [...(fileList || [])].filter((file) => file?.name);
+  local.homeImportFiles = files;
+  local.homeImportStatus = files.length ? "" : "No files were selected.";
+  local.homeImportDragActive = false;
+  render();
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function importStagedHomeFiles() {
+  const files = local.homeImportFiles || [];
+  if (!files.length || local.homeImportBusy) return;
+  const zipFiles = files.filter(isZipImportFile);
+  if (zipFiles.length && files.length > 1) {
+    local.homeImportStatus = "Select a ZIP by itself, or choose loose project files without a ZIP.";
+    render();
+    return;
+  }
+
+  local.homeImportBusy = true;
+  local.homeImportStatus = "Preparing import...";
+  render();
+
+  try {
+    if (zipFiles.length === 1) {
+      await importZipFile(zipFiles[0]);
+      return;
+    }
+
+    const payloadFiles = [];
+    for (const file of files) {
+      const buffer = await file.arrayBuffer();
+      payloadFiles.push({
+        path: stagedImportPath(file),
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        contentBase64: arrayBufferToBase64(buffer)
+      });
+    }
+
+    const mainCandidate = files.find((file) => /\.tex$/i.test(file.name)) || files[0];
+    local.appState = await api("/api/project/import-files", {
+      method: "POST",
+      rawBody: JSON.stringify({
+        projectName: mainCandidate?.name || "Imported Files",
+        files: payloadFiles
+      })
+    });
+    local.selectedFile = local.appState.project.mainFile;
+    expandToFile(local.selectedFile);
+    await loadSelectedFile();
+    local.homeImportFiles = [];
+    local.homeImportStatus = "";
+    local.saveStatus = "Imported files";
+    setView("project");
+  } catch (error) {
+    local.homeImportStatus = error.message;
+    render();
+  } finally {
+    local.homeImportBusy = false;
+    if (route().view === "home") render();
+  }
+}
+
 function bindProject() {
   const openEditor = async () => {
     await loadSelectedFile();
@@ -2689,33 +3051,48 @@ function bindProject() {
   document.querySelector("#backProject")?.addEventListener("click", () => setView("project"));
 }
 
-async function importZipProject() {
+async function importZipProject(fileOverride = null) {
+  if (fileOverride) {
+    await importZipFile(fileOverride);
+    return;
+  }
   const input = document.createElement("input");
   input.type = "file";
   input.accept = ".zip,application/zip";
   input.addEventListener("change", async () => {
     const file = input.files?.[0];
     if (!file) return;
-    try {
-      const buffer = await file.arrayBuffer();
-      local.appState = await api("/api/project/import-zip", {
-        method: "POST",
-        headers: {
-          "content-type": "application/zip",
-          "x-file-name": file.name
-        },
-        rawBody: buffer
-      });
-      local.selectedFile = local.appState.project.mainFile;
-      expandToFile(local.selectedFile);
-      await loadSelectedFile();
-      local.saveStatus = "Imported";
-      setView("project");
-    } catch (error) {
-      alert(error.message);
-    }
+    await importZipFile(file);
   });
   input.click();
+}
+
+async function importZipFile(file) {
+  try {
+    const buffer = await file.arrayBuffer();
+    local.appState = await api("/api/project/import-zip", {
+      method: "POST",
+      headers: {
+        "content-type": "application/zip",
+        "x-file-name": file.name
+      },
+      rawBody: buffer
+    });
+    local.selectedFile = local.appState.project.mainFile;
+    expandToFile(local.selectedFile);
+    await loadSelectedFile();
+    local.homeImportFiles = [];
+    local.homeImportStatus = "";
+    local.saveStatus = "Imported";
+    setView("project");
+  } catch (error) {
+    if (route().view === "home") {
+      local.homeImportStatus = error.message;
+      render();
+      return;
+    }
+    alert(error.message);
+  }
 }
 
 async function startSession() {
@@ -4194,6 +4571,8 @@ async function pollJoinStatus() {
 
 function bindEditor() {
   if (route().view !== "editor") return;
+  if (!local.editorOpenLayoutPrepared) prepareEditorOpenLayout();
+  requestEditorMaximize();
   if (isLiveSession()) connectCollab();
   else closeCollab();
   document.querySelector(".log-dock")?.addEventListener("click", (event) => {
@@ -4219,6 +4598,11 @@ function bindEditor() {
     button.addEventListener("click", () => {
       const action = button.dataset.editorMoreAction;
       local.editorMoreMenuOpen = false;
+      if (action === "settings") {
+        render();
+        setTimeout(showSettingsModal, 0);
+        return;
+      }
       if (action === "set-main") setMainFile();
       else {
         if (action === "toggle-files") setSidebarVisible(!local.sidebarVisible);
@@ -4262,6 +4646,8 @@ function bindEditor() {
     document.body.classList.add("is-resizing-logs");
     event.currentTarget.setPointerCapture?.(event.pointerId);
   });
+  bindSidebarSectionResizers();
+  clampSidebarSections();
   bindSidebarControls();
 
   bindEditorToolbar();
@@ -4278,6 +4664,63 @@ function bindEditor() {
     input.value = "";
     await api("/api/chat", { method: "POST", body: { author: local.userName, message } });
   });
+}
+
+function bindSidebarSectionResizers() {
+  document.querySelectorAll("[data-sidebar-section-resizer]").forEach((handle) => {
+    handle.onpointerdown = (event) => {
+      event.preventDefault();
+      local.resizingSidebarSection = handle.dataset.sidebarSectionResizer || "";
+      local.sidebarSectionLayoutAutoSized = false;
+      document.body.classList.add("is-resizing-sidebar-section");
+      handle.setPointerCapture?.(event.pointerId);
+    };
+  });
+}
+
+function sidebarSectionMetrics() {
+  const sidebar = document.querySelector(".sidebar");
+  if (!sidebar) return null;
+  const head = sidebar.querySelector(".files-panel-head");
+  const search = sidebar.querySelector(".file-search");
+  const handleHeight = 7;
+  const minFiles = 130;
+  const minImages = 86;
+  const minOutline = 120;
+  const fixedHeight = (head?.offsetHeight || 0) + (search?.offsetHeight || 0) + handleHeight * 2;
+  const available = Math.max(minFiles + minImages + minOutline, sidebar.clientHeight - fixedHeight);
+  return { sidebar, head, search, handleHeight, minFiles, minImages, minOutline, available };
+}
+
+function clampSidebarSections(nextFiles = local.fileSectionHeight, nextImages = local.imageSectionHeight) {
+  const metrics = sidebarSectionMetrics();
+  const minFiles = metrics?.minFiles || 130;
+  const minImages = metrics?.minImages || 86;
+  const minOutline = metrics?.minOutline || 120;
+  const available = metrics?.available || 520;
+  if (local.sidebarSectionLayoutNeedsDefault || !nextFiles || !nextImages) {
+    nextImages = Math.max(minImages, Math.min(170, Math.round(available * 0.16)));
+    nextFiles = Math.max(minFiles, Math.round((available - nextImages) * 0.72));
+    local.sidebarSectionLayoutNeedsDefault = false;
+    local.sidebarSectionLayoutAutoSized = true;
+    localStorage.setItem("localleaf.sidebarSectionLayoutVersion", SIDEBAR_SECTION_LAYOUT_VERSION);
+  }
+  const maxFiles = Math.max(minFiles, available - minImages - minOutline);
+  const files = Math.max(minFiles, Math.min(maxFiles, Math.round(nextFiles)));
+  const maxImages = Math.max(minImages, available - files - minOutline);
+  const images = Math.max(minImages, Math.min(maxImages, Math.round(nextImages)));
+  local.fileSectionHeight = files;
+  local.imageSectionHeight = images;
+  localStorage.setItem("localleaf.fileSectionHeight", String(files));
+  localStorage.setItem("localleaf.imageSectionHeight", String(images));
+  applySidebarSectionStyles();
+}
+
+function applySidebarSectionStyles() {
+  const shell = document.querySelector(".editor-shell");
+  if (!shell) return;
+  shell.style.setProperty("--files-section-height", `${local.fileSectionHeight}px`);
+  shell.style.setProperty("--images-section-height", `${local.imageSectionHeight}px`);
 }
 
 function bindSidebarControls() {
@@ -4653,6 +5096,7 @@ function applyEditorLayoutState() {
   shell.classList.toggle("preview-collapsed", !local.previewPaneVisible);
   shell.classList.toggle("right-rail-collapsed", !local.rightRailVisible);
   shell.classList.toggle("logs-hidden", !local.logsVisible);
+  applySidebarSectionStyles();
   document.querySelector("#toggleSourcePane")?.classList.toggle("active", local.sourcePaneVisible);
   document.querySelector("#togglePreviewPane")?.classList.toggle("active", local.previewPaneVisible);
   document.querySelector("#toggleLogs")?.classList.toggle("active", local.logsVisible);
@@ -4664,12 +5108,18 @@ function updateSidebarUi() {
   const textFiles = state.project.files.filter((item) => item.type === "text");
   const fileList = document.querySelector(".file-list");
   if (fileList) {
-    fileList.innerHTML = `${renderProjectTree(state.project.files, file)}${renderImageGroup(state.project.files, file)}`;
+    fileList.innerHTML = renderProjectTree(state.project.files, file);
+  }
+  const imagePanel = document.querySelector(".sidebar-images-panel");
+  if (imagePanel) {
+    imagePanel.innerHTML = renderImageGroup(state.project.files, file);
   }
   const count = document.querySelector(".files-title span");
   if (count) count.textContent = `${textFiles.length} editable`;
   const search = document.querySelector("#fileSearch");
   if (search && search.value !== local.fileFilter) search.value = local.fileFilter;
+  clampSidebarSections();
+  bindSidebarSectionResizers();
   bindSidebarControls();
   settleEditorUi();
 }
@@ -4814,6 +5264,20 @@ window.addEventListener("pointermove", (event) => {
     return;
   }
 
+  if (local.resizingSidebarSection) {
+    const metrics = sidebarSectionMetrics();
+    if (!metrics) return;
+    const rect = metrics.sidebar.getBoundingClientRect();
+    const fixedTop = (metrics.head?.offsetHeight || 0) + (metrics.search?.offsetHeight || 0);
+    const y = Math.round(event.clientY - rect.top - fixedTop);
+    if (local.resizingSidebarSection === "files") {
+      clampSidebarSections(y, local.imageSectionHeight);
+    } else if (local.resizingSidebarSection === "images") {
+      clampSidebarSections(local.fileSectionHeight, y - local.fileSectionHeight - metrics.handleHeight);
+    }
+    return;
+  }
+
   if (local.resizingSplit) {
     const codePanel = document.querySelector(".code-panel");
     const previewPanel = document.querySelector(".preview-panel");
@@ -4857,16 +5321,24 @@ window.addEventListener("pointermove", (event) => {
 });
 
 window.addEventListener("pointerup", () => {
-  const wasResizing = local.resizingSidebar || local.resizingSplit || local.resizingRightRail || local.resizingLogs;
+  const wasResizing = local.resizingSidebar || local.resizingSidebarSection || local.resizingSplit || local.resizingRightRail || local.resizingLogs;
   if (!wasResizing) return;
   local.resizingSidebar = false;
+  local.resizingSidebarSection = "";
   local.resizingSplit = false;
   local.resizingRightRail = false;
   local.resizingLogs = false;
   document.body.classList.remove("is-resizing-sidebar");
+  document.body.classList.remove("is-resizing-sidebar-section");
   document.body.classList.remove("is-resizing-split");
   document.body.classList.remove("is-resizing-right-rail");
   document.body.classList.remove("is-resizing-logs");
+});
+
+window.addEventListener("resize", () => {
+  if (route().view !== "editor" || !local.sidebarSectionLayoutAutoSized || local.resizingSidebarSection) return;
+  local.sidebarSectionLayoutNeedsDefault = true;
+  clampSidebarSections(0, 0);
 });
 
 function settleEditorUi() {
@@ -5340,6 +5812,11 @@ window.addEventListener("pointerdown", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && document.querySelector(".settings-modal-backdrop")) {
+    event.preventDefault();
+    hideSettingsModal();
+    return;
+  }
   if (event.key === "Escape" && route().view === "editor") {
     if (local.editorMoreMenuOpen) {
       event.preventDefault();
@@ -5398,7 +5875,7 @@ loadState()
     connectEvents();
     return render();
   })
-  .then(checkForUpdates)
+  .then(() => checkForUpdates())
   .catch((error) => {
     app.innerHTML = `<section class="empty-state"><div class="ended-card"><h1>LocalLeaf failed to start</h1><p class="error">${escapeHtml(error.message)}</p></div></section>`;
   });

@@ -475,6 +475,65 @@ function importZipProject(zipBuffer, filename) {
   return projectRoot;
 }
 
+function importLooseFilesProject(fileRecords, projectName) {
+  if (!Array.isArray(fileRecords) || fileRecords.length === 0) {
+    throw new Error("Choose at least one file to import.");
+  }
+  if (fileRecords.length > MAX_IMPORT_ENTRIES) {
+    throw new Error(`LocalLeaf supports up to ${MAX_IMPORT_ENTRIES} files per import.`);
+  }
+
+  const importsRoot = path.join(getUserProjectsDir(), "Imported");
+  const firstName = fileRecords.find((file) => file?.path || file?.name)?.path || fileRecords[0]?.name || "Imported Files";
+  const projectRoot = uniqueDirectory(importsRoot, sanitizeProjectName(projectName || firstName || "Imported Files"));
+  fs.mkdirSync(projectRoot, { recursive: true });
+
+  const seenPaths = new Set();
+  let totalBytes = 0;
+
+  try {
+    for (const record of fileRecords) {
+      const relativePath = normalizeRelativePath(record?.path || record?.name || "");
+      if (!relativePath || relativePath.endsWith("/")) {
+        throw new Error("Imported files must include a file name.");
+      }
+      if (relativePath.split("/").filter(Boolean).length > 40) {
+        throw new Error("Imported file folder nesting is too deep.");
+      }
+      const key = relativePath.toLowerCase();
+      if (seenPaths.has(key)) {
+        throw new Error(`Duplicate import path: ${relativePath}`);
+      }
+      seenPaths.add(key);
+
+      const contentBase64 = String(record?.contentBase64 || "");
+      const data = Buffer.from(contentBase64, "base64");
+      if (data.length > MAX_IMPORT_FILE_BYTES) {
+        throw new Error(`Imported file ${relativePath} is larger than ${Math.round(MAX_IMPORT_FILE_BYTES / 1024 / 1024)} MB.`);
+      }
+      totalBytes += data.length;
+      if (totalBytes > MAX_IMPORT_UNCOMPRESSED_BYTES) {
+        throw new Error(`Imported files exceed LocalLeaf's ${Math.round(MAX_IMPORT_UNCOMPRESSED_BYTES / 1024 / 1024)} MB import limit.`);
+      }
+
+      const target = path.resolve(projectRoot, relativePath);
+      assertInsideDirectory(projectRoot, target);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, data);
+    }
+
+    const mainFile = detectMainFile(projectRoot);
+    if (!mainFile) {
+      throw new Error("Imported files must include at least one .tex file.");
+    }
+  } catch (error) {
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+    throw error;
+  }
+
+  return projectRoot;
+}
+
 function createNewTemplateProject() {
   const projectRoot = uniqueDirectory(getUserProjectsDir(), DEFAULT_PROJECT_NAME);
   copyDirectory(SAMPLE_PROJECT, projectRoot);
@@ -1891,9 +1950,49 @@ function createLocalLeafServer(options = {}) {
         return;
       }
 
-      const importedRoot = importZipProject(zipBuffer, filename);
+      let importedRoot;
+      try {
+        importedRoot = importZipProject(zipBuffer, filename);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+        return;
+      }
       setProjectRoot(state, importedRoot);
       state.compile.logs = [`[LocalLeaf] Imported ZIP project: ${filename}`];
+      broadcastState(state);
+      jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/project/import-files") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response);
+        return;
+      }
+
+      const payloadBuffer = await readRawBody(request, Math.ceil(MAX_IMPORT_UNCOMPRESSED_BYTES * 1.5));
+      if (payloadBuffer.length === 0) {
+        jsonResponse(response, 400, { error: "File import was empty." });
+        return;
+      }
+
+      let payload;
+      try {
+        payload = JSON.parse(payloadBuffer.toString("utf8"));
+      } catch {
+        jsonResponse(response, 400, { error: "Invalid file import payload." });
+        return;
+      }
+
+      let importedRoot;
+      try {
+        importedRoot = importLooseFilesProject(payload.files, payload.projectName);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+        return;
+      }
+      setProjectRoot(state, importedRoot);
+      state.compile.logs = [`[LocalLeaf] Imported ${payload.files.length} file${payload.files.length === 1 ? "" : "s"} into: ${state.project.name}`];
       broadcastState(state);
       jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
       return;
