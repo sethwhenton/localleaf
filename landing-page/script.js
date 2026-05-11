@@ -140,7 +140,7 @@ const updateCollabFlowMotion = () => {
   if (!collabFlowSection) return;
   const hasStatementPanel = Boolean(collabFlowSection.querySelector(".statement-section"));
 
-  if (prefersReducedMotion.matches || !hasStatementPanel) {
+  if (prefersReducedMotion.matches) {
     collabFlowSection.style.setProperty("--statement-panel-x", "0px");
     collabFlowSection.style.setProperty("--flow-panel-x", "0px");
     collabFlowSection.style.setProperty("--flow-panel-scale", "1");
@@ -150,11 +150,27 @@ const updateCollabFlowMotion = () => {
   const rect = collabFlowSection.getBoundingClientRect();
   const scrollDistance = Math.max(1, rect.height - window.innerHeight);
   const progress = clamp(-rect.top / scrollDistance);
-  const handoff = easeInOut(clamp((progress - 0.66) / 0.32));
-  const panelDistance = window.innerWidth;
-  const statementX = handoff * panelDistance;
-  const flowX = (handoff - 1) * panelDistance;
-  const flowScale = 0.985 + handoff * 0.015;
+  const fullPanelDistance = window.innerWidth;
+  const slideDistance = hasStatementPanel
+    ? fullPanelDistance
+    : Math.min(
+        window.innerWidth <= 820 ? 210 : 560,
+        window.innerWidth * (window.innerWidth <= 820 ? 0.52 : 0.38)
+      );
+  let statementX = 0;
+  let flowProgress;
+
+  if (hasStatementPanel) {
+    flowProgress = easeInOut(clamp((progress - 0.66) / 0.32));
+    statementX = flowProgress * fullPanelDistance;
+  } else {
+    const entryStart = window.innerHeight * 0.96;
+    const entryEnd = window.innerHeight * 0.08;
+    flowProgress = easeInOut(clamp((entryStart - rect.top) / Math.max(1, entryStart - entryEnd)));
+  }
+
+  const flowX = (flowProgress - 1) * slideDistance;
+  const flowScale = 0.985 + flowProgress * 0.015;
 
   collabFlowSection.style.setProperty("--statement-panel-x", `${statementX.toFixed(1)}px`);
   collabFlowSection.style.setProperty("--flow-panel-x", `${flowX.toFixed(1)}px`);
@@ -182,24 +198,6 @@ const updateScrollReveals = () => {
     const qaSection = item.closest(".qa-section");
     const finalRevealSection = item.closest(".final-cta");
 
-    if (statementRevealSection && !statementRevealSection.closest(".collab-flow-section")) {
-      const sectionRect = statementRevealSection.getBoundingClientRect();
-      const statementIndex = Number(item.dataset.statementRevealIndex || 0);
-      const triggerLine = 0.8 - statementIndex * 0.13;
-      const progress = clamp(
-        (window.innerHeight * triggerLine - sectionRect.top) / (window.innerHeight * 0.3)
-      );
-      const eased = easeScroll(progress);
-      const lift = (1 - eased) * 56;
-      const blur = (1 - eased) * 10;
-      const scale = 0.97 + eased * 0.03;
-
-      item.style.opacity = eased.toFixed(3);
-      item.style.transform = `translate3d(0, ${lift.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`;
-      item.style.filter = blur > 0.12 ? `blur(${blur.toFixed(2)}px)` : "none";
-      return;
-    }
-
     if (statementRevealSection?.closest(".collab-flow-section") && collabFlowSection) {
       const sceneRect = collabFlowSection.getBoundingClientRect();
       const sceneDistance = Math.max(1, sceneRect.height - window.innerHeight);
@@ -224,15 +222,15 @@ const updateScrollReveals = () => {
       return;
     }
 
-    const centerSnapSection = item.closest(".statement-section, .flow-section, .qa-section, .final-cta");
+    const centerSnapSection = item.closest(".flow-section, .qa-section, .final-cta");
     const sectionRect = centerSnapSection?.getBoundingClientRect();
-    const centerThreshold = qaSection ? 0.52 : statementRevealSection ? 0.46 : finalRevealSection ? 0.56 : 0.34;
+    const centerThreshold = qaSection ? 0.52 : finalRevealSection ? 0.56 : 0.34;
     const sectionIsCentered = sectionRect
       ? Math.abs(sectionRect.top + sectionRect.height / 2 - window.innerHeight / 2) <=
         window.innerHeight * centerThreshold
       : false;
     const peekOpacity = item.classList.contains("reveal-peek") ? 0.24 : isFlowStep ? 0.18 : 0;
-    const revealBoost = qaSection ? 0.3 : statementRevealSection ? 0.34 : finalRevealSection ? 0.3 : 0;
+    const revealBoost = qaSection ? 0.3 : finalRevealSection ? 0.3 : 0;
     const rawProgress = (start - rect.top) / Math.max(1, start - end) - offset + revealBoost;
     const progress = sectionIsCentered ? 1 : clamp(rawProgress);
     const eased = easeScroll(progress);
@@ -274,6 +272,7 @@ document.querySelectorAll(".flow-step").forEach((step, index) => {
 
 document.querySelectorAll(".statement-section .reveal").forEach((item, index) => {
   item.dataset.statementRevealIndex = `${index}`;
+  item.dataset.revealOffset = `${index * 0.045}`;
 });
 
 document.querySelectorAll(".final-cta .reveal").forEach((item, index) => {
