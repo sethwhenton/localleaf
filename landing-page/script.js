@@ -149,7 +149,7 @@ const updateCollabFlowMotion = () => {
   const rect = collabFlowSection.getBoundingClientRect();
   const scrollDistance = Math.max(1, rect.height - window.innerHeight);
   const progress = clamp(-rect.top / scrollDistance);
-  const handoff = easeInOut(clamp((progress - 0.34) / 0.58));
+  const handoff = easeInOut(clamp((progress - 0.4) / 0.58));
   const panelDistance = window.innerWidth;
   const statementX = handoff * panelDistance;
   const flowX = (handoff - 1) * panelDistance;
