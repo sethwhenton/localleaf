@@ -51,7 +51,7 @@ const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 
 const easeScroll = (progress) => 1 - Math.pow(1 - progress, 3.4);
 const easeInOut = (progress) =>
-  progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+  progress * progress * progress * (progress * (progress * 6 - 15) + 10);
 
 const initSmoothScroll = () => {
   if (prefersReducedMotion.matches || typeof window.Lenis !== "function") return null;
@@ -149,7 +149,7 @@ const updateCollabFlowMotion = () => {
   const rect = collabFlowSection.getBoundingClientRect();
   const scrollDistance = Math.max(1, rect.height - window.innerHeight);
   const progress = clamp(-rect.top / scrollDistance);
-  const handoff = easeInOut(clamp((progress - 0.34) / 0.48));
+  const handoff = easeInOut(clamp((progress - 0.34) / 0.58));
   const panelDistance = window.innerWidth;
   const statementX = handoff * panelDistance;
   const flowX = (handoff - 1) * panelDistance;
