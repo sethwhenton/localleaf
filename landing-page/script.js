@@ -7,6 +7,7 @@ const previewStep = document.querySelector("[data-preview-step]");
 const previewTitle = document.querySelector("[data-preview-title]");
 const previewCopy = document.querySelector("[data-preview-copy]");
 const previewWindowTitle = document.querySelector("[data-preview-window-title]");
+const statementSection = document.querySelector(".statement-section");
 const flowSection = document.querySelector(".flow-section");
 const finalCta = document.querySelector(".final-cta");
 
@@ -134,6 +135,25 @@ const updateScrollPreview = () => {
   setPreview(index);
 };
 
+const updateStatementMotion = () => {
+  if (!statementSection) return;
+
+  if (prefersReducedMotion.matches) {
+    statementSection.style.setProperty("--statement-shift", "0px");
+    return;
+  }
+
+  const rect = statementSection.getBoundingClientRect();
+  const start = window.innerHeight * 0.08;
+  const end = window.innerHeight * 0.64;
+  const progress = clamp((-rect.top - start) / Math.max(1, end - start));
+  const eased = 1 - Math.pow(1 - progress, 2.2);
+  const maxShift = Math.min(window.innerWidth <= 820 ? 120 : 420, window.innerWidth * 0.32);
+  const shift = eased * maxShift;
+
+  statementSection.style.setProperty("--statement-shift", `${shift.toFixed(1)}px`);
+};
+
 const updateFlowMotion = () => {
   if (!flowSection) return;
 
@@ -149,7 +169,7 @@ const updateFlowMotion = () => {
   const progress = clamp((start - rect.top) / Math.max(1, start - end));
   const eased = 1 - Math.pow(1 - progress, 1.55);
   const maxShift = Math.min(window.innerWidth <= 820 ? 150 : 620, window.innerWidth * 0.42);
-  const shift = (1 - eased) * maxShift;
+  const shift = (eased - 1) * maxShift;
   const scale = 0.985 + eased * 0.015;
 
   flowSection.style.setProperty("--flow-shift", `${shift.toFixed(1)}px`);
@@ -173,16 +193,17 @@ const updateScrollReveals = () => {
     const rect = item.getBoundingClientRect();
     const offset = Number(item.dataset.revealOffset || 0);
     const isFlowStep = item.classList.contains("flow-step");
+    const statementRevealSection = item.closest(".statement-section");
     const qaSection = item.closest(".qa-section");
-    const centerSnapSection = item.closest(".flow-section, .qa-section, .final-cta");
+    const centerSnapSection = item.closest(".statement-section, .flow-section, .qa-section, .final-cta");
     const sectionRect = centerSnapSection?.getBoundingClientRect();
-    const centerThreshold = qaSection ? 0.52 : 0.34;
+    const centerThreshold = qaSection ? 0.52 : statementRevealSection ? 0.46 : 0.34;
     const sectionIsCentered = sectionRect
       ? Math.abs(sectionRect.top + sectionRect.height / 2 - window.innerHeight / 2) <=
         window.innerHeight * centerThreshold
       : false;
     const peekOpacity = item.classList.contains("reveal-peek") ? 0.24 : isFlowStep ? 0.18 : 0;
-    const revealBoost = qaSection ? 0.3 : 0;
+    const revealBoost = qaSection ? 0.3 : statementRevealSection ? 0.34 : 0;
     const rawProgress = (start - rect.top) / Math.max(1, start - end) - offset + revealBoost;
     const progress = sectionIsCentered ? 1 : clamp(rawProgress);
     const eased = easeScroll(progress);
@@ -209,6 +230,7 @@ const updateOnScroll = () => {
   window.requestAnimationFrame(() => {
     updateHeader();
     updateScrollPreview();
+    updateStatementMotion();
     updateFlowMotion();
     updateSectionAnimationStates();
     updateScrollReveals();
@@ -242,6 +264,7 @@ prefersReducedMotion.addEventListener?.("change", () => {
 updateHeader();
 setPreview(0);
 updateScrollPreview();
+updateStatementMotion();
 updateFlowMotion();
 updateSectionAnimationStates();
 updateScrollReveals();
