@@ -186,7 +186,13 @@ const updateScrollReveals = () => {
       const sceneDistance = Math.max(1, sceneRect.height - window.innerHeight);
       const sceneProgress = clamp(-sceneRect.top / sceneDistance);
       const statementIndex = Number(item.dataset.statementRevealIndex || 0);
-      const progress = clamp((sceneProgress - (0.13 + statementIndex * 0.075)) / 0.22);
+      const scrollProgress = clamp((sceneProgress - (0.13 + statementIndex * 0.075)) / 0.22);
+      const approachProgress = clamp(
+        ((window.innerHeight * 0.62 - sceneRect.top) / (window.innerHeight * 0.5) -
+          statementIndex * 0.2) /
+          0.45
+      );
+      const progress = Math.max(scrollProgress, approachProgress);
       const eased = easeScroll(progress);
       const lift = (1 - eased) * 64;
       const blur = (1 - eased) * 11;
