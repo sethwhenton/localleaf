@@ -1,4 +1,9 @@
 const clientId = crypto.randomUUID();
+const initialParams = new URLSearchParams(location.search);
+const initialHostToken = initialParams.get("host") || initialParams.get("hostToken") || sessionStorage.getItem("localleaf.hostToken") || "";
+if (initialHostToken) sessionStorage.setItem("localleaf.hostToken", initialHostToken);
+const startsNarrow = window.matchMedia("(max-width: 1020px)").matches;
+const startsMobile = window.matchMedia("(max-width: 640px)").matches;
 localStorage.setItem("localleaf.editorMode", "code");
 
 const app = document.querySelector("#app");
@@ -9,10 +14,11 @@ const local = {
   saving: false,
   saveTimer: null,
   joinRequestId: null,
-  guestToken: new URLSearchParams(location.search).get("token") || "",
-  userName: new URLSearchParams(location.search).get("name") || "Host",
+  hostToken: initialHostToken,
+  guestToken: initialParams.get("token") || "",
+  userName: initialParams.get("name") || "Host",
   userId: "",
-  view: new URLSearchParams(location.search).get("view") || "",
+  view: initialParams.get("view") || "",
   editingNow: false,
   events: null,
   eventDisconnectTimer: null,
@@ -50,10 +56,10 @@ const local = {
   resizingSplit: false,
   resizingRightRail: false,
   resizingLogs: false,
-  sidebarVisible: localStorage.getItem("localleaf.sidebarVisible") !== "0",
+  sidebarVisible: localStorage.getItem("localleaf.sidebarVisible") !== "0" && !startsMobile,
   sourcePaneVisible: localStorage.getItem("localleaf.sourcePaneVisible") !== "0",
   previewPaneVisible: localStorage.getItem("localleaf.previewPaneVisible") !== "0",
-  rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0",
+  rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0" && !startsNarrow,
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
   pdfScale: Number(localStorage.getItem("localleaf.pdfScale") || 1),
   searchOpen: false,
@@ -63,6 +69,7 @@ const local = {
   searchWholeWord: false,
   searchRegex: false,
   searchStatus: "",
+  editorMoreMenuOpen: false,
   visualSearchIndex: 0,
   tablePickerOpen: false,
   editorStyleMenuOpen: false,
@@ -97,6 +104,9 @@ async function api(path, options = {}) {
   if (local.guestToken) {
     headers["x-localleaf-token"] = local.guestToken;
   }
+  if (local.hostToken) {
+    headers["x-localleaf-host-token"] = local.hostToken;
+  }
 
   const response = await fetch(path, {
     method: options.method || "GET",
@@ -112,17 +122,20 @@ async function api(path, options = {}) {
 }
 
 function authUrl(path) {
-  if (!local.guestToken) return path;
+  const tokenName = local.guestToken ? "token" : local.hostToken ? "host" : "";
+  const tokenValue = local.guestToken || local.hostToken || "";
+  if (!tokenName || !tokenValue) return path;
   const hashIndex = path.indexOf("#");
   const beforeHash = hashIndex >= 0 ? path.slice(0, hashIndex) : path;
   const hash = hashIndex >= 0 ? path.slice(hashIndex) : "";
   const separator = beforeHash.includes("?") ? "&" : "?";
-  return `${beforeHash}${separator}token=${encodeURIComponent(local.guestToken)}${hash}`;
+  return `${beforeHash}${separator}${tokenName}=${encodeURIComponent(tokenValue)}${hash}`;
 }
 
 function collabUrl() {
   const params = new URLSearchParams({ client: clientId });
   if (local.guestToken) params.set("token", local.guestToken);
+  if (local.hostToken) params.set("host", local.hostToken);
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${location.host}/collab?${params.toString()}`;
 }
@@ -232,6 +245,10 @@ function endedViewParams() {
 function handleSessionEnded(reason, detail) {
   local.sessionEndedReason = reason || "The host has ended the session.";
   local.sessionEndedDetail = detail || "Ask the host to start it again.";
+  if (local.appState?.session) {
+    local.appState.session.status = "ended";
+    local.appState.session.inviteUrl = null;
+  }
   clearTimeout(local.eventDisconnectTimer);
   local.eventDisconnectTimer = null;
   closeCollab();
@@ -316,6 +333,7 @@ function handleCollabMessage(payload) {
 function setView(view, extra = {}) {
   const params = new URLSearchParams();
   params.set("view", view);
+  if (local.hostToken) params.set("host", local.hostToken);
   if (extra.token) params.set("token", extra.token);
   if (extra.name) params.set("name", extra.name);
   history.pushState({}, "", `/?${params.toString()}`);
@@ -403,6 +421,7 @@ function editorToolIcon(name) {
     rename: `<svg ${attrs}><path d="M4 19h7" /><path d="M13.5 5.5 18.5 10.5" /><path d="M6 15.5 15.8 5.7a2 2 0 0 1 2.8 2.8L8.8 18.3 5 19l1-3.5Z" /></svg>`,
     delete: `<svg ${attrs}><path d="M5 7h14" /><path d="M9 7V5h6v2" /><path d="M8 10v8" /><path d="M12 10v8" /><path d="M16 10v8" /><path d="M7 7l1 14h8l1-14" /></svg>`,
     chat: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`,
+    menu: `<svg ${attrs}><path d="M5 7h14" /><path d="M5 12h14" /><path d="M5 17h14" /></svg>`,
     edit: `<svg ${attrs}><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" /><path d="m13.5 8.5 3 3" /></svg>`
   };
   return icons[name] || "";
@@ -840,7 +859,7 @@ function waitingView() {
 }
 
 function endedView() {
-  const canDownload = Boolean(local.appState?.project?.files?.length);
+  const canDownload = Boolean(local.guestToken && isLiveSession() && local.appState?.project?.files?.length);
   const zipName = downloadFileName(local.appState?.project?.name, ".zip");
   const downloadButton = canDownload
     ? `<a class="btn ended-download-button" href="${authUrl("/api/export/zip")}" download="${escapeHtml(zipName)}">${icon("download")}<span>Download ZIP</span></a>`
@@ -856,7 +875,7 @@ function endedView() {
           ${downloadButton}
           <button class="btn" id="goBackHome">Go Back</button>
         </div>
-        ${downloadButton ? `<p class="ended-note">ZIP downloads work while the host app and public link are still reachable.</p>` : ""}
+        ${downloadButton ? `<p class="ended-note">Download your copy before the host stops the session.</p>` : ""}
       </div>
     </section>
   `;
@@ -2266,6 +2285,38 @@ function layoutToggleMarkup(id, active, kind, title) {
   return `<button class="icon-button layout-toggle ${active ? "active" : ""}" id="${id}" title="${title}" aria-label="${title}">${layoutGlyph(kind)}</button>`;
 }
 
+function editorMoreMenuMarkup(state, selection) {
+  if (!local.editorMoreMenuOpen) return "";
+  const menuButton = (action, label, detail = "", options = {}) => `
+    <button type="button"
+      class="editor-more-item ${options.active ? "active" : ""} ${options.danger ? "danger" : ""}"
+      data-editor-more-action="${escapeHtml(action)}"
+      ${options.disabled ? "disabled" : ""}>
+      <span>${escapeHtml(label)}</span>
+      ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+    </button>
+  `;
+  return `
+    <section class="editor-more-menu" role="menu" aria-label="Editor actions">
+      <div class="editor-more-section">
+        ${updateCheckButtonMarkup("editorCheckUpdates", "Check for updates", "editor-more-update")}
+        ${menuButton("set-main", "Set current file as main", state.project.mainFile || "No main file", { disabled: !selection.canSetMain })}
+        <a class="editor-more-item" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" role="menuitem">
+          <span>Download ZIP</span>
+          <small>Save the whole project</small>
+        </a>
+      </div>
+      <div class="editor-more-section">
+        ${menuButton("toggle-files", local.sidebarVisible ? "Hide files panel" : "Show files panel", "Project tree", { active: local.sidebarVisible })}
+        ${menuButton("toggle-editor", local.sourcePaneVisible ? "Hide editor pane" : "Show editor pane", "Source", { active: local.sourcePaneVisible })}
+        ${menuButton("toggle-pdf", local.previewPaneVisible ? "Hide PDF pane" : "Show PDF pane", "Preview", { active: local.previewPaneVisible })}
+        ${menuButton("toggle-logs", local.logsVisible ? "Hide logs" : "Show logs", "Compiler output", { active: local.logsVisible })}
+        ${menuButton("toggle-chat", local.rightRailVisible ? "Hide chat/users" : "Show chat/users", "Collaboration rail", { active: local.rightRailVisible })}
+      </div>
+    </section>
+  `;
+}
+
 function chatHeaderMarkup() {
   const session = local.appState.session;
   const canShare = Boolean(session.inviteUrl);
@@ -2416,27 +2467,21 @@ function editorView() {
               <span class="save-glyph" aria-hidden="true"></span>
               <span>Save</span>
             </button>
-            <a class="btn editor-download-button" id="downloadZipButton" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" title="Download the full project as a ZIP" aria-label="Download the full project as a ZIP">
-              ${icon("download")}
-              <span>ZIP</span>
-            </a>
           </div>
           <div class="editor-title-block">
             <h1>${escapeHtml(state.project.name)}</h1>
-            <span class="editor-subtitle">${escapeHtml(local.saveStatus)}</span>
+            <span class="editor-subtitle">Main: ${escapeHtml(state.project.mainFile || "none")} · ${escapeHtml(local.saveStatus)}</span>
           </div>
             <div class="toolbar-actions editor-run-actions">
-              <span class="main-file-pill">Main: ${escapeHtml(state.project.mainFile || "none")}</span>
-              ${updateCheckButtonMarkup("editorCheckUpdates", "Update", "editor-update-button")}
               <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling ? "disabled" : ""}>
               <span class="compile-spinner"></span>
               <span>${isCompiling ? "Compiling..." : "Recompile"}</span>
             </button>
             <button class="btn" id="exportButton" style="height:32px">Export</button>
-            <button class="btn" id="setMainFile" style="height:32px" ${selection.canSetMain ? "" : "disabled"}>Set Main</button>
-            ${layoutToggleMarkup("toggleSourcePane", local.sourcePaneVisible, "editor", "Show or hide editor")}
-            ${layoutToggleMarkup("togglePreviewPane", local.previewPaneVisible, "preview", "Show or hide PDF preview")}
-            ${layoutToggleMarkup("toggleLogs", local.logsVisible, "bottom", "Show or hide logs")}
+            <button class="icon-button editor-more-button ${local.editorMoreMenuOpen ? "active" : ""}" id="editorMoreButton" title="More editor actions" aria-label="More editor actions" aria-expanded="${local.editorMoreMenuOpen ? "true" : "false"}">
+              ${editorToolIcon("menu")}
+            </button>
+            ${editorMoreMenuMarkup(state, selection)}
           </div>
         </div>
         ${editorFormatToolbarMarkup()}
@@ -4093,7 +4138,9 @@ async function copyInvite(trigger) {
 async function stopSession() {
   await api("/api/session/stop", { method: "POST", body: {} });
   await loadState();
-  handleSessionEnded("Host stopped the session.", "Anyone still connected will be told the session has ended.");
+  local.sessionEndedReason = "Host stopped the session.";
+  local.sessionEndedDetail = "Anyone still connected has been told the session ended.";
+  setView("home");
 }
 
 function bindJoin(code) {
@@ -4162,9 +4209,27 @@ function bindEditor() {
   });
   document.querySelector("#compileButton")?.addEventListener("click", compile);
   document.querySelector("#exportButton")?.addEventListener("click", showExportModal);
+  document.querySelector("#editorMoreButton")?.addEventListener("click", () => {
+    local.editorMoreMenuOpen = !local.editorMoreMenuOpen;
+    render();
+  });
   document.querySelector("#editorCheckUpdates")?.addEventListener("click", manualCheckForUpdates);
   document.querySelector("#saveButton")?.addEventListener("click", saveAndCompile);
-  document.querySelector("#setMainFile")?.addEventListener("click", setMainFile);
+  document.querySelectorAll("[data-editor-more-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.editorMoreAction;
+      local.editorMoreMenuOpen = false;
+      if (action === "set-main") setMainFile();
+      else {
+        if (action === "toggle-files") setSidebarVisible(!local.sidebarVisible);
+        else if (action === "toggle-editor") toggleLayoutPane("source");
+        else if (action === "toggle-pdf") toggleLayoutPane("preview");
+        else if (action === "toggle-logs") toggleLayoutPane("logs");
+        else if (action === "toggle-chat") setRightRailVisible(!local.rightRailVisible);
+        render();
+      }
+    });
+  });
   document.querySelector("#toggleSourcePane")?.addEventListener("click", () => toggleLayoutPane("source"));
   document.querySelector("#togglePreviewPane")?.addEventListener("click", () => toggleLayoutPane("preview"));
   document.querySelector("#toggleLogs")?.addEventListener("click", () => toggleLayoutPane("logs"));
@@ -4546,9 +4611,17 @@ function toggleLayoutPane(pane) {
     localStorage.setItem("localleaf.sidebarVisible", local.sidebarVisible ? "1" : "0");
   } else if (pane === "source") {
     local.sourcePaneVisible = !local.sourcePaneVisible;
+    if (!local.sourcePaneVisible && !local.previewPaneVisible) {
+      local.previewPaneVisible = true;
+      localStorage.setItem("localleaf.previewPaneVisible", "1");
+    }
     localStorage.setItem("localleaf.sourcePaneVisible", local.sourcePaneVisible ? "1" : "0");
   } else if (pane === "preview") {
     local.previewPaneVisible = !local.previewPaneVisible;
+    if (!local.previewPaneVisible && !local.sourcePaneVisible) {
+      local.sourcePaneVisible = true;
+      localStorage.setItem("localleaf.sourcePaneVisible", "1");
+    }
     localStorage.setItem("localleaf.previewPaneVisible", local.previewPaneVisible ? "1" : "0");
   } else if (pane === "right") {
     local.rightRailVisible = !local.rightRailVisible;
@@ -5147,6 +5220,9 @@ function connectEvents() {
   if (local.guestToken) {
     params.set("token", local.guestToken);
   }
+  if (local.hostToken) {
+    params.set("host", local.hostToken);
+  }
   const events = new EventSource(`/events?${params.toString()}`);
   local.events = events;
   events.addEventListener("open", () => {
@@ -5208,8 +5284,12 @@ function connectEvents() {
   events.addEventListener("session-ended", (event) => {
     const payload = event.data ? JSON.parse(event.data) : {};
     const current = route();
-    if (isGuestClient() || ["session", "active"].includes(current.view) || (current.view === "editor" && isLiveSession())) {
+    if (isGuestClient()) {
       handleSessionEnded(payload.reason || "The host stopped the session.");
+      return;
+    }
+    if (["session", "active", "editor"].includes(current.view)) {
+      loadState().then(render);
     }
   });
   events.addEventListener("error", () => {
@@ -5229,7 +5309,13 @@ function connectEvents() {
 }
 
 window.addEventListener("popstate", () => {
-  local.view = new URLSearchParams(location.search).get("view") || "";
+  const params = new URLSearchParams(location.search);
+  local.view = params.get("view") || "";
+  const hostToken = params.get("host") || params.get("hostToken") || "";
+  if (hostToken) {
+    local.hostToken = hostToken;
+    sessionStorage.setItem("localleaf.hostToken", hostToken);
+  }
   render();
 });
 
@@ -5246,8 +5332,21 @@ window.addEventListener("pointerdown", (event) => {
   refreshEditorToolbarPanels();
 });
 
+window.addEventListener("pointerdown", (event) => {
+  if (!local.editorMoreMenuOpen) return;
+  if (event.target.closest?.(".editor-more-menu, #editorMoreButton")) return;
+  local.editorMoreMenuOpen = false;
+  render();
+});
+
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && route().view === "editor") {
+    if (local.editorMoreMenuOpen) {
+      event.preventDefault();
+      local.editorMoreMenuOpen = false;
+      render();
+      return;
+    }
     if (local.treeContextMenu) {
       event.preventDefault();
       closeTreeContextMenu();

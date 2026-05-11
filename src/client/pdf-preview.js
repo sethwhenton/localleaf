@@ -8,6 +8,15 @@ function clampScale(scale) {
   return Math.max(0.5, Math.min(2.4, Number(scale) || 1));
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function captureScroll(container) {
   if (!container) return null;
   const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
@@ -148,7 +157,7 @@ async function mount(container, options = {}) {
       container.innerHTML = `
         <div class="pdf-render-status pdf-render-error">
           <strong>Could not render PDF preview</strong>
-          <span>${String(error.message || error)}</span>
+          <span>${escapeHtml(error.message || error)}</span>
         </div>
       `;
     }

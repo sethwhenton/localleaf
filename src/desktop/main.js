@@ -14,7 +14,7 @@ function iconPath() {
 async function startHostServer() {
   hostServer = createLocalLeafServer({ port: 4317 });
   await hostServer.start(4317);
-  return "http://localhost:4317";
+  return `http://localhost:4317/?host=${encodeURIComponent(hostServer.state.hostToken)}`;
 }
 
 function createWindow(url) {

@@ -206,6 +206,7 @@ async function runLatexmk(projectRoot, mainFile, outputDir, onData) {
 
   return {
     engine: "latexmk",
+    exitCode: result.code || 0,
     logs: splitLogs(result.output),
     pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
   };
@@ -220,6 +221,7 @@ async function runTectonic(projectRoot, mainFile, outputDir, command, onData) {
 
   return {
     engine: command === "tectonic" ? "tectonic" : "bundled tectonic",
+    exitCode: result.code || 0,
     logs: splitLogs(result.output),
     pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
   };
@@ -227,6 +229,7 @@ async function runTectonic(projectRoot, mainFile, outputDir, command, onData) {
 
 async function runDirectEngine(projectRoot, mainFile, source, outputDir, engine, onData) {
   const logs = [];
+  let exitCode = 0;
   const latexArgs = ["-interaction=nonstopmode", "-file-line-error", "-synctex=1", `-output-directory=${outputDir}`, mainFile];
 
   for (let pass = 1; pass <= 2; pass += 1) {
@@ -236,6 +239,7 @@ async function runDirectEngine(projectRoot, mainFile, source, outputDir, engine,
       timeoutMs: 90000,
       onData
     });
+    if (result.code) exitCode = result.code;
     logs.push(...splitLogs(result.output));
 
     if (pass === 1 && hasBibliography(projectRoot, source) && commandExists("bibtex")) {
@@ -246,15 +250,26 @@ async function runDirectEngine(projectRoot, mainFile, source, outputDir, engine,
         timeoutMs: 60000,
         onData
       });
+      if (bibtex.code) exitCode = bibtex.code;
       logs.push(...splitLogs(bibtex.output));
     }
   }
 
   return {
     engine,
+    exitCode,
     logs,
     pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
   };
+}
+
+function cleanupCompilePdf(pdfPath) {
+  if (!pdfPath) return;
+  const compileRoot = path.join(os.tmpdir(), "localleaf-compile-");
+  const directory = path.dirname(pdfPath);
+  if (directory.startsWith(compileRoot) && fs.existsSync(directory)) {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 async function compileProject(projectRoot, mainFile, onData, options = {}) {
@@ -286,20 +301,25 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
   }
 
   const attempts = [];
-  const hasProjectLatexmkConfig = commandExists("latexmk") && fs.existsSync(path.join(projectRoot, "latexmkrc"));
+  const projectLatexmkConfigPath = path.join(projectRoot, "latexmkrc");
+  const projectLatexmkConfigSkipped = fs.existsSync(projectLatexmkConfigPath) && process.env.LOCALLEAF_ALLOW_LATEXMKRC !== "1";
+  const canRunLatexmk = commandExists("latexmk") && !projectLatexmkConfigSkipped;
+  const hasProjectLatexmkConfig = process.env.LOCALLEAF_ALLOW_LATEXMKRC === "1" &&
+    canRunLatexmk &&
+    fs.existsSync(projectLatexmkConfigPath);
   if (hasProjectLatexmkConfig) {
     attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
   }
 
   if (compiler.engine === "latexmk") {
-    if (!hasProjectLatexmkConfig) attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
+    if (!hasProjectLatexmkConfig && canRunLatexmk) attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
     const tectonic = findTectonic();
     if (tectonic) attempts.push(() => runTectonic(projectRoot, mainFile, outputDir, tectonic.command, onData));
     const direct = preferredDirectEngine(projectRoot, source);
     if (direct) attempts.push(() => runDirectEngine(projectRoot, mainFile, source, outputDir, direct, onData));
   } else if (compiler.engine === "tectonic") {
     attempts.push(() => runTectonic(projectRoot, mainFile, outputDir, compiler.command || "tectonic", onData));
-    if (commandExists("latexmk") && !hasProjectLatexmkConfig) attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
+    if (canRunLatexmk && !hasProjectLatexmkConfig) attempts.push(() => runLatexmk(projectRoot, mainFile, outputDir, onData));
     const direct = preferredDirectEngine(projectRoot, source);
     if (direct) attempts.push(() => runDirectEngine(projectRoot, mainFile, source, outputDir, direct, onData));
   } else {
@@ -309,6 +329,7 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
   const logs = [];
   let engine = compiler.engine;
   let producedPdf = null;
+  let producedOk = false;
 
   for (const attempt of attempts) {
     const result = await attempt();
@@ -318,6 +339,10 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
 
     if (fs.existsSync(result.pdfPath)) {
       producedPdf = result.pdfPath;
+      producedOk = result.exitCode === 0;
+      if (!producedOk) {
+        logs.push("[LocalLeaf] The compiler produced a PDF but reported errors. Review the pinned errors before sharing the PDF.");
+      }
       break;
     }
 
@@ -329,9 +354,18 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
     restoredPreviousPdf = true;
     logs.push("[LocalLeaf] Compile failed. Keeping the last successful PDF preview visible.");
   }
+  if (projectLatexmkConfigSkipped) {
+    logs.unshift("[LocalLeaf] Ignored project latexmkrc for safer local compilation. Set LOCALLEAF_ALLOW_LATEXMKRC=1 only if you fully trust the project.");
+  }
+  if (producedPdf && previousPdfPath && producedPdf !== previousPdfPath) {
+    cleanupCompilePdf(previousPdfPath);
+  }
+  if ((!producedPdf || restoredPreviousPdf) && fs.existsSync(outputDir)) {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
 
   return {
-    ok: Boolean(producedPdf) && !restoredPreviousPdf,
+    ok: Boolean(producedPdf) && producedOk && !restoredPreviousPdf,
     engine,
     mode: producedPdf ? "pdf" : "html",
     logs: [

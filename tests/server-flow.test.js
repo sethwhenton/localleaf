@@ -9,10 +9,27 @@ const AdmZip = require("adm-zip");
 const WebSocket = require("ws");
 const { createLocalLeafServer } = require("../src/server/index");
 
+function hostBaseUrl(app, port) {
+  return `http://localhost:${port}/?host=${encodeURIComponent(app.state.hostToken)}`;
+}
+
+function buildTestUrl(baseUrl, requestPath) {
+  const base = new URL(baseUrl);
+  return new URL(requestPath, base.origin).toString();
+}
+
+function withHostHeaders(baseUrl, headers = {}) {
+  const hostToken = new URL(baseUrl).searchParams.get("host");
+  return {
+    ...headers,
+    ...(hostToken ? { "x-localleaf-host-token": hostToken } : {})
+  };
+}
+
 async function request(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(buildTestUrl(baseUrl, path), {
     method: options.method || "GET",
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
+    headers: withHostHeaders(baseUrl, { "content-type": "application/json", ...(options.headers || {}) }),
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const text = await response.text();
@@ -24,9 +41,9 @@ async function request(baseUrl, path, options = {}) {
 }
 
 async function rawRequest(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(buildTestUrl(baseUrl, path), {
     method: options.method || "GET",
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
+    headers: withHostHeaders(baseUrl, { "content-type": "application/json", ...(options.headers || {}) }),
     body: options.rawBody !== undefined
       ? options.rawBody
       : options.body
@@ -38,9 +55,9 @@ async function rawRequest(baseUrl, path, options = {}) {
 }
 
 async function binaryRequest(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(buildTestUrl(baseUrl, path), {
     method: options.method || "GET",
-    headers: options.headers || {},
+    headers: withHostHeaders(baseUrl, options.headers || {}),
     body: options.rawBody
   });
   const buffer = Buffer.from(await response.arrayBuffer());
@@ -193,7 +210,7 @@ test("races tunnel providers and keeps the first verified link", async () => {
   await once(app.server, "listening");
   const port = app.server.address().port;
   app.state.port = port;
-  const baseUrl = `http://localhost:${port}`;
+  const baseUrl = hostBaseUrl(app, port);
 
   try {
     await request(baseUrl, "/api/session/start", { method: "POST", body: {} });
@@ -229,7 +246,7 @@ test("serves compiled PDFs with byte-range support for embedded viewers", async 
     pdfPath,
     version: 1
   };
-  const baseUrl = `http://localhost:${port}`;
+  const baseUrl = hostBaseUrl(app, port);
 
   try {
     const fullPdf = await binaryRequest(baseUrl, "/api/pdf");
@@ -277,7 +294,7 @@ test("creates new projects from the bundled starter template", async () => {
   await once(app.server, "listening");
   const port = app.server.address().port;
   app.state.port = port;
-  const baseUrl = `http://localhost:${port}`;
+  const baseUrl = hostBaseUrl(app, port);
 
   try {
     const created = await request(baseUrl, "/api/project/new", { method: "POST", body: {} });
@@ -318,7 +335,7 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
   await once(app.server, "listening");
   const port = app.server.address().port;
   app.state.port = port;
-  const baseUrl = `http://localhost:${port}`;
+  const baseUrl = hostBaseUrl(app, port);
 
   try {
     let state = await request(baseUrl, "/api/state");
@@ -357,7 +374,7 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
     assert.ok(Array.isArray(suggestions.macros));
     assert.ok(Array.isArray(suggestions.environments));
 
-    const hostWs = new WebSocket(`ws://localhost:${port}/collab`);
+    const hostWs = new WebSocket(`ws://localhost:${port}/collab?host=${encodeURIComponent(app.state.hostToken)}`);
     const guestWs = new WebSocket(`ws://localhost:${port}/collab?token=${encodeURIComponent(joinStatus.token)}`);
     const hostSync = waitForWsMessage(hostWs, "sync_state");
     const guestSync = waitForWsMessage(guestWs, "sync_state");
@@ -536,8 +553,7 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
       baseUrl,
       `/api/export/zip?token=${encodeURIComponent(joinStatus.token)}`
     );
-    assert.equal(guestZipAfterStop.response.statusCode, 200);
-    assert.equal(guestZipAfterStop.response.headers["content-type"], "application/zip");
+    assert.equal(guestZipAfterStop.response.statusCode, 403);
   } finally {
     await app.stop();
     fs.rmSync(tempRoot, { recursive: true, force: true });

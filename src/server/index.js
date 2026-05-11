@@ -43,6 +43,9 @@ const SERVER_CLOSE_NOTICE_GRACE_MS = 350;
 const UPDATE_CACHE_TTL_MS = 30 * 60 * 1000;
 const UPDATE_RELEASE_API = "https://api.github.com/repos/sethwhenton/localleaf/releases/latest";
 const PUBLIC_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"];
+const MAX_IMPORT_ENTRIES = 5000;
+const MAX_IMPORT_UNCOMPRESSED_BYTES = 250 * 1024 * 1024;
+const MAX_IMPORT_FILE_BYTES = 75 * 1024 * 1024;
 const publicDnsResolver = new dns.Resolver();
 publicDnsResolver.setServers(PUBLIC_DNS_SERVERS);
 let latestReleaseCache = null;
@@ -61,8 +64,31 @@ const MIME_TYPES = {
   ".webp": "image/webp"
 };
 
+function securityHeaders(extra = {}) {
+  return {
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "x-frame-options": "DENY",
+    "content-security-policy": [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      "connect-src 'self' https://api.github.com ws: wss:",
+      "worker-src 'self' blob:",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "frame-ancestors 'none'",
+      "form-action 'self'"
+    ].join("; "),
+    ...extra
+  };
+}
+
 function jsonResponse(response, statusCode, payload) {
   response.writeHead(statusCode, {
+    ...securityHeaders(),
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store"
   });
@@ -71,19 +97,33 @@ function jsonResponse(response, statusCode, payload) {
 
 function textResponse(response, statusCode, payload, contentType = "text/plain; charset=utf-8") {
   response.writeHead(statusCode, {
+    ...securityHeaders(),
     "content-type": contentType,
     "cache-control": "no-store"
   });
   response.end(payload);
 }
 
-function isHostRequest(request) {
-  const host = String(request.headers.host || "").toLowerCase();
+function timingSafeEqualString(left, right) {
+  const leftText = String(left || "");
+  const rightText = String(right || "");
+  if (!leftText || !rightText) return false;
+  const leftBuffer = Buffer.from(leftText);
+  const rightBuffer = Buffer.from(rightText);
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function getHostToken(request, url) {
   return (
-    host.startsWith("localhost:") ||
-    host.startsWith("127.0.0.1:") ||
-    host.startsWith("[::1]:")
+    request.headers["x-localleaf-host-token"] ||
+    url.searchParams.get("host") ||
+    url.searchParams.get("hostToken") ||
+    ""
   );
+}
+
+function isHostRequest(state, request, url) {
+  return timingSafeEqualString(getHostToken(request, url), state.hostToken);
 }
 
 function deny(response, message = "This action is only available to the local host app.") {
@@ -100,17 +140,18 @@ function getAuthToken(request, url) {
 }
 
 function getTokenUser(state, request, url) {
+  if (state.session.status !== "live") return null;
   const token = String(getAuthToken(request, url));
   const userId = token ? state.session.activeTokens.get(token) : null;
   return userId ? state.session.users.find((user) => user.id === userId) : null;
 }
 
 function canReadProject(state, request, url) {
-  return isHostRequest(request) || Boolean(getTokenUser(state, request, url));
+  return isHostRequest(state, request, url) || Boolean(getTokenUser(state, request, url));
 }
 
 function canEditProject(state, request, url) {
-  if (isHostRequest(request)) return true;
+  if (isHostRequest(state, request, url)) return true;
   const user = getTokenUser(state, request, url);
   return Boolean(user && user.role === "editor");
 }
@@ -371,10 +412,19 @@ function assertInsideDirectory(root, target) {
 
 function extractZipBuffer(zipBuffer, extractRoot) {
   const zip = new AdmZip(zipBuffer);
-  for (const entry of zip.getEntries()) {
+  const entries = zip.getEntries();
+  if (entries.length > MAX_IMPORT_ENTRIES) {
+    throw new Error(`ZIP contains too many files. LocalLeaf supports up to ${MAX_IMPORT_ENTRIES} entries per import.`);
+  }
+
+  let totalUncompressedBytes = 0;
+  for (const entry of entries) {
     const entryName = entry.entryName.replace(/\\/g, "/");
     if (!entryName || entryName.startsWith("/") || /^[a-zA-Z]:\//.test(entryName)) {
       throw new Error("ZIP contains an unsafe absolute path.");
+    }
+    if (entryName.split("/").filter(Boolean).length > 40) {
+      throw new Error("ZIP folder nesting is too deep.");
     }
 
     const target = path.resolve(extractRoot, entryName);
@@ -385,8 +435,17 @@ function extractZipBuffer(zipBuffer, extractRoot) {
       continue;
     }
 
+    const data = entry.getData();
+    if (data.length > MAX_IMPORT_FILE_BYTES) {
+      throw new Error(`ZIP contains a file larger than ${Math.round(MAX_IMPORT_FILE_BYTES / 1024 / 1024)} MB.`);
+    }
+    totalUncompressedBytes += data.length;
+    if (totalUncompressedBytes > MAX_IMPORT_UNCOMPRESSED_BYTES) {
+      throw new Error(`ZIP expands beyond LocalLeaf's ${Math.round(MAX_IMPORT_UNCOMPRESSED_BYTES / 1024 / 1024)} MB import limit.`);
+    }
+
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, entry.getData());
+    fs.writeFileSync(target, data);
   }
 }
 
@@ -442,9 +501,9 @@ function contentDisposition(disposition, filename) {
 
 function attachmentHeaders(filename, contentType) {
   return {
+    ...securityHeaders(),
     "content-type": contentType,
     "content-disposition": contentDisposition("attachment", filename),
-    "x-content-type-options": "nosniff",
     "cache-control": "no-store"
   };
 }
@@ -452,6 +511,7 @@ function attachmentHeaders(filename, contentType) {
 function streamFileResponse(request, response, filePath, contentType, extraHeaders = {}) {
   const { size } = fs.statSync(filePath);
   const commonHeaders = {
+    ...securityHeaders(),
     "content-type": contentType,
     "cache-control": "no-store",
     "accept-ranges": "bytes",
@@ -509,6 +569,10 @@ function streamFileResponse(request, response, filePath, contentType, extraHeade
 
 function addDirectoryToZip(zip, directory, baseDirectory = directory) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") {
+      continue;
+    }
+
     const fullPath = path.join(directory, entry.name);
     const relativePath = path.relative(baseDirectory, fullPath).replace(/\\/g, "/");
 
@@ -721,6 +785,7 @@ function createInitialState(options = {}) {
   const autoStartTunnel = options.autoStartTunnel !== false;
 
   return {
+    hostToken: options.hostToken || randomId(24),
     port: options.port || DEFAULT_PORT,
     project: {
       id: randomId(6),
@@ -876,16 +941,17 @@ function broadcast(state, event, payload) {
 }
 
 function clientCanReadProject(state, client) {
-  return client.isHost || Boolean(client.token && state.session.activeTokens.has(client.token));
+  return client.isHost || (state.session.status === "live" && Boolean(client.token && state.session.activeTokens.has(client.token)));
 }
 
 function tokenUserByToken(state, token) {
+  if (state.session.status !== "live") return null;
   const userId = token ? state.session.activeTokens.get(String(token)) : null;
   return userId ? state.session.users.find((user) => user.id === userId) : null;
 }
 
 function websocketIdentity(state, request, url) {
-  const isHost = isHostRequest(request);
+  const isHost = isHostRequest(state, request, url);
   const token = String(url.searchParams.get("token") || "");
   const tokenUser = tokenUserByToken(state, token);
   if (isHost) {
@@ -1180,6 +1246,9 @@ function refreshProject(state) {
 function setProjectRoot(state, projectRoot) {
   const root = path.resolve(projectRoot);
   const mainFile = detectMainFile(root);
+  if (!mainFile) {
+    throw new Error("Choose a LaTeX project folder that contains at least one .tex file.");
+  }
   state.project = {
     id: randomId(6),
     name: path.basename(root),
@@ -1214,6 +1283,7 @@ function serveStatic(request, response, pathname) {
 
   const ext = path.extname(target).toLowerCase();
   response.writeHead(200, {
+    ...securityHeaders(),
     "content-type": MIME_TYPES[ext] || "application/octet-stream",
     "cache-control": "no-store"
   });
@@ -1584,6 +1654,7 @@ function applyEndedSessionState(state) {
   state.session.inviteUrl = null;
   state.session.publicUrl = null;
   state.session.joinRequests = [];
+  state.session.activeTokens.clear();
   state.session.users = state.session.users.map((user) => ({ ...user, online: user.role === "host" }));
   state.session.tunnel.providerId = null;
   state.session.tunnel.providerName = null;
@@ -1677,13 +1748,13 @@ function createLocalLeafServer(options = {}) {
 
   async function handleApi(request, response, url) {
     if (request.method === "GET" && url.pathname === "/api/state") {
-      const isHost = isHostRequest(request);
+      const isHost = isHostRequest(state, request, url);
       jsonResponse(response, 200, publicState(state, { isHost, canRead: isHost || Boolean(getTokenUser(state, request, url)) }));
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/api/update/latest") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response, "Only the host app can check for LocalLeaf updates.");
         return;
       }
@@ -1778,7 +1849,7 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/project/open") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response);
         return;
       }
@@ -1795,7 +1866,7 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/project/new") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response);
         return;
       }
@@ -1808,7 +1879,7 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/project/import-zip") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response);
         return;
       }
@@ -1865,14 +1936,14 @@ function createLocalLeafServer(options = {}) {
         type: "file_updated",
         filePath,
         newText: String(body.content || ""),
-        userId: isHostRequest(request) ? "host" : getTokenUser(state, request, url)?.id || "",
+        userId: isHostRequest(state, request, url) ? "host" : getTokenUser(state, request, url)?.id || "",
         name: body.user || "Unknown",
         version
       });
       broadcastCollab(state, {
         type: "file_saved",
         filePath,
-        userId: isHostRequest(request) ? "host" : getTokenUser(state, request, url)?.id || "",
+        userId: isHostRequest(state, request, url) ? "host" : getTokenUser(state, request, url)?.id || "",
         name: body.user || "Unknown",
         version
       });
@@ -2077,7 +2148,7 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/session/start") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response);
         return;
       }
@@ -2144,7 +2215,7 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/session/stop") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response);
         return;
       }
@@ -2202,7 +2273,7 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/join/approve") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response);
         return;
       }
@@ -2242,7 +2313,7 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/join/deny") {
-      if (!isHostRequest(request)) {
+      if (!isHostRequest(state, request, url)) {
         deny(response);
         return;
       }
@@ -2390,23 +2461,25 @@ function createLocalLeafServer(options = {}) {
       if (request.method === "GET" && url.pathname === "/events") {
         const clientId = url.searchParams.get("client") || randomId(5);
         response.writeHead(200, {
+          ...securityHeaders(),
           "content-type": "text/event-stream",
           "cache-control": "no-store",
           connection: "keep-alive"
         });
         response.write(": connected\n\n");
         const token = String(getAuthToken(request, url));
+        const isHost = isHostRequest(state, request, url);
         state.clients.set(clientId, {
           response,
-          isHost: isHostRequest(request),
+          isHost,
           token
         });
         sendSse(
           response,
           "state",
           publicState(state, {
-            isHost: isHostRequest(request),
-            canRead: isHostRequest(request) || Boolean(token && state.session.activeTokens.has(token))
+            isHost,
+            canRead: isHost || Boolean(token && state.session.status === "live" && state.session.activeTokens.has(token))
           })
         );
         request.on("close", () => {

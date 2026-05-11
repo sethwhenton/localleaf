@@ -72,6 +72,24 @@ function resolveProjectPath(projectRoot, relativePath) {
     throw new Error("Resolved path is outside the project.");
   }
 
+  if (fs.existsSync(root)) {
+    const realRoot = fs.realpathSync(root);
+    let probe = target;
+    while (!fs.existsSync(probe) && probe !== root && probe !== path.dirname(probe)) {
+      probe = path.dirname(probe);
+    }
+    if (fs.existsSync(probe)) {
+      const realProbe = fs.realpathSync(probe);
+      const realRootWithSeparator = realRoot.endsWith(path.sep) ? realRoot : `${realRoot}${path.sep}`;
+      if (realProbe !== realRoot && !realProbe.startsWith(realRootWithSeparator)) {
+        throw new Error("Resolved path escapes the project through a linked folder.");
+      }
+    }
+    if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) {
+      throw new Error("Symbolic links are not supported in LocalLeaf projects.");
+    }
+  }
+
   return target;
 }
 
@@ -137,6 +155,9 @@ function listProjectFiles(projectRoot) {
   function walk(directory) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       if (entry.name.startsWith(".") || entry.name === "node_modules") {
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
         continue;
       }
 
