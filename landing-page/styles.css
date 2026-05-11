@@ -1087,8 +1087,11 @@ section[id] {
 
 .flow-art {
   position: relative;
+  display: grid;
+  place-items: center;
   min-height: clamp(500px, 64svh, 760px);
   margin: 0;
+  padding: clamp(22px, 3.2vw, 42px);
   overflow: hidden;
   border: 1px solid #ececec;
   border-radius: 8px;
@@ -1106,6 +1109,7 @@ section[id] {
   border: 2px solid rgba(255, 103, 0, 0.18);
   border-radius: 48% 52% 56% 44%;
   transform: rotate(-14deg);
+  z-index: 0;
 }
 
 .flow-art::after {
@@ -1120,6 +1124,148 @@ section[id] {
   filter: blur(0.2px);
   transform: rotate(-18deg);
   animation: artCurrentGlow 3600ms ease-in-out infinite;
+  z-index: 0;
+}
+
+.tunnel-art {
+  position: relative;
+  z-index: 2;
+  width: auto;
+  max-width: 100%;
+  height: clamp(360px, 52svh, 570px);
+  margin-bottom: clamp(28px, 4vw, 56px);
+  overflow: visible;
+}
+
+.tunnel-art path,
+.tunnel-art rect,
+.tunnel-art circle {
+  vector-effect: non-scaling-stroke;
+}
+
+.tunnel-orbit {
+  fill: none;
+  stroke: rgba(255, 103, 0, 0.22);
+  stroke-width: 2;
+}
+
+.tunnel-orbit-b {
+  stroke: rgba(23, 140, 71, 0.2);
+}
+
+.tunnel-shadow,
+.tunnel-line,
+.tunnel-pulse {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tunnel-shadow {
+  stroke: rgba(255, 103, 0, 0.14);
+  stroke-width: 34;
+}
+
+.tunnel-line {
+  stroke: url("#tunnel-gradient");
+  stroke-width: 11;
+  stroke-dasharray: 18 18;
+  animation: currentDrift 2200ms linear infinite;
+}
+
+.tunnel-pulse {
+  stroke: rgba(255, 255, 255, 0.95);
+  stroke-width: 4;
+  stroke-dasharray: 2 42;
+  animation: currentDrift 1300ms linear infinite;
+}
+
+.person-shadow {
+  fill: rgba(255, 255, 255, 0.94);
+  stroke: #ececec;
+  stroke-width: 2;
+}
+
+.person-head-a {
+  fill: #f2b383;
+}
+
+.person-head-b {
+  fill: #9c674a;
+}
+
+.person-hair,
+.person-hair-b {
+  fill: #111;
+}
+
+.person-body-a {
+  fill: var(--orange);
+}
+
+.person-body-b {
+  fill: var(--green);
+}
+
+.person-arm {
+  fill: none;
+  stroke: rgba(17, 17, 17, 0.72);
+  stroke-width: 16;
+  stroke-linecap: round;
+}
+
+.laptop rect {
+  fill: #fff;
+  stroke: #111;
+  stroke-width: 4;
+}
+
+.laptop path:not(.screen-code) {
+  fill: #111;
+}
+
+.screen-code {
+  fill: none;
+  stroke: #111;
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+
+.screen-code-accent {
+  stroke: var(--orange);
+}
+
+.tunnel-lock rect {
+  fill: var(--orange);
+  stroke: #fff;
+  stroke-width: 8;
+}
+
+.tunnel-lock path,
+.tunnel-lock circle {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tunnel-badge circle {
+  fill: rgba(255, 255, 255, 0.92);
+  stroke: #ececec;
+  stroke-width: 2;
+}
+
+.tunnel-badge path {
+  fill: none;
+  stroke: var(--orange);
+  stroke-width: 7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tunnel-badge-right path {
+  stroke: #111;
 }
 
 .flow-art-orbit span {
@@ -1476,12 +1622,14 @@ section[id] {
 
 .flow-art figcaption {
   position: absolute;
-  left: 26px;
-  bottom: 22px;
+  left: clamp(20px, 3vw, 34px);
+  right: clamp(20px, 3vw, 34px);
+  bottom: clamp(18px, 2.8vw, 30px);
   z-index: 5;
-  max-width: 300px;
+  max-width: 520px;
   color: #111;
-  font-size: 13px;
+  font-size: clamp(13px, 0.9vw, 15px);
+  line-height: 1.28;
   font-weight: 950;
   letter-spacing: 0;
 }

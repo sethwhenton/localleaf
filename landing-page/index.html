@@ -233,45 +233,75 @@
 
             <figure
               class="flow-art"
-              aria-label="A LocalLeaf host computer sending one orange collaboration current through approved collaborators, chat, compiling, and final PDF export"
+              aria-label="Two collaborators using laptops connected by a secure LocalLeaf tunnel instead of a shared server"
             >
-              <div class="flow-art-orbit" aria-hidden="true">
-                <span></span>
-                <span></span>
-              </div>
-              <div class="flow-art-node art-folder" aria-hidden="true"><i></i></div>
-              <div class="flow-art-node art-link" aria-hidden="true"><i></i></div>
-              <div class="flow-art-node art-pdf" aria-hidden="true"><i></i></div>
-              <div class="flow-art-node art-check" aria-hidden="true"><i></i></div>
+              <svg class="tunnel-art" viewBox="0 0 760 640" role="img" aria-labelledby="tunnel-title tunnel-desc">
+                <title id="tunnel-title">Secure tunnel between two LocalLeaf laptops</title>
+                <desc id="tunnel-desc">
+                  Two people work from laptops while an orange encrypted tunnel connects the collaborator to the host.
+                </desc>
+                <defs>
+                  <linearGradient id="tunnel-gradient" x1="105" y1="354" x2="655" y2="354" gradientUnits="userSpaceOnUse">
+                    <stop offset="0" stop-color="#ff6700" stop-opacity="0.18" />
+                    <stop offset="0.5" stop-color="#ff6700" stop-opacity="0.95" />
+                    <stop offset="1" stop-color="#178c47" stop-opacity="0.48" />
+                  </linearGradient>
+                  <filter id="tunnel-soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+                    <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#111111" flood-opacity="0.14" />
+                  </filter>
+                </defs>
 
-              <div class="flow-art-device" aria-hidden="true">
-                <div class="flow-art-bar"><i></i><i></i><i></i></div>
-                <div class="flow-art-grid">
-                  <div class="flow-art-editor">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </div>
-                  <div class="flow-art-preview">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </div>
-                </div>
-                <div class="flow-art-chat">
-                  <span></span>
-                  <span></span>
-                </div>
-              </div>
+                <path class="tunnel-orbit tunnel-orbit-a" d="M118 410C214 130 516 112 654 390" />
+                <path class="tunnel-orbit tunnel-orbit-b" d="M88 470C272 302 500 300 694 458" />
+                <path class="tunnel-shadow" d="M130 386C232 196 516 198 632 386" />
+                <path class="tunnel-line" d="M130 386C232 196 516 198 632 386" />
+                <path class="tunnel-pulse" d="M130 386C232 196 516 198 632 386" />
 
-              <div class="flow-art-people" aria-hidden="true">
-                <span></span>
-                <span></span>
-                <span></span>
-              </div>
-              <div class="flow-art-current" aria-hidden="true"><span></span></div>
-              <figcaption>Hosted locally. Shared briefly. Finished cleanly.</figcaption>
+                <g class="tunnel-person tunnel-person-left" filter="url(#tunnel-soft-shadow)">
+                  <path class="person-shadow" d="M102 482h214c24 0 44 20 44 44v16H58v-16c0-24 20-44 44-44Z" />
+                  <circle class="person-head person-head-a" cx="208" cy="222" r="44" />
+                  <path class="person-hair" d="M166 222c6-36 30-58 66-55 23 2 41 15 48 36-42-10-78-5-114 19Z" />
+                  <path class="person-body person-body-a" d="M134 332c18-42 48-64 85-64 38 0 68 22 87 64l18 72H116l18-72Z" />
+                  <path class="person-arm" d="M145 354c40 22 86 32 140 30" />
+                  <g class="laptop laptop-left">
+                    <rect x="102" y="376" width="228" height="120" rx="10" />
+                    <path d="M82 508h268l-20 28H102l-20-28Z" />
+                    <path class="screen-code" d="M132 414h112M132 438h146M132 462h88" />
+                    <path class="screen-code screen-code-accent" d="M132 450h122" />
+                  </g>
+                </g>
+
+                <g class="tunnel-person tunnel-person-right" filter="url(#tunnel-soft-shadow)">
+                  <path class="person-shadow" d="M446 482h214c24 0 44 20 44 44v16H402v-16c0-24 20-44 44-44Z" />
+                  <circle class="person-head person-head-b" cx="552" cy="222" r="44" />
+                  <path class="person-hair person-hair-b" d="M512 218c11-34 39-51 74-43 22 5 37 21 41 43-38-18-77-18-115 0Z" />
+                  <path class="person-body person-body-b" d="M478 332c18-42 48-64 85-64 38 0 68 22 87 64l18 72H460l18-72Z" />
+                  <path class="person-arm" d="M490 354c42 24 90 34 145 30" />
+                  <g class="laptop laptop-right">
+                    <rect x="430" y="376" width="228" height="120" rx="10" />
+                    <path d="M410 508h268l-20 28H430l-20-28Z" />
+                    <path class="screen-code" d="M460 414h132M460 438h106M460 462h142" />
+                    <path class="screen-code screen-code-accent" d="M460 450h88" />
+                  </g>
+                </g>
+
+                <g class="tunnel-lock" filter="url(#tunnel-soft-shadow)">
+                  <rect x="334" y="296" width="92" height="80" rx="18" />
+                  <path d="M354 296v-28c0-18 11-34 26-34s26 16 26 34v28" />
+                  <circle cx="380" cy="332" r="8" />
+                  <path d="M380 338v18" />
+                </g>
+
+                <g class="tunnel-badge tunnel-badge-left">
+                  <circle cx="120" cy="118" r="42" />
+                  <path d="M101 118h38M120 99v38" />
+                </g>
+                <g class="tunnel-badge tunnel-badge-right">
+                  <circle cx="640" cy="118" r="42" />
+                  <path d="M620 122c12 14 28 14 40 0M620 106c12 14 28 14 40 0" />
+                </g>
+              </svg>
+              <figcaption>LocalLeaf uses secure temporary tunnels to connect collaborators to the host laptop, so your project stays local without renting a server.</figcaption>
             </figure>
           </div>
         </section>
