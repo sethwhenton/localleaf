@@ -98,6 +98,8 @@ const local = {
   updateInfo: null,
   updateCheckStarted: false,
   updateChecking: false,
+  updateInstalling: false,
+  updateInstallStatus: "",
   updateDismissedVersion: localStorage.getItem("localleaf.updateDismissedVersion") || "",
   autoUpdateChecks: localStorage.getItem("localleaf.autoUpdateChecks") !== "0",
   theme: initialTheme,
@@ -875,17 +877,31 @@ function shouldShowUpdateToast() {
   return !["join", "waiting"].includes(route().view);
 }
 
+function canInstallUpdateFromDesktop() {
+  return typeof window.localleafDesktop?.installUpdate === "function";
+}
+
 function updateToastMarkup() {
   const info = local.updateInfo || {};
   const targetUrl = info.downloadUrl || info.releaseUrl || "https://github.com/sethwhenton/localleaf/releases/latest";
+  const canInstall = canInstallUpdateFromDesktop();
+  const status = local.updateInstallStatus
+    ? `<small class="update-toast-status">${escapeHtml(local.updateInstallStatus)}</small>`
+    : `<small class="update-toast-status">Download from ${escapeHtml(info.assetName || "the latest release")}.</small>`;
+  const action = canInstall
+    ? `<button class="btn btn-primary update-toast-action" data-install-update type="button" ${local.updateInstalling ? "disabled" : ""}>
+        ${local.updateInstalling ? "Downloading..." : "Install update"}
+      </button>`
+    : `<a class="btn btn-primary update-toast-action" href="${escapeHtml(targetUrl)}" target="_blank" rel="noopener">Download</a>`;
   return `
     <section class="update-toast" role="status" aria-live="polite" aria-label="LocalLeaf update available">
       <div class="update-toast-icon">${icon("download")}</div>
       <div class="update-toast-copy">
         <strong>Update available</strong>
         <span>LocalLeaf v${escapeHtml(info.latestVersion)} is ready. You are on v${escapeHtml(info.currentVersion || "")}.</span>
+        ${status}
       </div>
-      <a class="btn btn-primary update-toast-action" href="${escapeHtml(targetUrl)}" target="_blank" rel="noopener">Update</a>
+      ${action}
       <button class="icon-button update-toast-close" data-dismiss-update title="Later" aria-label="Dismiss update notice">x</button>
     </section>
   `;
@@ -900,6 +916,7 @@ function renderUpdateToast() {
     localStorage.setItem("localleaf.updateDismissedVersion", local.updateDismissedVersion);
     document.querySelector(".update-toast")?.remove();
   });
+  document.querySelector("[data-install-update]")?.addEventListener("click", installLatestUpdate);
 }
 
 function updateUpdateCheckButtons() {
@@ -960,6 +977,39 @@ async function manualCheckForUpdates(event) {
     markUpdateButtonFeedback(event?.currentTarget, "Update ready");
   } else if (result === "silent") {
     markUpdateButtonFeedback(event?.currentTarget, "Could not check");
+  }
+}
+
+async function installLatestUpdate(event) {
+  const info = local.updateInfo || {};
+  const downloadUrl = info.downloadUrl || "";
+  if (!downloadUrl) {
+    local.updateInstallStatus = "Could not find a download for this computer.";
+    renderUpdateToast();
+    return;
+  }
+  if (!canInstallUpdateFromDesktop()) {
+    window.open(downloadUrl, "_blank", "noopener");
+    return;
+  }
+
+  local.updateInstalling = true;
+  local.updateInstallStatus = "Downloading the installer...";
+  renderUpdateToast();
+  try {
+    await window.localleafDesktop.installUpdate({
+      downloadUrl,
+      latestVersion: info.latestVersion,
+      version: info.latestVersion,
+      assetName: info.assetName
+    });
+    local.updateInstallStatus = "Installer opened. Follow the prompts to finish updating.";
+  } catch (error) {
+    local.updateInstallStatus = error?.message || "Could not download the update.";
+  } finally {
+    local.updateInstalling = false;
+    renderUpdateToast();
+    event?.currentTarget?.focus?.();
   }
 }
 

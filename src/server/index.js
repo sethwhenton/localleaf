@@ -763,6 +763,19 @@ function preferredReleaseAsset(assets = []) {
   return findAsset((name) => name.endsWith(".zip")) || candidates[0] || null;
 }
 
+function releaseAssetDownloads(assets = []) {
+  const candidates = Array.isArray(assets) ? assets : [];
+  const findAsset = (matcher) => candidates.find((asset) => matcher(String(asset.name || "").toLowerCase()));
+  const windows = findAsset((name) => name === "localleaf-host-setup.exe" || (name.includes("setup") && name.endsWith(".exe")));
+  const macArm64 = findAsset((name) => name.includes("mac") && name.includes("arm64") && name.endsWith(".dmg"));
+  const macX64 = findAsset((name) => name.includes("mac") && name.includes("x64") && name.endsWith(".dmg"));
+  return {
+    windows: windows?.browser_download_url || "",
+    macArm64: macArm64?.browser_download_url || "",
+    macX64: macX64?.browser_download_url || ""
+  };
+}
+
 function fetchLatestRelease() {
   return new Promise((resolve, reject) => {
     const request = https.get(
@@ -801,27 +814,31 @@ function fetchLatestRelease() {
   });
 }
 
-async function getLatestUpdateInfo() {
+async function getLatestUpdateInfo(releaseFetcher = fetchLatestRelease) {
   const now = Date.now();
-  if (latestReleaseCache && now - latestReleaseCache.checkedAt < UPDATE_CACHE_TTL_MS) {
+  const shouldUseCache = releaseFetcher === fetchLatestRelease;
+  if (shouldUseCache && latestReleaseCache && now - latestReleaseCache.checkedAt < UPDATE_CACHE_TTL_MS) {
     return latestReleaseCache.payload;
   }
 
   const currentVersion = PACKAGE_INFO.version;
   try {
-    const release = await fetchLatestRelease();
+    const release = await releaseFetcher();
     const latestVersion = normalizeVersion(release.tag_name || release.name || "");
     const asset = preferredReleaseAsset(release.assets);
+    const downloads = releaseAssetDownloads(release.assets);
     const payload = {
       currentVersion,
       latestVersion,
       updateAvailable: Boolean(latestVersion) && compareVersions(latestVersion, currentVersion) > 0,
       releaseUrl: release.html_url || "https://github.com/sethwhenton/localleaf/releases/latest",
+      siteUrl: "https://sethwhenton.github.io/localleaf/",
       downloadUrl: asset?.browser_download_url || release.html_url || "https://github.com/sethwhenton/localleaf/releases/latest",
+      downloads,
       assetName: asset?.name || "",
       checkedAt: new Date(now).toISOString()
     };
-    latestReleaseCache = { checkedAt: now, payload };
+    if (shouldUseCache) latestReleaseCache = { checkedAt: now, payload };
     return payload;
   } catch (error) {
     return {
@@ -829,7 +846,9 @@ async function getLatestUpdateInfo() {
       latestVersion: currentVersion,
       updateAvailable: false,
       releaseUrl: "https://github.com/sethwhenton/localleaf/releases/latest",
+      siteUrl: "https://sethwhenton.github.io/localleaf/",
       downloadUrl: "https://github.com/sethwhenton/localleaf/releases/latest",
+      downloads: {},
       error: error.message || "Could not check for updates."
     };
   }
@@ -1804,6 +1823,9 @@ function verifyTunnelCandidate(state, runner, publicUrl, attempt = 1) {
 function createLocalLeafServer(options = {}) {
   const state = createInitialState(options);
   const wss = new WebSocketServer({ noServer: true });
+  const updateReleaseFetcher = typeof options.fetchLatestRelease === "function"
+    ? options.fetchLatestRelease
+    : fetchLatestRelease;
 
   async function handleApi(request, response, url) {
     if (request.method === "GET" && url.pathname === "/api/state") {
@@ -1817,7 +1839,7 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Only the host app can check for LocalLeaf updates.");
         return;
       }
-      jsonResponse(response, 200, await getLatestUpdateInfo());
+      jsonResponse(response, 200, await getLatestUpdateInfo(updateReleaseFetcher));
       return;
     }
 

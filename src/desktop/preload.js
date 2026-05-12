@@ -6,5 +6,8 @@ contextBridge.exposeInMainWorld("localleafDesktop", {
   },
   setTheme(theme) {
     ipcRenderer.send("localleaf:theme", theme);
+  },
+  installUpdate(update) {
+    return ipcRenderer.invoke("localleaf:install-update", update);
   }
 });

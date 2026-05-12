@@ -1,9 +1,107 @@
+const fs = require("node:fs");
+const https = require("node:https");
+const os = require("node:os");
 const path = require("node:path");
 const { app, BrowserWindow, Menu, ipcMain, nativeImage, nativeTheme, shell } = require("electron");
 const { createLocalLeafServer } = require("../server/index");
 
 let hostServer;
 let mainWindow;
+const UPDATE_REDIRECT_LIMIT = 5;
+
+function isAllowedUpdateUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || ""));
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  return parsed.protocol === "https:"
+    && (
+      host === "github.com"
+      || host === "objects.githubusercontent.com"
+      || host.endsWith(".githubusercontent.com")
+    );
+}
+
+function expectedInstallerExtension() {
+  if (process.platform === "win32") return ".exe";
+  if (process.platform === "darwin") return ".dmg";
+  return ".zip";
+}
+
+function safeInstallerVersion(value) {
+  return String(value || "latest").replace(/^v/i, "").replace(/[^0-9A-Za-z._-]+/g, "-").slice(0, 40) || "latest";
+}
+
+function updateInstallerPath(version) {
+  const extension = expectedInstallerExtension();
+  const updateDir = path.join(os.tmpdir(), "LocalLeaf", "updates");
+  fs.mkdirSync(updateDir, { recursive: true });
+  return path.join(updateDir, `LocalLeaf-Host-${safeInstallerVersion(version)}${extension}`);
+}
+
+function downloadUpdateInstaller(rawUrl, version, redirectCount = 0) {
+  if (redirectCount > UPDATE_REDIRECT_LIMIT) {
+    return Promise.reject(new Error("Update download redirected too many times."));
+  }
+  if (!isAllowedUpdateUrl(rawUrl)) {
+    return Promise.reject(new Error("Update download URL is not trusted."));
+  }
+  const parsed = new URL(rawUrl);
+  const extension = expectedInstallerExtension();
+  if (redirectCount === 0 && !parsed.pathname.toLowerCase().endsWith(extension)) {
+    return Promise.reject(new Error(`Expected a LocalLeaf ${extension} installer for this computer.`));
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      parsed,
+      {
+        timeout: 30000,
+        headers: {
+          "user-agent": "LocalLeaf-Updater"
+        }
+      },
+      (response) => {
+        if ([301, 302, 303, 307, 308].includes(response.statusCode || 0) && response.headers.location) {
+          response.resume();
+          const nextUrl = new URL(response.headers.location, parsed).toString();
+          downloadUpdateInstaller(nextUrl, version, redirectCount + 1).then(resolve, reject);
+          return;
+        }
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`Update download failed with HTTP ${response.statusCode}.`));
+          return;
+        }
+
+        const installerPath = updateInstallerPath(version);
+        const tempPath = `${installerPath}.download`;
+        const file = fs.createWriteStream(tempPath);
+        response.pipe(file);
+        file.on("finish", () => {
+          file.close((error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+            fs.rename(tempPath, installerPath, (renameError) => {
+              if (renameError) reject(renameError);
+              else resolve(installerPath);
+            });
+          });
+        });
+        file.on("error", (error) => {
+          fs.rm(tempPath, { force: true }, () => reject(error));
+        });
+      }
+    );
+    request.on("timeout", () => request.destroy(new Error("Update download timed out.")));
+    request.on("error", reject);
+  });
+}
 
 function titleBarTheme(theme) {
   return theme === "dark"
@@ -76,6 +174,19 @@ ipcMain.on("localleaf:maximize", (event) => {
 
 ipcMain.on("localleaf:theme", (event, theme) => {
   applyDesktopTheme(theme, BrowserWindow.fromWebContents(event.sender));
+});
+
+ipcMain.handle("localleaf:install-update", async (event, update = {}) => {
+  const targetWindow = BrowserWindow.fromWebContents(event.sender);
+  const downloadUrl = String(update.downloadUrl || "");
+  const version = String(update.version || update.latestVersion || "latest");
+  const installerPath = await downloadUpdateInstaller(downloadUrl, version);
+  const openError = await shell.openPath(installerPath);
+  if (openError) throw new Error(openError);
+  if (targetWindow && !targetWindow.isDestroyed()) {
+    targetWindow.focus();
+  }
+  return { ok: true, installerPath };
 });
 
 app.whenReady().then(async () => {

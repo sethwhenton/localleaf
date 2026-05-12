@@ -282,6 +282,67 @@ test("serves compiled PDFs with byte-range support for embedded viewers", async 
   }
 });
 
+test("reports update availability and platform downloads to the host", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-update-test-"));
+  fs.writeFileSync(path.join(tempRoot, "main.tex"), "\\documentclass{article}\\begin{document}Update\\end{document}", "utf8");
+
+  const app = createLocalLeafServer({
+    port: 0,
+    projectRoot: tempRoot,
+    autoStartTunnel: false,
+    fetchLatestRelease: async () => ({
+      tag_name: "v99.0.0",
+      html_url: "https://github.com/sethwhenton/localleaf/releases/tag/v99.0.0",
+      assets: [
+        {
+          name: "LocalLeaf-Host-Setup.exe",
+          browser_download_url: "https://github.com/sethwhenton/localleaf/releases/download/v99.0.0/LocalLeaf-Host-Setup.exe"
+        },
+        {
+          name: "LocalLeaf-Host-mac-arm64.dmg",
+          browser_download_url: "https://github.com/sethwhenton/localleaf/releases/download/v99.0.0/LocalLeaf-Host-mac-arm64.dmg"
+        },
+        {
+          name: "LocalLeaf-Host-mac-x64.dmg",
+          browser_download_url: "https://github.com/sethwhenton/localleaf/releases/download/v99.0.0/LocalLeaf-Host-mac-x64.dmg"
+        }
+      ]
+    })
+  });
+  app.server.listen(0);
+  await once(app.server, "listening");
+  const port = app.server.address().port;
+  app.state.port = port;
+  const baseUrl = hostBaseUrl(app, port);
+
+  try {
+    const info = await request(baseUrl, "/api/update/latest");
+    assert.equal(info.latestVersion, "99.0.0");
+    assert.equal(info.updateAvailable, true);
+    assert.equal(info.releaseUrl, "https://github.com/sethwhenton/localleaf/releases/tag/v99.0.0");
+    assert.equal(info.siteUrl, "https://sethwhenton.github.io/localleaf/");
+    assert.equal(info.downloads.windows, "https://github.com/sethwhenton/localleaf/releases/download/v99.0.0/LocalLeaf-Host-Setup.exe");
+    assert.equal(info.downloads.macArm64, "https://github.com/sethwhenton/localleaf/releases/download/v99.0.0/LocalLeaf-Host-mac-arm64.dmg");
+    assert.equal(info.downloads.macX64, "https://github.com/sethwhenton/localleaf/releases/download/v99.0.0/LocalLeaf-Host-mac-x64.dmg");
+    if (process.platform === "win32") {
+      assert.equal(info.assetName, "LocalLeaf-Host-Setup.exe");
+      assert.equal(info.downloadUrl, info.downloads.windows);
+    } else if (process.platform === "darwin" && process.arch === "arm64") {
+      assert.equal(info.assetName, "LocalLeaf-Host-mac-arm64.dmg");
+      assert.equal(info.downloadUrl, info.downloads.macArm64);
+    } else if (process.platform === "darwin") {
+      assert.equal(info.assetName, "LocalLeaf-Host-mac-x64.dmg");
+      assert.equal(info.downloadUrl, info.downloads.macX64);
+    }
+
+    const denied = await fetch(buildTestUrl(baseUrl, "/api/update/latest"));
+    assert.equal(denied.status, 403);
+  } finally {
+    await app.stop();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("creates new projects from the bundled starter template", async () => {
   const previousProjectsDir = process.env.LOCALLEAF_PROJECTS_DIR;
   const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-new-projects-"));

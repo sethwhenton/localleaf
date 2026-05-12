@@ -13,7 +13,7 @@ When the host stops the session or closes the app, the room ends.
 
 ## Current Release
 
-Version `0.1.15` is the dark-mode polish build: a full dark shell across home, session management, editor, chat, logs, menus, modals, and desktop window controls, plus the hardened code-editor-first MVP features from the previous release.
+Version `0.1.16` is the update-installer build: LocalLeaf automatically checks for newer releases on startup, prompts hosts when an update is available, and lets the desktop app download and open the correct installer from the hosted GitHub release.
 
 ## Features
 
@@ -38,6 +38,7 @@ Version `0.1.15` is the dark-mode polish build: a full dark shell across home, s
 - Compile logs with pinned red error groups, clearable orange warning groups, and gray informational output.
 - Session management screen with invite copy feedback, user list, health status, and stop-session handling.
 - Host-only update prompt and manual update checks when a newer LocalLeaf release is available.
+- Desktop update flow that downloads the correct Windows/macOS installer and opens it so users can reinstall to the latest build.
 - Light/dark appearance setting with a polished dark mode across app panels, buttons, chat, and native desktop controls.
 - Guests are notified when the host ends the session.
 - Hosts can stop a session and continue editing locally without being bounced back to the ended-session screen.
