@@ -13,7 +13,7 @@ When the host stops the session or closes the app, the room ends.
 
 ## Current Release
 
-Version `0.1.16` is the update-installer build: LocalLeaf automatically checks for newer releases on startup, prompts hosts when an update is available, and lets the desktop app download and open the correct installer from the hosted GitHub release.
+Version `0.1.17` improves the host workflow with a fixed ZIP import picker and a soft join-request notification sound that can be toggled in Settings.
 
 ## Features
 
@@ -40,6 +40,7 @@ Version `0.1.16` is the update-installer build: LocalLeaf automatically checks f
 - Host-only update prompt and manual update checks when a newer LocalLeaf release is available.
 - Desktop update flow that downloads the correct Windows/macOS installer and opens it so users can reinstall to the latest build.
 - Light/dark appearance setting with a polished dark mode across app panels, buttons, chat, and native desktop controls.
+- Optional join-request notification sound so hosts notice when someone asks to enter a session.
 - Guests are notified when the host ends the session.
 - Hosts can stop a session and continue editing locally without being bounced back to the ended-session screen.
 - ZIP imports enforce entry-count, expanded-size, per-file-size, and nesting limits, and exports skip hidden/system folders such as dotfiles and `node_modules`.
