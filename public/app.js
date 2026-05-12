@@ -6,6 +6,7 @@ const startsNarrow = window.matchMedia("(max-width: 1020px)").matches;
 const startsMobile = window.matchMedia("(max-width: 640px)").matches;
 const platformName = String(navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
 const SIDEBAR_SECTION_LAYOUT_VERSION = "2";
+const JOIN_REQUEST_SOUND_URL = "/assets/sounds/join-request.ogg";
 const shouldResetSidebarSectionLayout = localStorage.getItem("localleaf.sidebarSectionLayoutVersion") !== SIDEBAR_SECTION_LAYOUT_VERSION;
 const initialTheme = localStorage.getItem("localleaf.theme") === "dark" ? "dark" : "light";
 document.documentElement.classList.toggle("runtime-electron", /\bElectron\//i.test(navigator.userAgent));
@@ -24,6 +25,8 @@ const local = {
   saving: false,
   saveTimer: null,
   joinRequestId: null,
+  joinRequestAudio: null,
+  notifiedJoinRequests: new Set(),
   hostToken: initialHostToken,
   guestToken: initialParams.get("token") || "",
   userName: initialParams.get("name") || "Host",
@@ -102,6 +105,7 @@ const local = {
   updateInstallStatus: "",
   updateDismissedVersion: localStorage.getItem("localleaf.updateDismissedVersion") || "",
   autoUpdateChecks: localStorage.getItem("localleaf.autoUpdateChecks") !== "0",
+  joinRequestSoundEnabled: localStorage.getItem("localleaf.joinRequestSoundEnabled") !== "0",
   theme: initialTheme,
   homeImportFiles: [],
   homeImportDragActive: false,
@@ -543,6 +547,32 @@ function updateCheckButtonMarkup(id, label = "Check for updates", extraClass = "
 
 function isZipImportFile(file) {
   return /\.zip$/i.test(file?.name || "") || file?.type === "application/zip" || file?.type === "application/x-zip-compressed";
+}
+
+function isReadableImportFile(file) {
+  return Boolean(
+    file
+    && typeof file.name === "string"
+    && (
+      typeof file.arrayBuffer === "function"
+      || typeof FileReader === "function"
+    )
+  );
+}
+
+function readImportFileBuffer(file) {
+  if (typeof file?.arrayBuffer === "function") {
+    return file.arrayBuffer();
+  }
+  if (typeof FileReader !== "function") {
+    return Promise.reject(new Error(`Could not read ${file?.name || "the selected file"}.`));
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(reader.result));
+    reader.addEventListener("error", () => reject(reader.error || new Error(`Could not read ${file?.name || "the selected file"}.`)));
+    reader.readAsArrayBuffer(file);
+  });
 }
 
 function stagedImportPath(file) {
@@ -1031,6 +1061,49 @@ function setAutoUpdateChecks(enabled) {
   localStorage.setItem("localleaf.autoUpdateChecks", local.autoUpdateChecks ? "1" : "0");
 }
 
+function setJoinRequestSoundEnabled(enabled) {
+  local.joinRequestSoundEnabled = Boolean(enabled);
+  localStorage.setItem("localleaf.joinRequestSoundEnabled", local.joinRequestSoundEnabled ? "1" : "0");
+  if (local.joinRequestSoundEnabled) preloadJoinRequestSound();
+}
+
+function joinRequestSound() {
+  if (typeof Audio !== "function") return null;
+  if (!local.joinRequestAudio) {
+    local.joinRequestAudio = new Audio(JOIN_REQUEST_SOUND_URL);
+    local.joinRequestAudio.preload = "auto";
+    local.joinRequestAudio.volume = 0.42;
+  }
+  return local.joinRequestAudio;
+}
+
+function preloadJoinRequestSound() {
+  const audio = joinRequestSound();
+  if (!audio) return;
+  try {
+    audio.load();
+  } catch {
+    // Notification audio is a small enhancement; failures should never block collaboration.
+  }
+}
+
+function playJoinRequestSound(request) {
+  if (!local.joinRequestSoundEnabled || isGuestClient()) return;
+  if (request?.id) {
+    if (local.notifiedJoinRequests.has(request.id)) return;
+    local.notifiedJoinRequests.add(request.id);
+  }
+  const audio = joinRequestSound();
+  if (!audio) return;
+  try {
+    audio.pause();
+    audio.currentTime = 0;
+    audio.play()?.catch(() => {});
+  } catch {
+    // Browsers can block audio until a user gesture. The visual join toast still appears.
+  }
+}
+
 function hideSettingsModal() {
   document.querySelector(".settings-modal-backdrop")?.remove();
 }
@@ -1069,6 +1142,16 @@ function showSettingsModal() {
               <span></span>
             </label>
           </section>
+          <section class="settings-group settings-toggle-row" aria-labelledby="joinSoundTitle">
+            <div>
+              <h3 id="joinSoundTitle">Join request sound</h3>
+              <p>Play a soft chime when someone asks to join your hosted session.</p>
+            </div>
+            <label class="settings-switch">
+              <input type="checkbox" id="joinRequestSound" ${local.joinRequestSoundEnabled ? "checked" : ""} />
+              <span></span>
+            </label>
+          </section>
         </div>
       </section>
     </div>
@@ -1089,6 +1172,9 @@ function showSettingsModal() {
   });
   modal?.querySelector("#autoUpdateChecks")?.addEventListener("change", (event) => {
     setAutoUpdateChecks(event.currentTarget.checked);
+  });
+  modal?.querySelector("#joinRequestSound")?.addEventListener("change", (event) => {
+    setJoinRequestSoundEnabled(event.currentTarget.checked);
   });
 }
 
@@ -2931,7 +3017,7 @@ function goBackHome() {
 function bindHome() {
   document.querySelector("#openCurrentCard")?.addEventListener("click", () => setView("project"));
   document.querySelector("#newProject")?.addEventListener("click", createNewProject);
-  document.querySelector("#importZip")?.addEventListener("click", importZipProject);
+  document.querySelector("#importZip")?.addEventListener("click", () => importZipProject());
   document.querySelector("#importFiles")?.addEventListener("click", openHomeImportPicker);
   document.querySelector("#homeSessionAction")?.addEventListener("click", handleHomeSessionAction);
   document.querySelector("#homeCheckUpdates")?.addEventListener("click", manualCheckForUpdates);
@@ -3056,7 +3142,10 @@ async function importStagedHomeFiles() {
 
     const payloadFiles = [];
     for (const file of files) {
-      const buffer = await file.arrayBuffer();
+      if (!isReadableImportFile(file)) {
+        throw new Error(`Could not read ${file?.name || "one selected file"}. Please choose it again.`);
+      }
+      const buffer = await readImportFileBuffer(file);
       payloadFiles.push({
         path: stagedImportPath(file),
         name: file.name,
@@ -3096,13 +3185,13 @@ function bindProject() {
     setView("editor");
   };
   document.querySelector("#openEditor")?.addEventListener("click", openEditor);
-  document.querySelector("#importZipProject")?.addEventListener("click", importZipProject);
+  document.querySelector("#importZipProject")?.addEventListener("click", () => importZipProject());
   document.querySelector("#hostOnline")?.addEventListener("click", startSession);
   document.querySelector("#backProject")?.addEventListener("click", () => setView("project"));
 }
 
 async function importZipProject(fileOverride = null) {
-  if (fileOverride) {
+  if (isReadableImportFile(fileOverride)) {
     await importZipFile(fileOverride);
     return;
   }
@@ -3119,7 +3208,13 @@ async function importZipProject(fileOverride = null) {
 
 async function importZipFile(file) {
   try {
-    const buffer = await file.arrayBuffer();
+    if (!isReadableImportFile(file)) {
+      throw new Error("Choose a ZIP file to import.");
+    }
+    if (!isZipImportFile(file)) {
+      throw new Error("LocalLeaf can only import .zip project archives from this button.");
+    }
+    const buffer = await readImportFileBuffer(file);
     local.appState = await api("/api/project/import-zip", {
       method: "POST",
       headers: {
@@ -5767,6 +5862,7 @@ function connectEvents() {
   });
   events.addEventListener("join-request", (event) => {
     const request = JSON.parse(event.data);
+    playJoinRequestSound(request);
     if (route().view === "editor") {
       loadState().then(() => showEditorJoinRequest(request));
       return;
@@ -5925,7 +6021,10 @@ loadState()
     connectEvents();
     return render();
   })
-  .then(() => checkForUpdates())
+  .then(() => {
+    preloadJoinRequestSound();
+    return checkForUpdates();
+  })
   .catch((error) => {
     app.innerHTML = `<section class="empty-state"><div class="ended-card"><h1>LocalLeaf failed to start</h1><p class="error">${escapeHtml(error.message)}</p></div></section>`;
   });
