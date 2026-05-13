@@ -7,6 +7,52 @@ const startsMobile = window.matchMedia("(max-width: 640px)").matches;
 const platformName = String(navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
 const SIDEBAR_SECTION_LAYOUT_VERSION = "2";
 const JOIN_REQUEST_SOUND_URL = "/assets/sounds/join-request.ogg";
+const PROJECT_SEARCH_MAX_RESULTS = 300;
+const PROJECT_SEARCH_MAX_RESULTS_PER_FILE = 50;
+const PROJECT_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const SEARCH_SCOPE_STORAGE_KEY = "localleaf.searchScope.v2";
+const RECENT_PROJECTS_STORAGE_KEY = "localleaf.recentProjects.v1";
+const RECENT_PROJECTS_LIMIT = 3;
+const LAYOUT_STATE_STORAGE_VERSION = "4";
+const AI_PERMISSIONS_STORAGE_KEY = "localleaf.aiPermissions.v1";
+const AI_SESSIONS_STORAGE_KEY = "localleaf.aiSessions.v1";
+const AI_PROVIDER_ENABLE_STORAGE_KEY = "localleaf.aiProviderEnabled.v1";
+const AI_MODEL_ENABLE_STORAGE_KEY = "localleaf.aiModelEnabled.v1";
+const AI_MODEL_GROUP_STORAGE_KEY = "localleaf.aiModelGroups.v1";
+const LOCALLEAF_SITE_URL = "https://sethwhenton.github.io/localleaf/";
+const AI_WELCOME_MESSAGE = "Ask me about LaTeX errors, rewrites, tables, or project structure. File edits will be tracked in Changes.";
+const SUPPORTED_PROJECT_FILE_EXTENSIONS = new Set([
+  ".tex",
+  ".bib",
+  ".bst",
+  ".cls",
+  ".sty",
+  ".clo",
+  ".cfg",
+  ".def",
+  ".ldf",
+  ".bbx",
+  ".cbx",
+  ".bbl",
+  ".txt",
+  ".md",
+  ".latex",
+  ".tikz",
+  ".csv",
+  ".dat",
+  ".json",
+  ".asy",
+  ".py",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".svg",
+  ".pdf",
+  ".eps"
+]);
+const SUPPORTED_PROJECT_SPECIAL_FILENAMES = new Set(["latexmkrc", "makefile", ".latexmkrc"]);
 const shouldResetSidebarSectionLayout = localStorage.getItem("localleaf.sidebarSectionLayoutVersion") !== SIDEBAR_SECTION_LAYOUT_VERSION;
 const initialTheme = localStorage.getItem("localleaf.theme") === "dark" ? "dark" : "light";
 document.documentElement.classList.toggle("runtime-electron", /\bElectron\//i.test(navigator.userAgent));
@@ -16,6 +62,66 @@ document.documentElement.classList.toggle("theme-dark", initialTheme === "dark")
 document.documentElement.classList.toggle("theme-light", initialTheme !== "dark");
 requestAnimationFrame(() => syncDesktopTheme(initialTheme));
 localStorage.setItem("localleaf.editorMode", "code");
+if (localStorage.getItem("localleaf.layoutStateVersion") !== LAYOUT_STATE_STORAGE_VERSION) {
+  localStorage.setItem("localleaf.logsVisible", "1");
+  localStorage.setItem("localleaf.layoutStateVersion", LAYOUT_STATE_STORAGE_VERSION);
+}
+
+function createAiWelcomeMessage() {
+  return {
+    id: "welcome",
+    role: "assistant",
+    message: AI_WELCOME_MESSAGE
+  };
+}
+
+function createAiSession(title = "New session") {
+  const now = Date.now();
+  return {
+    id: `session-${now}-${Math.random().toString(16).slice(2)}`,
+    title,
+    createdAt: now,
+    updatedAt: now,
+    messages: [createAiWelcomeMessage()]
+  };
+}
+
+function readAiSessionState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AI_SESSIONS_STORAGE_KEY) || "{}");
+    const sessions = Array.isArray(parsed.sessions)
+      ? parsed.sessions.filter((session) => session?.id && Array.isArray(session.messages))
+      : [];
+    if (sessions.length) {
+      sessions.forEach((session) => {
+        session.messages = session.messages.map((message) => message?.id === "welcome" ? createAiWelcomeMessage() : message);
+      });
+      const currentSessionId = sessions.some((session) => session.id === parsed.currentSessionId)
+        ? parsed.currentSessionId
+        : sessions[0].id;
+      return { sessions, currentSessionId };
+    }
+  } catch {
+    // Fall through to a fresh local session when storage is unavailable or malformed.
+  }
+  const session = createAiSession("First session");
+  return { sessions: [session], currentSessionId: session.id };
+}
+
+const initialAiSessionState = readAiSessionState();
+
+function readBooleanMap(storageKey) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(storageKey) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeBooleanMap(storageKey, value) {
+  localStorage.setItem(storageKey, JSON.stringify(value || {}));
+}
 
 const app = document.querySelector("#app");
 const local = {
@@ -79,6 +185,9 @@ const local = {
   sourcePaneVisible: localStorage.getItem("localleaf.sourcePaneVisible") !== "0",
   previewPaneVisible: localStorage.getItem("localleaf.previewPaneVisible") !== "0",
   rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0" && !startsNarrow,
+  rightRailTab: ["chat", "ai", "changes"].includes(localStorage.getItem("localleaf.rightRailTab"))
+    ? localStorage.getItem("localleaf.rightRailTab")
+    : "chat",
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
   pdfScale: Number(localStorage.getItem("localleaf.pdfScale") || 1),
   searchOpen: false,
@@ -88,6 +197,13 @@ const local = {
   searchWholeWord: false,
   searchRegex: false,
   searchStatus: "",
+  searchScope: localStorage.getItem(SEARCH_SCOPE_STORAGE_KEY) === "file" ? "file" : "project",
+  searchResults: [],
+  searchResultIndex: -1,
+  searchLoading: false,
+  searchTruncated: false,
+  searchRunId: 0,
+  searchTimer: null,
   editorMoreMenuOpen: false,
   visualSearchIndex: 0,
   tablePickerOpen: false,
@@ -107,10 +223,39 @@ const local = {
   autoUpdateChecks: localStorage.getItem("localleaf.autoUpdateChecks") !== "0",
   joinRequestSoundEnabled: localStorage.getItem("localleaf.joinRequestSoundEnabled") !== "0",
   theme: initialTheme,
+  hostRailCollapsed: localStorage.getItem("localleaf.hostRailCollapsed") === "1",
+  settingsSection: "general",
+  settingsModelSearch: "",
+  aiPrompt: "",
+  aiBusy: false,
+  aiQuickAction: "",
+  aiModelPickerOpen: false,
+  aiModelSearch: "",
+  aiSessionMenuOpen: false,
+  aiSessionMoreMenuOpen: false,
+  aiChatNeedsJump: false,
+  aiChatPinnedToBottom: true,
+  aiForceScrollBottom: true,
+  aiQueueingEnabled: localStorage.getItem("localleaf.aiQueueingEnabled") !== "0",
+  aiQueuedPrompts: [],
+  aiSessions: initialAiSessionState.sessions,
+  aiCurrentSessionId: initialAiSessionState.currentSessionId,
+  aiProviderEnabled: readBooleanMap(AI_PROVIDER_ENABLE_STORAGE_KEY),
+  aiModelEnabled: readBooleanMap(AI_MODEL_ENABLE_STORAGE_KEY),
+  aiModelGroupOpen: readBooleanMap(AI_MODEL_GROUP_STORAGE_KEY),
+  providerTestBusy: "",
+  providerDialogTest: null,
+  providerInlineTests: {},
+  aiMessages: (initialAiSessionState.sessions.find((session) => session.id === initialAiSessionState.currentSessionId)?.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message })),
+  aiChangeHistory: [],
+  aiPermissions: readAiPermissions(),
+  modelActionBusy: "",
   homeImportFiles: [],
   homeImportDragActive: false,
   homeImportBusy: false,
   homeImportStatus: "",
+  appNotice: null,
+  appNoticeTimer: null,
   sessionEndedReason: "The host has ended the session.",
   sessionEndedDetail: "Ask the host to start it again."
 };
@@ -172,6 +317,468 @@ function authUrl(path) {
   const separator = beforeHash.includes("?") ? "&" : "?";
   return `${beforeHash}${separator}${tokenName}=${encodeURIComponent(tokenValue)}${hash}`;
 }
+
+function readAiPermissions() {
+  const defaults = {
+    askBeforeEdits: true,
+    yoloMode: false,
+    localModelOnly: false,
+    rewriteTools: true,
+    multiFileEdits: false,
+    fileManagement: false,
+    fileUploads: false,
+    shellCommands: false,
+    binaryFiles: false
+  };
+  try {
+    const next = { ...defaults, ...JSON.parse(localStorage.getItem(AI_PERMISSIONS_STORAGE_KEY) || "{}") };
+    if (next.yoloMode) next.askBeforeEdits = false;
+    else next.askBeforeEdits = true;
+    return next;
+  } catch {
+    return defaults;
+  }
+}
+
+function saveAiPermissions() {
+  localStorage.setItem(AI_PERMISSIONS_STORAGE_KEY, JSON.stringify(local.aiPermissions));
+}
+
+function setAiPermissionMode(mode = "default") {
+  const isYolo = mode === "yolo";
+  local.aiPermissions.yoloMode = isYolo;
+  local.aiPermissions.askBeforeEdits = !isYolo;
+  saveAiPermissions();
+}
+
+function toggleAiPermissionMode() {
+  setAiPermissionMode(local.aiPermissions.yoloMode ? "default" : "yolo");
+}
+
+function syncAiPermissionInputs(root = document) {
+  root.querySelectorAll?.("[data-ai-permission]").forEach((input) => {
+    const key = input.dataset.aiPermission;
+    if (key && Object.prototype.hasOwnProperty.call(local.aiPermissions, key)) {
+      input.checked = Boolean(local.aiPermissions[key]);
+    }
+  });
+}
+
+function recentProjects() {
+  try {
+    const items = JSON.parse(localStorage.getItem(RECENT_PROJECTS_STORAGE_KEY) || "[]");
+    return Array.isArray(items)
+      ? items
+        .filter((item) => item?.root)
+        .sort((left, right) => Number(right.openedAt || 0) - Number(left.openedAt || 0))
+        .slice(0, RECENT_PROJECTS_LIMIT)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberRecentProject(project = local.appState?.project) {
+  if (!project?.root) return;
+  const next = [
+    {
+      name: project.name || "LocalLeaf Project",
+      root: project.root,
+      sizeLabel: project.sizeLabel || "",
+      openedAt: Date.now()
+    },
+    ...recentProjects().filter((item) => item.root !== project.root)
+  ].slice(0, RECENT_PROJECTS_LIMIT);
+  localStorage.setItem(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(next));
+}
+
+function aiState() {
+  return local.appState?.ai || local.appState?.aiModels || {
+    storagePath: "",
+    activeModel: "",
+    download: null,
+    models: [
+      {
+        id: "qwen35-08b-light",
+        name: "Qwen3.5 0.8B Light",
+        sizeLabel: "~560 MB",
+        status: "available",
+        description: "Fastest option for older PCs. Good for short explanations and simple rewrites."
+      },
+      {
+        id: "qwen35-2b-recommended",
+        name: "Qwen3.5 2B Recommended",
+        sizeLabel: "~1.3 GB",
+        status: "available",
+        description: "Better LaTeX fixes, tables, and academic rewriting for most laptops."
+      }
+    ],
+    permissions: local.aiPermissions
+  };
+}
+
+function aiModels() {
+  const state = aiState();
+  return Array.isArray(state.models) ? state.models : [];
+}
+
+function aiProviders() {
+  const state = aiState();
+  const byId = new Map();
+  const templates = Array.isArray(state.providerTemplates) ? state.providerTemplates : [];
+  const serverProviders = Array.isArray(state.providers) ? state.providers : [];
+  [...templates, ...serverProviders].forEach((provider) => {
+    if (!provider?.id) return;
+    byId.set(provider.id, {
+      id: provider.id,
+      name: provider.name || provider.displayName || provider.id,
+      kind: provider.custom ? "custom" : "provider",
+      custom: Boolean(provider.custom),
+      builtin: Boolean(provider.builtin),
+      hasApiKey: Boolean(provider.hasApiKey),
+      status: provider.status || (provider.hasApiKey ? "configured" : "not_configured"),
+      description: provider.description || provider.baseUrl || "Bring your own key for hosted AI models.",
+      baseUrl: provider.baseUrl || provider.url || "",
+      models: Array.isArray(provider.models) ? provider.models : [],
+      test: provider.test || null
+    });
+  });
+  return [...byId.values()];
+}
+
+function isProviderConnected(provider) {
+  if (!provider) return false;
+  const status = provider.status || "not_configured";
+  return Boolean(
+    provider.hasApiKey
+    || status === "configured"
+    || status === "ready"
+    || status === "failed"
+    || (!provider.builtin && provider.custom)
+  );
+}
+
+function isProviderEnabled(provider) {
+  if (!isProviderConnected(provider)) return false;
+  return local.aiProviderEnabled[provider.id] !== false;
+}
+
+function setProviderEnabled(providerId, enabled) {
+  if (!providerId) return;
+  local.aiProviderEnabled[providerId] = Boolean(enabled);
+  writeBooleanMap(AI_PROVIDER_ENABLE_STORAGE_KEY, local.aiProviderEnabled);
+}
+
+function modelToggleKey(providerId, modelId) {
+  return `${providerId || "local"}/${modelId || "default"}`;
+}
+
+function isModelEnabled(providerId, modelId) {
+  return local.aiModelEnabled[modelToggleKey(providerId, modelId)] !== false;
+}
+
+function setModelEnabled(providerId, modelId, enabled) {
+  local.aiModelEnabled[modelToggleKey(providerId, modelId)] = Boolean(enabled);
+  writeBooleanMap(AI_MODEL_ENABLE_STORAGE_KEY, local.aiModelEnabled);
+}
+
+function isProviderModelGroupOpen(providerId) {
+  if (!providerId) return true;
+  if (local.settingsModelSearch.trim()) return true;
+  return local.aiModelGroupOpen[providerId] !== false;
+}
+
+function toggleProviderModelGroup(providerId) {
+  if (!providerId) return;
+  local.aiModelGroupOpen[providerId] = !isProviderModelGroupOpen(providerId);
+  writeBooleanMap(AI_MODEL_GROUP_STORAGE_KEY, local.aiModelGroupOpen);
+}
+
+function providerModelEntries(provider) {
+  return (provider?.models?.length ? provider.models : ["default"]).map((model) => {
+    const id = typeof model === "string" ? model : model.id || model.name || "default";
+    const name = typeof model === "string" ? model : model.name || model.id || "Default model";
+    return { id, name };
+  });
+}
+
+function connectedAiProviders() {
+  return aiProviders().filter(isProviderConnected);
+}
+
+function popularAiProviders() {
+  return aiProviders().filter((provider) => !isProviderConnected(provider));
+}
+
+function modelPickerItems() {
+  const localItems = aiModels().filter((model) => modelStatus(model) === "installed" && isModelEnabled("localleaf-local", model.id)).map((model) => ({
+    providerId: "localleaf-local",
+    modelId: model.id,
+    label: model.name || model.id,
+    providerName: "Local",
+    detail: model.sizeLabel || "Local model"
+  }));
+  if (local.aiPermissions.localModelOnly) return localItems;
+  const providerItems = connectedAiProviders().filter(isProviderEnabled).flatMap((provider) => {
+    return providerModelEntries(provider).filter((model) => isModelEnabled(provider.id, model.id)).map((model) => {
+      return {
+        providerId: provider.id,
+        modelId: model.id,
+        label: model.name,
+        providerName: provider.name,
+        detail: provider.name
+      };
+    });
+  });
+  return [...localItems, ...providerItems];
+}
+
+function modelStatus(model) {
+  if (model.installed || model.status === "installed" || model.status === "active") return "installed";
+  if (model.status === "downloading") return "downloading";
+  if (model.status === "failed") return "failed";
+  return "available";
+}
+
+function activeAiProviderModel() {
+  const state = aiState();
+  const installedLocal = aiModels().find((item) => modelStatus(item) === "installed" && isModelEnabled("localleaf-local", item.id));
+  if (local.aiPermissions.localModelOnly) {
+    return installedLocal
+      ? {
+        providerId: "localleaf-local",
+        modelId: installedLocal.id,
+        providerName: "Local",
+        modelName: installedLocal.name,
+        label: `Local / ${installedLocal.name}`
+      }
+      : {
+        providerId: "localleaf-local",
+        modelId: "",
+        providerName: "Local",
+        modelName: "Fallback",
+        label: "Local / Fallback"
+      };
+  }
+  if (state.activeModel && typeof state.activeModel === "object") {
+    const providerId = state.activeModel.providerId || "local";
+    const modelId = state.activeModel.modelId || state.activeModel.id || "";
+    const provider = aiProviders().find((item) => item.id === providerId);
+    if (!providerId || providerId === "local" || providerId === "localleaf-local" || !provider || (isProviderEnabled(provider) && isModelEnabled(providerId, modelId))) {
+      return {
+        providerId,
+        modelId,
+        providerName: state.activeModel.providerName || (state.activeModel.local ? "Local" : "Provider"),
+        modelName: state.activeModel.name || state.activeModel.modelId || "No model active",
+        label: `${state.activeModel.providerName || (state.activeModel.local ? "Local" : "Provider")} / ${state.activeModel.name || state.activeModel.modelId || "No model active"}`
+      };
+    }
+  }
+  const firstAvailable = modelPickerItems()[0];
+  if (firstAvailable) {
+    return {
+      providerId: firstAvailable.providerId,
+      modelId: firstAvailable.modelId,
+      providerName: firstAvailable.providerName || firstAvailable.detail || "Provider",
+      modelName: firstAvailable.label,
+      label: `${firstAvailable.providerName || firstAvailable.detail || "Provider"} / ${firstAvailable.label}`
+    };
+  }
+  const activeProviderId = state.activeProviderId || "";
+  const activeId = state.activeModelId || state.activeModel || "";
+  if (activeProviderId) {
+    const provider = aiProviders().find((item) => item.id === activeProviderId);
+    if (provider && isProviderEnabled(provider) && isModelEnabled(activeProviderId, activeId)) {
+      const model = providerModelEntries(provider).find((item) => item.id === activeId);
+      const modelName = model?.name || activeId || "Default model";
+      return {
+        providerId: activeProviderId,
+        modelId: activeId,
+        providerName: provider?.name || activeProviderId,
+        modelName,
+        label: `${provider?.name || activeProviderId} / ${modelName}`
+      };
+    }
+  }
+  if (installedLocal) {
+    return {
+      providerId: "localleaf-local",
+      modelId: installedLocal.id,
+      providerName: "Local",
+      modelName: installedLocal.name,
+      label: `Local / ${installedLocal.name}`
+    };
+  }
+  return {
+    providerId: "",
+    modelId: "",
+    providerName: "No provider",
+    modelName: "Connect model",
+    label: "No model active"
+  };
+}
+
+function activeAiModelName() {
+  return activeAiProviderModel().label;
+}
+
+function aiPendingCount() {
+  return aiHistoryItems().filter((proposal) => ["pending", "proposed"].includes(proposal.status)).length;
+}
+
+function aiHistoryItems() {
+  const fromMessages = local.aiMessages.flatMap((message) => message.proposals || []);
+  const byId = new Map();
+  [...fromMessages, ...local.aiChangeHistory].forEach((proposal) => {
+    if (proposal?.id && (!proposal.sessionId || proposal.sessionId === local.aiCurrentSessionId)) byId.set(proposal.id, proposal);
+  });
+  return [...byId.values()].reverse();
+}
+
+function formatAiTime(timestamp) {
+  if (!timestamp) return "";
+  return new Date(timestamp).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function syncAiProposalsFromAppState() {
+  const proposals = Array.isArray(local.appState?.ai?.proposals) ? local.appState.ai.proposals : [];
+  proposals.forEach((proposal) => {
+    if (!proposal?.id) return;
+    const existing = findAiProposal(proposal.id);
+    const merged = { ...(existing || {}), ...proposal, sessionId: existing?.sessionId || local.aiCurrentSessionId };
+    local.aiMessages.forEach((message) => {
+      const index = (message.proposals || []).findIndex((item) => item.id === proposal.id);
+      if (index >= 0) message.proposals[index] = { ...message.proposals[index], ...merged };
+    });
+    rememberAiProposal(merged);
+  });
+}
+
+function currentAiSession() {
+  let session = local.aiSessions.find((item) => item.id === local.aiCurrentSessionId);
+  if (!session) {
+    session = createAiSession();
+    local.aiSessions.unshift(session);
+    local.aiCurrentSessionId = session.id;
+  }
+  return session;
+}
+
+function firstUserPrompt(messages = []) {
+  return messages.find((message) => message.role === "user")?.message || "";
+}
+
+function aiSessionTitleFromPrompt(prompt = "") {
+  const clean = String(prompt || "").replace(/\s+/g, " ").trim();
+  return clean ? clean.slice(0, 42) : "New session";
+}
+
+function saveAiSessions() {
+  const payload = {
+    currentSessionId: local.aiCurrentSessionId,
+    sessions: local.aiSessions.slice(0, 12).map((session) => ({
+      ...session,
+      messages: (session.messages || []).slice(-80)
+    }))
+  };
+  localStorage.setItem(AI_SESSIONS_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function syncCurrentAiSession(titleHint = "") {
+  const session = currentAiSession();
+  local.aiChangeHistory.forEach((proposal) => {
+    if (proposal?.id && !proposal.sessionId) proposal.sessionId = session.id;
+  });
+  session.messages = local.aiMessages.map((message) => ({ ...message }));
+  session.updatedAt = Date.now();
+  if (!firstUserPrompt(session.messages)) {
+    session.title = titleHint ? aiSessionTitleFromPrompt(titleHint) : session.title || "New session";
+  } else if (!session.title || session.title === "New session" || session.title === "First session") {
+    session.title = aiSessionTitleFromPrompt(firstUserPrompt(session.messages));
+  }
+  local.aiSessions = [session, ...local.aiSessions.filter((item) => item.id !== session.id)]
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
+    .slice(0, 12);
+  saveAiSessions();
+}
+
+function startNewAiSession() {
+  syncCurrentAiSession();
+  const session = createAiSession();
+  local.aiSessions.unshift(session);
+  local.aiCurrentSessionId = session.id;
+  local.aiMessages = session.messages.map((message) => ({ ...message }));
+  local.aiSessionMenuOpen = false;
+  local.aiSessionMoreMenuOpen = false;
+  local.aiForceScrollBottom = true;
+  local.aiChatNeedsJump = false;
+  saveAiSessions();
+  refreshRightRailUi();
+}
+
+function switchAiSession(sessionId) {
+  syncCurrentAiSession();
+  const session = local.aiSessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  local.aiCurrentSessionId = session.id;
+  local.aiMessages = (session.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
+  local.aiSessionMenuOpen = false;
+  local.aiSessionMoreMenuOpen = false;
+  local.aiForceScrollBottom = true;
+  local.aiChatNeedsJump = false;
+  saveAiSessions();
+  refreshRightRailUi();
+}
+
+function deleteAiSession(sessionId, options = {}) {
+  const targetId = String(sessionId || "");
+  if (!targetId) return;
+  const nextSessions = local.aiSessions.filter((session) => session.id !== targetId);
+  if (!nextSessions.length) {
+    const session = createAiSession();
+    local.aiSessions = [session];
+    local.aiCurrentSessionId = session.id;
+    local.aiMessages = session.messages.map((message) => ({ ...message }));
+  } else {
+    local.aiSessions = nextSessions;
+    if (local.aiCurrentSessionId === targetId) {
+      const next = local.aiSessions[0];
+      local.aiCurrentSessionId = next.id;
+      local.aiMessages = (next.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
+    }
+  }
+  local.aiSessionMenuOpen = options.keepMenu !== false;
+  local.aiSessionMoreMenuOpen = false;
+  local.aiForceScrollBottom = true;
+  local.aiChatNeedsJump = false;
+  saveAiSessions();
+  refreshRightRailUi();
+}
+
+function renameCurrentAiSession() {
+  const session = currentAiSession();
+  const title = prompt("Session name", session.title || "New session");
+  if (title === null) return;
+  const clean = title.replace(/\s+/g, " ").trim();
+  if (!clean) return;
+  session.title = clean.slice(0, 64);
+  session.updatedAt = Date.now();
+  local.aiSessions = [session, ...local.aiSessions.filter((item) => item.id !== session.id)];
+  local.aiSessionMoreMenuOpen = false;
+  saveAiSessions();
+  refreshRightRailUi();
+}
+
+function setAiQueueingEnabled(enabled) {
+  local.aiQueueingEnabled = Boolean(enabled);
+  localStorage.setItem("localleaf.aiQueueingEnabled", local.aiQueueingEnabled ? "1" : "0");
+}
+
 
 function collabUrl() {
   const params = new URLSearchParams({ client: clientId });
@@ -443,6 +1050,10 @@ function icon(name) {
     back: `<span class="chevron-left" aria-hidden="true"></span>`,
     compile: uiGlyph("compile"),
     chat: uiGlyph("chat"),
+    ai: uiGlyph("ai"),
+    help: uiGlyph("help"),
+    info: uiGlyph("info"),
+    template: uiGlyph("template"),
     download: uiGlyph("download"),
     refresh: uiGlyph("refresh"),
     settings: uiGlyph("settings"),
@@ -453,6 +1064,42 @@ function icon(name) {
 
 function uiGlyph(name) {
   return `<span class="ui-glyph ui-glyph-${name}" aria-hidden="true"></span>`;
+}
+
+const PROVIDER_LOGO_PATHS = {
+  openai: "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z",
+  openrouter: "M16.778 1.844v1.919q-.569-.026-1.138-.032-.708-.008-1.415.037c-1.93.126-4.023.728-6.149 2.237-2.911 2.066-2.731 1.95-4.14 2.75-.396.223-1.342.574-2.185.798-.841.225-1.753.333-1.751.333v4.229s.768.108 1.61.333c.842.224 1.789.575 2.185.799 1.41.798 1.228.683 4.14 2.75 2.126 1.509 4.22 2.11 6.148 2.236.88.058 1.716.041 2.555.005v1.918l7.222-4.168-7.222-4.17v2.176c-.86.038-1.611.065-2.278.021-1.364-.09-2.417-.357-3.979-1.465-2.244-1.593-2.866-2.027-3.68-2.508.889-.518 1.449-.906 3.822-2.59 1.56-1.109 2.614-1.377 3.978-1.466.667-.044 1.418-.017 2.278.02v2.176L24 6.014Z",
+  ollama: "M16.361 10.26a.894.894 0 0 0-.558.47l-.072.148.001.207c0 .193.004.217.059.353.076.193.152.312.291.448.24.238.51.3.872.205a.86.86 0 0 0 .517-.436.752.752 0 0 0 .08-.498c-.064-.453-.33-.782-.724-.897a1.06 1.06 0 0 0-.466 0zm-9.203.005c-.305.096-.533.32-.65.639a1.187 1.187 0 0 0-.06.52c.057.309.31.59.598.667.362.095.632.033.872-.205.14-.136.215-.255.291-.448.055-.136.059-.16.059-.353l.001-.207-.072-.148a.894.894 0 0 0-.565-.472 1.02 1.02 0 0 0-.474.007Zm4.184 2c-.131.071-.223.25-.195.383.031.143.157.288.353.407.105.063.112.072.117.136.004.038-.01.146-.029.243-.02.094-.036.194-.036.222.002.074.07.195.143.253.064.052.076.054.255.059.164.005.198.001.264-.03.169-.082.212-.234.15-.525-.052-.243-.042-.28.087-.355.137-.08.281-.219.324-.314a.365.365 0 0 0-.175-.48.394.394 0 0 0-.181-.033c-.126 0-.207.03-.355.124l-.085.053-.053-.032c-.219-.13-.259-.145-.391-.143a.396.396 0 0 0-.193.032zm.39-2.195c-.373.036-.475.05-.654.086-.291.06-.68.195-.951.328-.94.46-1.589 1.226-1.787 2.114-.04.176-.045.234-.045.53 0 .294.005.357.043.524.264 1.16 1.332 2.017 2.714 2.173.3.033 1.596.033 1.896 0 1.11-.125 2.064-.727 2.493-1.571.114-.226.169-.372.22-.602.039-.167.044-.23.044-.523 0-.297-.005-.355-.045-.531-.288-1.29-1.539-2.304-3.072-2.497a6.873 6.873 0 0 0-.855-.031zm.645.937a3.283 3.283 0 0 1 1.44.514c.223.148.537.458.671.662.166.251.26.508.303.82.02.143.01.251-.043.482-.08.345-.332.705-.672.957a3.115 3.115 0 0 1-.689.348c-.382.122-.632.144-1.525.138-.582-.006-.686-.01-.853-.042-.57-.107-1.022-.334-1.35-.68-.264-.28-.385-.535-.45-.946-.03-.192.025-.509.137-.776.136-.326.488-.73.836-.963.403-.269.934-.46 1.422-.512.187-.02.586-.02.773-.002z"
+};
+
+const PROVIDER_LOGO_SVG_MARKUP = {
+  lmstudio: `<path d="M2.84 2a1.273 1.273 0 100 2.547h14.107a1.273 1.273 0 100-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H22.04a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h14.106a1.274 1.274 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H15.38a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h14.106a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h9.698a1.273 1.273 0 100-2.547h-9.698z" fill-opacity=".3"></path><path d="M2.84 2a1.273 1.273 0 100 2.547h10.287a1.274 1.274 0 000-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H18.22a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H11.56a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h5.78a1.273 1.273 0 100-2.547h-5.78z"></path>`,
+  opencode: `<path d="M16 6H8v12h8V6zm4 16H4V2h16v20z"></path>`
+};
+
+function providerLogoKey(provider = {}) {
+  const value = `${provider.id || ""} ${provider.name || ""}`.toLowerCase();
+  if (value.includes("openai")) return "openai";
+  if (value.includes("openrouter")) return "openrouter";
+  if (value.includes("ollama")) return "ollama";
+  if (value.includes("lmstudio") || value.includes("lm studio")) return "lmstudio";
+  if (value.includes("opencode")) return "opencode";
+  return "custom";
+}
+
+function providerLogoMarkup(provider = {}) {
+  const key = providerLogoKey(provider);
+  const label = provider.name || "Provider";
+  const svgMarkup = PROVIDER_LOGO_SVG_MARKUP[key] || (PROVIDER_LOGO_PATHS[key] ? `<path d="${PROVIDER_LOGO_PATHS[key]}"></path>` : "");
+  if (svgMarkup) {
+    return `<span class="provider-logo provider-logo-${key}" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">${svgMarkup}</svg></span>`;
+  }
+  const text = String(label).trim().slice(0, 2).toUpperCase() || "AI";
+  return `<span class="provider-logo provider-logo-${key}" aria-hidden="true"><span>${escapeHtml(text)}</span></span>`;
+}
+
+function downArrowIcon() {
+  return `<svg class="ai-scroll-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14"></path><path d="m6 13 6 6 6-6"></path></svg>`;
 }
 
 function editorToolIcon(name) {
@@ -490,9 +1137,19 @@ function editorToolIcon(name) {
 
 function hostRailMarkup(active = "") {
   return `
-    <nav class="host-nav-rail" aria-label="Project shortcuts">
-      <button class="host-rail-button ${active === "home" ? "active" : ""}" id="railHome" title="Home" aria-label="Home">${uiGlyph("home")}</button>
-      <button class="host-rail-button ${active === "session" ? "active" : ""}" id="railSession" title="Session management" aria-label="Session management">${uiGlyph("users")}</button>
+    <nav class="host-nav-rail ${local.hostRailCollapsed ? "host-nav-rail-collapsed" : ""}" aria-label="Project shortcuts">
+      <div class="host-rail-section host-rail-top">
+        <button class="host-rail-button host-rail-collapse" id="railCollapse" title="${local.hostRailCollapsed ? "Expand navigation" : "Collapse navigation"}" aria-label="${local.hostRailCollapsed ? "Expand navigation" : "Collapse navigation"}"><span class="host-rail-collapse-icon" aria-hidden="true"></span><span class="host-rail-label">${local.hostRailCollapsed ? "Expand" : "Collapse"}</span></button>
+        <button class="host-rail-button ${active === "home" ? "active" : ""}" id="railHome" title="Home" aria-label="Home">${uiGlyph("home")}<span class="host-rail-label">Home</span></button>
+        <button class="host-rail-button" id="railModels" title="Models" aria-label="Models">${uiGlyph("ai")}<span class="host-rail-label">Models</span></button>
+        <button class="host-rail-button ${active === "session" ? "active" : ""}" id="railSession" title="Session management" aria-label="Session management">${uiGlyph("users")}<span class="host-rail-label">Session</span></button>
+      </div>
+      <div class="host-rail-spacer"></div>
+      <div class="host-rail-section host-rail-bottom">
+        <button class="host-rail-button" id="railSettings" title="Settings" aria-label="Settings">${uiGlyph("settings")}<span class="host-rail-label">Settings</span></button>
+        <button class="host-rail-button" id="railHelp" title="Help" aria-label="Help">${uiGlyph("help")}<span class="host-rail-label">Help</span></button>
+        <button class="host-rail-button" id="railAbout" title="About" aria-label="About">${uiGlyph("info")}<span class="host-rail-label">About</span></button>
+      </div>
     </nav>
   `;
 }
@@ -507,7 +1164,7 @@ function windowShell(content, options = {}) {
             <strong>LocalLeaf Host</strong>
           </div>
         </div>
-        <div class="window-body ${options.rail ? "window-body-with-rail" : ""}">
+        <div class="window-body ${options.rail ? "window-body-with-rail" : ""} ${options.rail && local.hostRailCollapsed ? "host-rail-layout-collapsed" : ""}">
           ${options.rail ? hostRailMarkup(options.active) : ""}
           ${options.rail ? `<div class="window-content">${content}</div>` : content}
         </div>
@@ -547,6 +1204,31 @@ function updateCheckButtonMarkup(id, label = "Check for updates", extraClass = "
 
 function isZipImportFile(file) {
   return /\.zip$/i.test(file?.name || "") || file?.type === "application/zip" || file?.type === "application/x-zip-compressed";
+}
+
+function importFileName(fileOrPath) {
+  return String(fileOrPath?.name || fileOrPath || "").replace(/\\/g, "/").split("/").pop().trim();
+}
+
+function importFileExtension(fileOrPath) {
+  const name = importFileName(fileOrPath).toLowerCase();
+  const dotIndex = name.lastIndexOf(".");
+  return dotIndex > 0 ? name.slice(dotIndex) : "";
+}
+
+function isSupportedProjectFileName(fileOrPath) {
+  const name = importFileName(fileOrPath).toLowerCase();
+  return SUPPORTED_PROJECT_SPECIAL_FILENAMES.has(name) || SUPPORTED_PROJECT_FILE_EXTENSIONS.has(importFileExtension(fileOrPath));
+}
+
+function unsupportedProjectFiles(files) {
+  return [...(files || [])].filter((file) => !isZipImportFile(file) && !isSupportedProjectFileName(stagedImportPath(file)));
+}
+
+function unsupportedFilesMessage(files) {
+  const names = files.slice(0, 4).map((file) => file?.name || stagedImportPath(file) || "selected file").join(", ");
+  const extra = files.length > 4 ? ` and ${files.length - 4} more` : "";
+  return `Unsupported file type${files.length === 1 ? "" : "s"}: ${names}${extra}.`;
 }
 
 function isReadableImportFile(file) {
@@ -648,6 +1330,57 @@ function homeImportTrayMarkup() {
   `;
 }
 
+function recentProjectsMarkup() {
+  const items = recentProjects();
+  if (!items.length) {
+    return `<div class="recent-empty">Recent projects will appear here after you open or create them.</div>`;
+  }
+  return `
+    <div class="recent-list">
+      ${items.map((item) => `
+        <button class="recent-item" data-open-recent="${escapeHtml(item.root)}" title="${escapeHtml(item.root)}">
+          <span>${uiGlyph("folder")}</span>
+          <strong>${escapeHtml(item.name || "LocalLeaf Project")}</strong>
+          <small>${escapeHtml(item.root)}</small>
+          ${item.sizeLabel ? `<b>${escapeHtml(item.sizeLabel)}</b>` : ""}
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function homeModelsMarkup() {
+  const state = aiState();
+  const active = activeAiProviderModel();
+  const downloading = state.download || state.downloadProgress || aiModels().find((model) => model.status === "downloading");
+  return `
+    <section class="home-models-panel">
+      <div class="section-title">AI Models</div>
+      <div class="home-model-summary">
+        <div class="home-model-icon">${uiGlyph("ai")}</div>
+        <div>
+          <strong>${escapeHtml(active.providerName)} / ${escapeHtml(active.modelName)}</strong>
+          <span>${escapeHtml(active.providerId === "local" ? state.storagePath || state.storageRoot || "Local model storage is ready to configure." : "Hosted provider configured from Settings > Models.")}</span>
+        </div>
+      </div>
+      ${downloading ? `
+        <div class="model-progress">
+          <div>
+            <strong>${escapeHtml(downloading.modelName || downloading.name || "Downloading model")}</strong>
+            <span>${Math.round(Number(downloading.percent ?? downloading.progress ?? 0))}%</span>
+          </div>
+          <progress value="${Number(downloading.percent ?? downloading.progress ?? 0)}" max="100"></progress>
+        </div>
+      ` : ""}
+      <div class="home-model-actions">
+        <button class="btn btn-primary" id="homeOpenModels">${uiGlyph("settings")} Manage Models</button>
+        <button class="btn" id="homeBringKey">${uiGlyph("ai")} Bring Your Own Key</button>
+        <button class="btn" id="homeCustomModel">${uiGlyph("plus")} Configure Custom Model</button>
+      </div>
+    </section>
+  `;
+}
+
 function homeView() {
   const state = local.appState;
   const hasLiveSession = state.session.status === "live";
@@ -680,6 +1413,8 @@ function homeView() {
             </div>
             <span>${escapeHtml(state.project.sizeLabel)}</span>
           </button>
+          <div class="section-title home-subsection-title">Recent Projects</div>
+          ${recentProjectsMarkup()}
         </section>
       </div>
     </div>
@@ -937,6 +1672,69 @@ function updateToastMarkup() {
   `;
 }
 
+function appNoticeMarkup(notice, belowUpdate = false) {
+  if (!notice?.message) return "";
+  const type = notice.type || "info";
+  const iconText = type === "error" ? "!" : type === "success" ? "âœ“" : "i";
+  return `
+    <section class="app-notice app-notice-${escapeHtml(type)} ${belowUpdate ? "below-update" : ""}" role="status" aria-live="polite">
+      <div class="app-notice-icon" aria-hidden="true">${escapeHtml(iconText)}</div>
+      <div class="app-notice-copy">
+        <strong>${escapeHtml(notice.title || "LocalLeaf")}</strong>
+        <span>${escapeHtml(notice.message)}</span>
+        ${notice.detail ? `<small>${escapeHtml(notice.detail)}</small>` : ""}
+      </div>
+      <button class="icon-button app-notice-close" data-dismiss-app-notice title="Dismiss" aria-label="Dismiss notice">x</button>
+    </section>
+  `;
+}
+
+function renderAppNotice() {
+  document.querySelector(".app-notice")?.remove();
+  if (!local.appNotice) return;
+  const belowUpdate = Boolean(document.querySelector(".update-toast"));
+  app.insertAdjacentHTML("beforeend", appNoticeMarkup(local.appNotice, belowUpdate));
+  document.querySelector("[data-dismiss-app-notice]")?.addEventListener("click", () => {
+    clearTimeout(local.appNoticeTimer);
+    local.appNotice = null;
+    renderAppNotice();
+  });
+}
+
+function showAppNotice(message, options = {}) {
+  clearTimeout(local.appNoticeTimer);
+  const id = Date.now();
+  local.appNotice = {
+    id,
+    type: options.type || "info",
+    title: options.title || "LocalLeaf",
+    message: String(message || "Something went wrong."),
+    detail: options.detail || ""
+  };
+  renderAppNotice();
+  const timeoutMs = Number(options.timeoutMs ?? 7200);
+  if (timeoutMs > 0) {
+    local.appNoticeTimer = setTimeout(() => {
+      if (local.appNotice?.id === id) {
+        local.appNotice = null;
+        renderAppNotice();
+      }
+    }, timeoutMs);
+  }
+}
+
+function showImportError(message, detail = "") {
+  const text = String(message || "Import failed.");
+  if (route().view === "home") {
+    local.homeImportStatus = text;
+  }
+  showAppNotice(text, {
+    type: "error",
+    title: "Import failed",
+    detail
+  });
+}
+
 function renderUpdateToast() {
   document.querySelector(".update-toast")?.remove();
   if (!shouldShowUpdateToast()) return;
@@ -947,6 +1745,7 @@ function renderUpdateToast() {
     document.querySelector(".update-toast")?.remove();
   });
   document.querySelector("[data-install-update]")?.addEventListener("click", installLatestUpdate);
+  renderAppNotice();
 }
 
 function updateUpdateCheckButtons() {
@@ -1108,12 +1907,293 @@ function hideSettingsModal() {
   document.querySelector(".settings-modal-backdrop")?.remove();
 }
 
-function showSettingsModal() {
+function settingsTabButton(section, label) {
+  return `<button type="button" class="settings-tab ${local.settingsSection === section ? "active" : ""}" data-settings-section="${escapeHtml(section)}">${escapeHtml(label)}</button>`;
+}
+
+function themeSwitchMarkup() {
+  const isDark = local.theme === "dark";
+  return `
+    <button class="settings-theme-switch ${isDark ? "is-dark" : "is-light"}" id="themeModeSwitch" type="button" role="switch" aria-checked="${isDark ? "true" : "false"}" title="Switch between light and dark mode">
+      <span class="settings-theme-option settings-theme-sun" aria-hidden="true"><span></span></span>
+      <span class="settings-theme-option settings-theme-moon" aria-hidden="true"><span></span></span>
+      <span class="settings-theme-thumb" aria-hidden="true"></span>
+      <span class="sr-only" data-theme-current>${isDark ? "Dark mode" : "Light mode"}</span>
+    </button>
+  `;
+}
+
+function settingToggleMarkup(key, title, detail, options = {}) {
+  return `
+    <section class="settings-list-row permission-list-row ${options.warning ? "permission-warning" : ""}" aria-labelledby="${escapeHtml(key)}Title">
+      <div class="settings-list-main">
+        <div>
+          <strong id="${escapeHtml(key)}Title">${escapeHtml(title)}</strong>
+          <span>${escapeHtml(detail)}</span>
+        </div>
+      </div>
+      ${miniSwitchMarkup({ checked: local.aiPermissions[key], attrs: `data-ai-permission="${escapeHtml(key)}"` })}
+    </section>
+  `;
+}
+
+function miniSwitchMarkup({ checked = false, disabled = false, label = "", attrs = "" } = {}) {
+  return `
+    <label class="settings-mini-switch" ${label ? `title="${escapeHtml(label)}"` : ""}>
+      <input type="checkbox" ${attrs} ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
+      <span></span>
+    </label>
+  `;
+}
+
+function settingsGeneralMarkup() {
+  return `
+    <section class="settings-general settings-compact-page">
+      <div class="settings-general-hero">
+        <span class="settings-general-mark" aria-hidden="true">${uiGlyph("settings")}</span>
+        <div>
+          <h3>General</h3>
+          <p>Basic workspace preferences for this computer.</p>
+        </div>
+      </div>
+      <div class="settings-list-card settings-general-card">
+        <section class="settings-list-row settings-theme-row">
+          <div class="settings-list-main">
+            <div>
+              <strong>Appearance</strong>
+              <span>Use the mode that feels best while editing and previewing PDFs.</span>
+            </div>
+          </div>
+          ${themeSwitchMarkup()}
+        </section>
+        <section class="settings-list-row">
+          <div class="settings-list-main">
+            <div>
+              <strong>Join request sound</strong>
+              <span>Play a soft chime when someone asks to join your hosted session.</span>
+            </div>
+          </div>
+          ${miniSwitchMarkup({ checked: local.joinRequestSoundEnabled, attrs: `id="joinRequestSound"` })}
+        </section>
+      </div>
+    </section>
+  `;
+}
+
+function localModelCardMarkup(model, activeId) {
+  const status = modelStatus(model);
+  const isActive = activeId === model.id && activeAiProviderModel().providerId === "local";
+  const busy = local.modelActionBusy === model.id;
+  return `
+    <article class="settings-model-card settings-model-row ${isActive ? "active" : ""}">
+      <div class="model-card-main">
+        <div class="home-model-icon">${uiGlyph("ai")}</div>
+        <div>
+          <h3>${escapeHtml(model.name)}</h3>
+          <p>${escapeHtml(model.description || "")}</p>
+          <span>${escapeHtml(model.sizeLabel || "")}</span>
+        </div>
+      </div>
+      <div class="model-row-side">
+        <span class="model-status-pill ${escapeHtml(status)}">${escapeHtml(isActive ? "Active" : status.replace(/_/g, " "))}</span>
+        <div class="model-card-actions">
+          ${status === "installed"
+            ? `<button class="btn btn-primary" data-activate-model="${escapeHtml(model.id)}" ${isActive || busy ? "disabled" : ""}>${busy ? "Working..." : "Use"}</button>`
+            : `<button class="btn btn-primary" data-download-model="${escapeHtml(model.id)}" ${busy || status === "downloading" ? "disabled" : ""}>${status === "downloading" ? "Downloading..." : "Download"}</button>`}
+          <button class="btn" data-test-provider="local" data-test-model="${escapeHtml(model.id)}">Test</button>
+          ${status === "installed" ? `<button class="btn" data-delete-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""}>Delete</button>` : ""}
+        </div>
+      </div>
+      ${status === "downloading" ? `
+        <div class="model-progress">
+          <div><strong>Downloading</strong><span>${Math.round(Number(model.progress || 0))}%</span></div>
+          <progress value="${Number(model.progress || 0)}" max="100"></progress>
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function providerRowMarkup(provider) {
+  const firstModel = providerModelEntries(provider)[0] || { id: "default", name: "Default" };
+  const test = local.providerInlineTests[provider.id] || provider.test;
+  const enabled = isProviderEnabled(provider);
+  return `
+    <div class="settings-list-row provider-row">
+      <div class="settings-list-main">
+        ${providerLogoMarkup(provider)}
+        <div>
+          <strong>${escapeHtml(provider.name)}</strong>
+          <span>${escapeHtml(provider.baseUrl || provider.description || "Connected provider")}</span>
+          ${test?.message ? `<small class="provider-test-result ${escapeHtml(test.color || (test.ok ? "green" : "red"))}" data-provider-test-slot="${escapeHtml(provider.id)}">${escapeHtml(test.message)}</small>` : `<small class="provider-test-result muted" data-provider-test-slot="${escapeHtml(provider.id)}">Test result will appear here.</small>`}
+        </div>
+      </div>
+      <div class="settings-list-actions">
+        <span class="settings-status-tag">${escapeHtml(provider.custom ? "Custom" : "API key")}</span>
+        ${miniSwitchMarkup({ checked: enabled, label: enabled ? "Provider enabled" : "Provider disabled", attrs: `data-provider-enabled="${escapeHtml(provider.id)}"` })}
+        <button class="btn" data-test-provider="${escapeHtml(provider.id)}" data-test-model="${escapeHtml(firstModel.id)}">${local.providerTestBusy === provider.id ? "Testing..." : "Test"}</button>
+        <button class="btn" data-edit-provider="${escapeHtml(provider.id)}">Edit</button>
+        <button class="btn" data-delete-provider="${escapeHtml(provider.id)}">Disconnect</button>
+      </div>
+    </div>
+  `;
+}
+
+function popularProviderRowMarkup(provider) {
+  return `
+    <div class="settings-list-row provider-row">
+      <div class="settings-list-main">
+        ${providerLogoMarkup(provider)}
+        <div>
+          <strong>${escapeHtml(provider.name)}</strong>
+          <span>${escapeHtml(provider.description || provider.baseUrl || "OpenAI-compatible provider")}</span>
+        </div>
+      </div>
+      <div class="settings-list-actions">
+        <span class="settings-status-tag">${provider.id === "opencode-go" ? "Recommended" : provider.custom ? "Custom" : "Preset"}</span>
+        <button class="btn" data-connect-provider="${escapeHtml(provider.id)}">${uiGlyph("plus")} Connect</button>
+      </div>
+    </div>
+  `;
+}
+
+function settingsProvidersMarkup() {
+  const connected = connectedAiProviders();
+  const popular = popularAiProviders();
+  return `
+    <section class="settings-compact-page">
+      <h3 class="settings-model-heading">Connected providers</h3>
+      <div class="settings-list-card">
+        ${connected.length ? connected.map(providerRowMarkup).join("") : `<div class="settings-empty-row">No providers connected yet.</div>`}
+      </div>
+      <h3 class="settings-model-heading">Popular providers</h3>
+      <div class="settings-list-card">
+        ${popular.slice(0, 8).map(popularProviderRowMarkup).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function modelListRowMarkup(provider, model) {
+  const enabled = isModelEnabled(provider.id, model.id);
+  const active = activeAiProviderModel();
+  const isActive = active.providerId === provider.id && active.modelId === model.id;
+  return `
+    <div class="settings-list-row model-toggle-row">
+      <div class="settings-list-main settings-model-toggle-main">
+        <strong>${escapeHtml(model.name)}</strong>
+        ${miniSwitchMarkup({ checked: enabled, label: enabled ? "Model shown in picker" : "Model hidden from picker", attrs: `data-model-enabled-provider="${escapeHtml(provider.id)}" data-model-enabled-id="${escapeHtml(model.id)}"` })}
+        ${isActive ? `<span class="settings-status-tag">Active</span>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function providerModelGroupMarkup(provider) {
+  const query = local.settingsModelSearch.trim().toLowerCase();
+  const providerEnabled = isProviderEnabled(provider);
+  const models = providerModelEntries(provider).filter((model) => {
+    if (!query) return true;
+    return `${provider.name} ${model.name} ${model.id}`.toLowerCase().includes(query);
+  });
+  if (!models.length) return "";
+  const open = isProviderModelGroupOpen(provider.id);
+  return `
+    <section class="settings-model-group settings-provider-model-group ${providerEnabled ? "" : "provider-disabled"} ${open ? "open" : "collapsed"}">
+      <div class="settings-provider-model-head">
+        <div class="settings-provider-model-title">
+          ${providerLogoMarkup(provider)}
+          <strong>${escapeHtml(provider.name)}</strong>
+          ${miniSwitchMarkup({ checked: providerEnabled, label: providerEnabled ? "Provider shown in picker" : "Provider hidden from picker", attrs: `data-provider-enabled="${escapeHtml(provider.id)}" data-provider-toggle-scope="models"` })}
+        </div>
+        <button class="settings-provider-disclosure ${open ? "open" : ""}" type="button" data-toggle-provider-model-group="${escapeHtml(provider.id)}" aria-expanded="${open ? "true" : "false"}" title="${open ? "Collapse models" : "Expand models"}" aria-label="${open ? "Collapse" : "Expand"} ${escapeHtml(provider.name)} models">
+          <span aria-hidden="true"></span>
+        </button>
+      </div>
+      <div class="settings-list-card settings-provider-models" ${open ? "" : "hidden"}>
+        ${models.map((model) => modelListRowMarkup(provider, model)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function localModelListMarkup(activeId) {
+  const models = aiModels();
+  if (!models.length) return "";
+  return `
+    <section class="settings-model-group">
+      <h3>${uiGlyph("ai")} Local models</h3>
+      <div class="settings-model-card-list">
+        ${models.map((model) => localModelCardMarkup(model, activeId)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function settingsModelsMarkup() {
+  const state = aiState();
+  const activeId = state.activeModelId || state.activeModel || "";
+  const connected = connectedAiProviders();
+  const providerGroups = connected.map(providerModelGroupMarkup).filter(Boolean).join("");
+  return `
+    <section class="settings-models settings-compact-page">
+      <input class="settings-model-search" id="settingsModelSearch" value="${escapeHtml(local.settingsModelSearch)}" placeholder="Search models" autocomplete="off" />
+      <div class="settings-path-row">
+        <div>
+          <h3>Model storage</h3>
+          <p>${escapeHtml(state.storagePathLabel || state.storagePath || "Default LocalLeafModel folder")}</p>
+        </div>
+        <button class="btn" id="chooseModelFolder" type="button">Choose Folder</button>
+      </div>
+      <div class="settings-model-toolbar">
+        <button class="btn btn-primary" id="downloadLocalModel" type="button">${uiGlyph("download")} Download local</button>
+        <button class="btn" id="bringYourOwnKey" type="button">${uiGlyph("plus")} Connect provider</button>
+        <button class="btn" id="configureCustomModel" type="button">${uiGlyph("settings")} Custom</button>
+      </div>
+      <h3 class="settings-model-heading">Provider models</h3>
+      ${providerGroups || `<div class="settings-empty-row">Connect a provider to show hosted models here.</div>`}
+      ${localModelListMarkup(activeId)}
+    </section>
+  `;
+}
+
+function settingsPermissionsMarkup() {
+  return `
+    <section class="settings-permission-page settings-compact-page">
+      <div class="settings-permission-note">
+        <strong>AI Helper permissions</strong>
+        <span>These controls are sent with each AI chat request and decide what the active model is allowed to propose or auto-apply.</span>
+      </div>
+      <h3 class="settings-model-heading">Edit Flow</h3>
+      <div class="settings-permission-list settings-list-card">
+        ${settingToggleMarkup("askBeforeEdits", "Default permissions", "Show approval cards before LocalLeaf writes any proposed file change.")}
+        ${settingToggleMarkup("yoloMode", "YOLO mode", "Auto-apply approved-safe text edits from the AI Helper without approval cards.", { warning: true })}
+        ${settingToggleMarkup("rewriteTools", "Rewrite tools", "Allow selected text rewriting and clarity improvements.")}
+        ${settingToggleMarkup("multiFileEdits", "Multi-file edits", "Allow proposals that touch more than one text file.", { warning: true })}
+      </div>
+      <h3 class="settings-model-heading">Model Routing</h3>
+      <div class="settings-permission-list settings-list-card">
+        ${settingToggleMarkup("localModelOnly", "Local model only", "Keep AI requests on this computer and block hosted providers from the AI chat.")}
+      </div>
+      <h3 class="settings-model-heading">Advanced Actions</h3>
+      <div class="settings-permission-list settings-list-card">
+        ${settingToggleMarkup("fileManagement", "Create, rename, move, and delete", "Allow the AI Helper to handle project file-management requests.", { warning: true })}
+        ${settingToggleMarkup("fileUploads", "Uploads and imports", "Allow the AI Helper to discuss upload/import actions for project assets.", { warning: true })}
+        ${settingToggleMarkup("shellCommands", "Shell commands", "Allow command or terminal requests to reach the active model.", { warning: true })}
+        ${settingToggleMarkup("binaryFiles", "Binary files", "Allow binary-file requests such as images, PDFs, or other assets.", { warning: true })}
+      </div>
+    </section>
+  `;
+}
+
+function showSettingsModal(section = "general") {
   hideSettingsModal();
+  const allowedSections = new Set(["general", "providers", "models", "permissions"]);
+  local.settingsSection = allowedSections.has(section) ? section : "general";
   const shell = document.querySelector(".editor-shell") || app;
   shell.insertAdjacentHTML("beforeend", `
     <div class="settings-modal-backdrop" role="presentation">
-      <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <section class="settings-modal settings-modal-wide settings-preferences-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
         <div class="settings-modal-head">
           <div>
             <h2 id="settingsTitle">LocalLeaf Settings</h2>
@@ -1121,37 +2201,25 @@ function showSettingsModal() {
           </div>
           <button class="icon-button" data-close-settings title="Close settings" aria-label="Close settings">x</button>
         </div>
+        <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+          ${settingsTabButton("general", "General")}
+          ${settingsTabButton("providers", "Providers")}
+          ${settingsTabButton("models", "Models")}
+          ${settingsTabButton("permissions", "AI Permissions")}
+        </div>
         <div class="settings-options">
-          <section class="settings-group" aria-labelledby="appearanceTitle">
-            <div>
-              <h3 id="appearanceTitle">Appearance</h3>
-              <p>Choose how LocalLeaf looks on this computer.</p>
-            </div>
-            <div class="settings-segment" role="group" aria-label="Theme">
-              <button type="button" class="${local.theme === "light" ? "active" : ""}" data-theme-option="light">Light</button>
-              <button type="button" class="${local.theme === "dark" ? "active" : ""}" data-theme-option="dark">Dark</button>
-            </div>
-          </section>
-          <section class="settings-group settings-toggle-row" aria-labelledby="updatesTitle">
-            <div>
-              <h3 id="updatesTitle">Automatic update checks</h3>
-              <p>Check once when LocalLeaf opens. Manual checks still work.</p>
-            </div>
-            <label class="settings-switch">
-              <input type="checkbox" id="autoUpdateChecks" ${local.autoUpdateChecks ? "checked" : ""} />
-              <span></span>
-            </label>
-          </section>
-          <section class="settings-group settings-toggle-row" aria-labelledby="joinSoundTitle">
-            <div>
-              <h3 id="joinSoundTitle">Join request sound</h3>
-              <p>Play a soft chime when someone asks to join your hosted session.</p>
-            </div>
-            <label class="settings-switch">
-              <input type="checkbox" id="joinRequestSound" ${local.joinRequestSoundEnabled ? "checked" : ""} />
-              <span></span>
-            </label>
-          </section>
+          <div class="settings-section" data-settings-panel="general" ${local.settingsSection === "general" ? "" : "hidden"}>
+            ${settingsGeneralMarkup()}
+          </div>
+          <div class="settings-section" data-settings-panel="models" ${local.settingsSection === "models" ? "" : "hidden"}>
+            ${settingsModelsMarkup()}
+          </div>
+          <div class="settings-section" data-settings-panel="providers" ${local.settingsSection === "providers" ? "" : "hidden"}>
+            ${settingsProvidersMarkup()}
+          </div>
+          <div class="settings-section" data-settings-panel="permissions" ${local.settingsSection === "permissions" ? "" : "hidden"}>
+            ${settingsPermissionsMarkup()}
+          </div>
         </div>
       </section>
     </div>
@@ -1161,14 +2229,26 @@ function showSettingsModal() {
   modal?.addEventListener("click", (event) => {
     if (event.target === modal) hideSettingsModal();
   });
-  modal?.querySelector("[data-close-settings]")?.addEventListener("click", hideSettingsModal);
-  modal?.querySelectorAll("[data-theme-option]").forEach((button) => {
+  modal?.querySelectorAll("[data-settings-section]").forEach((button) => {
     button.addEventListener("click", () => {
-      applyTheme(button.dataset.themeOption);
-      modal.querySelectorAll("[data-theme-option]").forEach((option) => {
-        option.classList.toggle("active", option === button);
+      local.settingsSection = button.dataset.settingsSection || "general";
+      modal.querySelectorAll("[data-settings-section]").forEach((tab) => tab.classList.toggle("active", tab === button));
+      modal.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+        panel.hidden = panel.dataset.settingsPanel !== local.settingsSection;
       });
     });
+  });
+  modal?.querySelector("[data-close-settings]")?.addEventListener("click", hideSettingsModal);
+  modal?.querySelector("#themeModeSwitch")?.addEventListener("click", (event) => {
+    const nextTheme = local.theme === "dark" ? "light" : "dark";
+    applyTheme(nextTheme);
+    const switcher = event.currentTarget;
+    const isDark = nextTheme === "dark";
+    switcher.classList.toggle("is-dark", isDark);
+    switcher.classList.toggle("is-light", !isDark);
+    switcher.setAttribute("aria-checked", isDark ? "true" : "false");
+    const label = switcher.querySelector("[data-theme-current]");
+    if (label) label.textContent = isDark ? "Dark mode" : "Light mode";
   });
   modal?.querySelector("#autoUpdateChecks")?.addEventListener("change", (event) => {
     setAutoUpdateChecks(event.currentTarget.checked);
@@ -1176,6 +2256,469 @@ function showSettingsModal() {
   modal?.querySelector("#joinRequestSound")?.addEventListener("change", (event) => {
     setJoinRequestSoundEnabled(event.currentTarget.checked);
   });
+  modal?.querySelector("#chooseModelFolder")?.addEventListener("click", chooseModelFolder);
+  modal?.querySelector("#downloadLocalModel")?.addEventListener("click", () => {
+    const next = aiModels().find((model) => modelStatus(model) !== "installed") || aiModels()[0];
+    if (next?.id) downloadModel(next.id);
+  });
+  modal?.querySelector("#bringYourOwnKey")?.addEventListener("click", () => showProviderDialog({ mode: "key" }));
+  modal?.querySelector("#configureCustomModel")?.addEventListener("click", () => showProviderDialog({ mode: "custom" }));
+  modal?.querySelector("#settingsModelSearch")?.addEventListener("input", (event) => {
+    local.settingsModelSearch = event.currentTarget.value;
+    showSettingsModal("models");
+    setTimeout(() => {
+      const input = document.querySelector("#settingsModelSearch");
+      input?.focus();
+      input?.setSelectionRange?.(input.value.length, input.value.length);
+    }, 0);
+  });
+  modal?.querySelectorAll("[data-ai-permission]").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const key = event.currentTarget.dataset.aiPermission;
+      if ((key === "yoloMode" && event.currentTarget.checked) || (key === "askBeforeEdits" && !event.currentTarget.checked)) {
+        const confirmed = confirm("YOLO mode reduces confirmations for AI file edits. Keep it off unless you are comfortable reviewing changes after they are made.");
+        if (!confirmed) {
+          syncAiPermissionInputs(modal);
+          return;
+        }
+      }
+      if (["fileManagement", "fileUploads", "shellCommands", "binaryFiles"].includes(key) && event.currentTarget.checked) {
+        const confirmed = confirm("This allows higher-risk AI requests to reach the active model. LocalLeaf will still keep host-side safety checks, but only enable this for projects you trust.");
+        if (!confirmed) {
+          event.currentTarget.checked = false;
+          return;
+        }
+      }
+      if (key === "yoloMode") {
+        setAiPermissionMode(event.currentTarget.checked ? "yolo" : "default");
+      } else if (key === "askBeforeEdits") {
+        setAiPermissionMode(event.currentTarget.checked ? "default" : "yolo");
+      } else {
+        local.aiPermissions[key] = event.currentTarget.checked;
+        saveAiPermissions();
+      }
+      syncAiPermissionInputs(modal);
+      if (route().view === "editor") refreshRightRailUi();
+    });
+  });
+  modal?.querySelectorAll("[data-download-model]").forEach((button) => button.addEventListener("click", () => downloadModel(button.dataset.downloadModel)));
+  modal?.querySelectorAll("[data-delete-model]").forEach((button) => button.addEventListener("click", () => deleteModel(button.dataset.deleteModel)));
+  modal?.querySelectorAll("[data-activate-model]").forEach((button) => button.addEventListener("click", () => activateModel(button.dataset.activateModel)));
+  modal?.querySelectorAll("[data-use-provider]").forEach((button) => {
+    button.addEventListener("click", () => useProviderModel(button.dataset.useProvider, button.dataset.useModel));
+  });
+  modal?.querySelectorAll("[data-connect-provider]").forEach((button) => {
+    button.addEventListener("click", () => showProviderDialog({ templateId: button.dataset.connectProvider, mode: "key" }));
+  });
+  modal?.querySelectorAll("[data-provider-enabled]").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      setProviderEnabled(event.currentTarget.dataset.providerEnabled, event.currentTarget.checked);
+      showSettingsModal(event.currentTarget.dataset.providerToggleScope === "models" ? "models" : "providers");
+    });
+  });
+  modal?.querySelectorAll("[data-model-enabled-provider]").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      setModelEnabled(event.currentTarget.dataset.modelEnabledProvider, event.currentTarget.dataset.modelEnabledId, event.currentTarget.checked);
+      showSettingsModal("models");
+    });
+  });
+  modal?.querySelectorAll("[data-toggle-provider-model-group]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleProviderModelGroup(button.dataset.toggleProviderModelGroup);
+      showSettingsModal("models");
+    });
+  });
+  modal?.querySelectorAll("[data-test-provider]").forEach((button) => {
+    button.addEventListener("click", () => testProviderConnection(button.dataset.testProvider, button.dataset.testModel));
+  });
+  modal?.querySelectorAll("[data-edit-provider]").forEach((button) => {
+    button.addEventListener("click", () => showProviderDialog({ providerId: button.dataset.editProvider, mode: "edit" }));
+  });
+  modal?.querySelectorAll("[data-delete-provider]").forEach((button) => {
+    button.addEventListener("click", () => deleteProvider(button.dataset.deleteProvider));
+  });
+}
+
+function providerFormRows(items, name, keyName, valueName) {
+  const rows = items.length ? items : [""];
+  return rows.map((item) => {
+    const key = typeof item === "string" ? item : item?.[keyName] || item?.id || item?.name || "";
+    const value = typeof item === "string" ? "" : item?.[valueName] || item?.value || "";
+    return `
+      <div class="provider-form-row" data-provider-row="${escapeHtml(name)}">
+        <input name="${escapeHtml(name)}-${escapeHtml(keyName)}" placeholder="${escapeHtml(keyName === "model" ? "Model name" : "Header")}" value="${escapeHtml(key)}" />
+        <input name="${escapeHtml(name)}-${escapeHtml(valueName)}" placeholder="${escapeHtml(valueName === "value" ? "Value" : "Alias")}" value="${escapeHtml(value)}" />
+        <button class="icon-button" type="button" data-remove-provider-row title="Remove row" aria-label="Remove row">x</button>
+      </div>
+    `;
+  }).join("");
+}
+
+function providerTemplateOptions(selectedId = "") {
+  const templates = aiState().providerTemplates || [];
+  return templates.map((template) => {
+    return `<option value="${escapeHtml(template.id)}" ${template.id === selectedId ? "selected" : ""}>${escapeHtml(template.name)}</option>`;
+  }).join("");
+}
+
+function showProviderDialog(options = {}) {
+  document.querySelector(".provider-modal-backdrop")?.remove();
+  local.providerDialogTest = null;
+  const provider = options.providerId
+    ? aiProviders().find((item) => item.id === options.providerId)
+    : options.templateId
+      ? aiProviders().find((item) => item.id === options.templateId)
+      : aiProviders().find((item) => item.id === "opencode-go") || null;
+  const title = options.mode === "key" ? "Connect Provider" : provider ? "Edit Provider" : "Configure Custom Model";
+  const shell = document.querySelector(".editor-shell") || app;
+  shell.insertAdjacentHTML("beforeend", `
+    <div class="settings-modal-backdrop provider-modal-backdrop" role="presentation">
+      <section class="settings-modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="providerDialogTitle">
+        <form id="providerForm">
+          <div class="settings-modal-head">
+            <div>
+              <h2 id="providerDialogTitle">${escapeHtml(title)}</h2>
+              <p>Connect an OpenCode-style provider and choose the models LocalLeaf can show in the picker.</p>
+            </div>
+            <button class="icon-button" data-close-provider type="button" title="Close provider dialog" aria-label="Close provider dialog">x</button>
+          </div>
+          <div class="provider-form-body">
+            <label>Provider preset
+              <select name="templateId">
+                <option value="">Custom Provider</option>
+                ${providerTemplateOptions(provider?.id || "")}
+              </select>
+            </label>
+            <label>Provider ID <input name="providerId" required value="${escapeHtml(provider?.id || "")}" placeholder="openai-compatible" /></label>
+            <label>Display name <input name="displayName" required value="${escapeHtml(provider?.name || "")}" placeholder="OpenAI Compatible" /></label>
+            <label>Base URL <input name="baseUrl" value="${escapeHtml(provider?.baseUrl || "")}" placeholder="https://api.example.com/v1" /></label>
+            <label>API key <input name="apiKey" type="password" value="" placeholder="${provider?.hasApiKey ? "Leave blank to keep saved key" : "Stored encrypted on this computer"}" /></label>
+            <section class="provider-form-section">
+              <div class="provider-form-section-head">
+                <strong>Models</strong>
+                <button class="btn" type="button" data-add-model-row>${uiGlyph("plus")} Add model</button>
+              </div>
+              <div class="provider-form-rows" data-provider-rows="models">
+                ${providerFormRows(provider?.models || ["default"], "model", "model", "alias")}
+              </div>
+            </section>
+            <section class="provider-form-section">
+              <div class="provider-form-section-head">
+                <strong>Optional headers</strong>
+                <button class="btn" type="button" data-add-header-row>${uiGlyph("plus")} Add header</button>
+              </div>
+              <div class="provider-form-rows" data-provider-rows="headers">
+                ${providerFormRows(provider?.headers || [], "header", "name", "value")}
+              </div>
+            </section>
+          </div>
+          <div class="provider-form-actions">
+            <span class="provider-dialog-test muted" id="providerDialogTest" aria-live="polite">Run test to verify</span>
+            <button class="btn" type="button" id="testProviderForm">Test connection</button>
+            <button class="btn btn-primary" type="submit">Save / Submit</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `);
+  const modal = document.querySelector(".provider-modal-backdrop");
+  const close = () => modal?.remove();
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) close();
+  });
+  modal?.querySelector("[data-close-provider]")?.addEventListener("click", close);
+  modal?.querySelector("[data-add-model-row]")?.addEventListener("click", () => addProviderFormRow("models"));
+  modal?.querySelector("[data-add-header-row]")?.addEventListener("click", () => addProviderFormRow("headers"));
+  modal?.querySelector('select[name="templateId"]')?.addEventListener("change", (event) => {
+    const template = aiProviders().find((item) => item.id === event.currentTarget.value);
+    if (!template) return;
+    modal.querySelector('input[name="providerId"]').value = template.id;
+    modal.querySelector('input[name="displayName"]').value = template.name;
+    modal.querySelector('input[name="baseUrl"]').value = template.baseUrl || "";
+    const modelRows = modal.querySelector('[data-provider-rows="models"]');
+    if (modelRows) modelRows.innerHTML = providerFormRows(template.models || [], "model", "model", "alias");
+    const headerRows = modal.querySelector('[data-provider-rows="headers"]');
+    if (headerRows) headerRows.innerHTML = providerFormRows([], "header", "name", "value");
+  });
+  modal?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-remove-provider-row]");
+    if (!button) return;
+    const rows = button.closest(".provider-form-rows");
+    if (rows?.children.length > 1) button.closest(".provider-form-row")?.remove();
+  });
+  modal?.querySelector("#testProviderForm")?.addEventListener("click", () => testProviderConnection("", "", formProviderPayload()));
+  modal?.querySelector("#providerForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveProviderFromDialog();
+  });
+}
+
+function addProviderFormRow(group) {
+  const rows = document.querySelector(`.provider-modal-backdrop [data-provider-rows="${group}"]`);
+  if (!rows) return;
+  const isModel = group === "models";
+  rows.insertAdjacentHTML("beforeend", `
+    <div class="provider-form-row" data-provider-row="${isModel ? "model" : "header"}">
+      <input name="${isModel ? "model-model" : "header-name"}" placeholder="${isModel ? "Model name" : "Header"}" />
+      <input name="${isModel ? "model-alias" : "header-value"}" placeholder="${isModel ? "Alias" : "Value"}" />
+      <button class="icon-button" type="button" data-remove-provider-row title="Remove row" aria-label="Remove row">x</button>
+    </div>
+  `);
+}
+
+function formProviderPayload() {
+  const form = document.querySelector("#providerForm");
+  if (!form) return { id: "", name: "", models: [], headers: [] };
+  const formData = new FormData(form);
+  const models = [...form.querySelectorAll('[data-provider-row="model"]')]
+    .map((row) => {
+      const id = row.querySelector('input[name="model-model"]')?.value.trim();
+      const name = row.querySelector('input[name="model-alias"]')?.value.trim() || id;
+      return id ? { id, name } : null;
+    })
+    .filter(Boolean);
+  const headers = [...form.querySelectorAll('[data-provider-row="header"]')]
+    .map((row) => ({
+      name: row.querySelector('input[name="header-name"]')?.value.trim(),
+      value: row.querySelector('input[name="header-value"]')?.value.trim()
+    }))
+    .filter((header) => header.name);
+  return {
+    id: String(formData.get("providerId") || "").trim(),
+    templateId: String(formData.get("templateId") || "").trim(),
+    name: String(formData.get("displayName") || "").trim(),
+    baseUrl: String(formData.get("baseUrl") || "").trim(),
+    apiKey: String(formData.get("apiKey") || "").trim(),
+    models: models.length ? models : [{ id: "default", name: "Default" }],
+    headers,
+    description: "Custom OpenAI-compatible provider.",
+    activate: true
+  };
+}
+
+async function saveProviderFromDialog() {
+  const provider = formProviderPayload();
+  if (!provider.id || !provider.name) {
+    showAppNotice("Provider ID and display name are required.", { type: "error", title: "Provider" });
+    return;
+  }
+  try {
+    const payload = { ...provider };
+    if (!payload.apiKey) delete payload.apiKey;
+    const next = await api("/api/ai/providers/save", { method: "POST", body: payload });
+    setProviderEnabled(provider.id, true);
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+    document.querySelector(".provider-modal-backdrop")?.remove();
+    showAppNotice(`${provider.name} saved.`, { type: "success", title: "Provider", timeoutMs: 3200 });
+    if (document.querySelector(".settings-modal-backdrop")) showSettingsModal("models");
+    else render();
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Provider" });
+  }
+}
+
+async function useProviderModel(providerId, modelId) {
+  try {
+    if (!providerId || providerId === "local" || providerId === "localleaf-local") {
+      await activateModel(modelId);
+      return;
+    }
+    const next = await api("/api/ai/providers/activate", { method: "POST", body: { providerId, modelId } });
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+    showAppNotice("Active AI model updated.", { type: "success", title: "Models", timeoutMs: 2600 });
+    if (document.querySelector(".settings-modal-backdrop")) showSettingsModal("models");
+    else refreshRightRailUi();
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Activate provider" });
+  }
+}
+
+function setProviderTestDisplay(providerId, result) {
+  const id = providerId || "form";
+  if (providerId) local.providerInlineTests[providerId] = result;
+  const slot = document.querySelector(`#providerDialogTest`) || document.querySelector(`[data-provider-test-slot="${CSS.escape(id)}"]`);
+  if (!slot) return;
+  slot.textContent = result.message || "";
+  slot.className = slot.id === "providerDialogTest"
+    ? `provider-dialog-test ${result.color || (result.ok ? "green" : "red")}`
+    : `provider-test-result ${result.color || (result.ok ? "green" : "red")}`;
+}
+
+async function testProviderConnection(providerId, modelId = "", providerPayload = null) {
+  if (providerId === "local" || providerId === "localleaf-local") {
+    setProviderTestDisplay(providerId, { color: "muted", message: "Local models are tested after download." });
+    return;
+  }
+  const payload = providerPayload || { providerId, modelId };
+  const testId = providerPayload?.id || providerId || "form";
+  local.providerTestBusy = testId;
+  setProviderTestDisplay(testId === "form" ? "" : testId, { color: "muted", message: "Testing connection..." });
+  try {
+    const result = await api("/api/ai/providers/test", { method: "POST", body: payload, timeoutMs: 30000 });
+    setProviderTestDisplay(result.providerId || testId, { ok: true, color: "green", message: result.message || "Connection ready." });
+    await refreshAiState();
+  } catch (error) {
+    setProviderTestDisplay(testId === "form" ? "" : testId, { ok: false, color: "red", message: error.message || "Connection failed." });
+    await refreshAiState();
+  } finally {
+    local.providerTestBusy = "";
+  }
+}
+
+async function deleteProvider(providerId) {
+  const provider = aiProviders().find((item) => item.id === providerId);
+  if (!provider) return;
+  if (!confirm(`Delete provider ${provider.name || provider.id}?`)) return;
+  try {
+    const next = await api("/api/ai/providers/delete", { method: "POST", body: { providerId } });
+    delete local.aiProviderEnabled[providerId];
+    Object.keys(local.aiModelEnabled).forEach((key) => {
+      if (key.startsWith(`${providerId}/`)) delete local.aiModelEnabled[key];
+    });
+    writeBooleanMap(AI_PROVIDER_ENABLE_STORAGE_KEY, local.aiProviderEnabled);
+    writeBooleanMap(AI_MODEL_ENABLE_STORAGE_KEY, local.aiModelEnabled);
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+    showSettingsModal("providers");
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Delete provider" });
+  }
+}
+
+async function refreshAiState() {
+  try {
+    const next = await api("/api/ai/models/status");
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+  } catch {
+    // AI models are host-only; guests and older servers can keep rendering without them.
+  }
+}
+
+async function chooseModelFolder() {
+  if (typeof window.localleafDesktop?.chooseModelFolder !== "function") {
+    showAppNotice("Folder picking is available in the desktop app.", { title: "Models" });
+    return;
+  }
+  const result = await window.localleafDesktop.chooseModelFolder();
+  if (result?.canceled || !result?.folderPath) return;
+  try {
+    const next = await api("/api/ai/models/storage", { method: "POST", body: { path: result.folderPath } });
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+    showSettingsModal("models");
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Model folder" });
+  }
+}
+
+async function downloadModel(modelId) {
+  if (!modelId) return;
+  local.modelActionBusy = modelId;
+  try {
+    const next = await api("/api/ai/models/download", { method: "POST", body: { modelId } });
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+    showAppNotice("Model download started.", { title: "Models", timeoutMs: 3200 });
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Model download" });
+  } finally {
+    local.modelActionBusy = "";
+    showSettingsModal("models");
+  }
+}
+
+async function deleteModel(modelId) {
+  if (!modelId || !confirm("Delete this local model from LocalLeafModel?")) return;
+  local.modelActionBusy = modelId;
+  try {
+    const next = await api("/api/ai/models/delete", { method: "POST", body: { modelId } });
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Delete model" });
+  } finally {
+    local.modelActionBusy = "";
+    showSettingsModal("models");
+  }
+}
+
+async function activateModel(modelId) {
+  if (!modelId) return;
+  local.modelActionBusy = modelId;
+  try {
+    const next = await api("/api/ai/models/activate", { method: "POST", body: { modelId } });
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Activate model" });
+  } finally {
+    local.modelActionBusy = "";
+    showSettingsModal("models");
+  }
+}
+
+function showInfoModal(kind) {
+  document.querySelector(".info-modal-backdrop")?.remove();
+  const isHelp = kind === "help";
+  const shell = document.querySelector(".editor-shell") || app;
+  const helpItems = [
+    ["Start collaborating", "Create or import a project, choose Host Online Session, then share the invite link after the tunnel is ready."],
+    ["Compile a project", "Open the editor and click Recompile. LocalLeaf tries bundled Tectonic, system Tectonic, latexmk, pdflatex, xelatex, and lualatex."],
+    ["Export work", "Use Export in the editor to download the source ZIP or the latest compiled PDF."],
+    ["Review AI edits", "AI Helper drafts file edits and lists them in Changes, where you can apply or reject each one."]
+  ];
+  shell.insertAdjacentHTML("beforeend", `
+    <div class="settings-modal-backdrop info-modal-backdrop" role="presentation">
+      <section class="settings-modal info-modal" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
+        <div class="settings-modal-head">
+          <div>
+            <h2 id="infoModalTitle">${isHelp ? "LocalLeaf Help" : "About LocalLeaf"}</h2>
+            <p>${isHelp ? "Fast answers for the flows you will use most." : "Private, host-powered LaTeX collaboration."}</p>
+          </div>
+          <button class="icon-button" data-close-info title="Close" aria-label="Close">x</button>
+        </div>
+        ${isHelp ? `
+          <div class="info-modal-body help-qa-list">
+            ${helpItems.map(([question, answer], index) => `
+              <details ${index === 0 ? "open" : ""}>
+                <summary>
+                  <span>${String(index + 1).padStart(2, "0")}</span>
+                  <strong>${escapeHtml(question)}</strong>
+                </summary>
+                <p>${escapeHtml(answer)}</p>
+              </details>
+            `).join("")}
+          </div>
+        ` : `
+          <div class="info-modal-body about-copy">
+            <div class="about-brand-card">
+              ${logoMark("about-brand-mark")}
+              <div>
+                <strong>LocalLeaf Host</strong>
+                <span>Overleaf-style editing, owned by the host computer.</span>
+              </div>
+            </div>
+            <p>LocalLeaf keeps LaTeX projects on the host machine while guests join from a browser to edit, chat, compile, and preview PDFs together.</p>
+            <div class="about-feature-grid">
+              <span>${uiGlyph("file")} Local project files</span>
+              <span>${uiGlyph("users")} Browser collaboration</span>
+              <span>${uiGlyph("compile")} PDF compilation</span>
+              <span>${uiGlyph("chat")} Project chat</span>
+            </div>
+            <a class="btn btn-primary about-website-link" href="${LOCALLEAF_SITE_URL}" target="_blank" rel="noopener">Open LocalLeaf website ${uiGlyph("external")}</a>
+          </div>
+        `}
+      </section>
+    </div>
+  `);
+  const modal = document.querySelector(".info-modal-backdrop");
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) modal.remove();
+  });
+  modal?.querySelector("[data-close-info]")?.addEventListener("click", () => modal.remove());
+}
+
+function showHelpModal() {
+  showInfoModal("help");
+}
+
+function showAboutModal() {
+  showInfoModal("about");
 }
 
 function joinView(code) {
@@ -2241,7 +3784,7 @@ function outlineTreeMarkup(outlineItems = [], currentTitle = "") {
         const active = currentTitle && item.title === currentTitle;
         return `
           <button class="outline-row ${active ? "active" : ""}" type="button" role="treeitem" style="--outline-depth:${item.level}">
-            <span class="outline-caret" aria-hidden="true">${hasChildren ? "⌄" : ""}</span>
+            <span class="outline-caret" aria-hidden="true">${hasChildren ? "âŒ„" : ""}</span>
             <span class="outline-title">${escapeHtml(item.title)}</span>
           </button>
         `;
@@ -2340,10 +3883,45 @@ function editorFormatToolbarMarkup() {
   `;
 }
 
+function searchStatusMarkup() {
+  const status = local.searchStatus || (local.searchLoading ? `${local.searchResults.length} found` : "");
+  return `
+    ${local.searchLoading ? `<span class="search-spinner" aria-hidden="true"></span>` : ""}
+    <span id="searchStatusText">${escapeHtml(status)}</span>
+  `;
+}
+
+function projectSearchResultsMarkup() {
+  if (local.searchScope !== "project") return "";
+  if (!local.searchQuery.trim()) {
+    return `<div class="project-search-empty">Search all text files in this project, including imported ZIP files.</div>`;
+  }
+  if (!local.searchResults.length) {
+    return `<div class="project-search-empty">${local.searchLoading ? "Searching project files..." : "No matches found."}</div>`;
+  }
+  return `
+    <div class="project-search-results" id="projectSearchResults" aria-label="Project search results">
+      ${local.searchResults.map((result, index) => `
+        <button type="button" class="project-search-result ${index === local.searchResultIndex ? "active" : ""}" data-search-result="${index}">
+          <span class="project-search-file">${escapeHtml(result.path)}</span>
+          <span class="project-search-meta">Line ${escapeHtml(result.line)}:${escapeHtml(result.column)}</span>
+          <span class="project-search-preview">${escapeHtml(result.preview || result.text || "")}</span>
+        </button>
+      `).join("")}
+      ${local.searchTruncated ? `<div class="project-search-empty">Showing the first ${PROJECT_SEARCH_MAX_RESULTS} matches.</div>` : ""}
+    </div>
+  `;
+}
+
 function editorSearchPanelMarkup() {
   if (!local.searchOpen) return "";
+  const projectScope = local.searchScope === "project";
   return `
     <section class="editor-search-popover" role="search" aria-label="Search and replace">
+      <div class="editor-search-scope" role="group" aria-label="Search scope">
+        <button type="button" class="${projectScope ? "active" : ""}" data-search-scope="project">All files</button>
+        <button type="button" class="${!projectScope ? "active" : ""}" data-search-scope="file">Current file</button>
+      </div>
       <div class="editor-search-fields">
         <div class="editor-search-input-row">
           <input id="editorSearchInput" value="${escapeHtml(local.searchQuery)}" placeholder="Search for" autocomplete="off" />
@@ -2351,16 +3929,19 @@ function editorSearchPanelMarkup() {
           <button class="search-toggle ${local.searchRegex ? "active" : ""}" id="searchRegex" title="Use regular expression" aria-label="Use regular expression">.*</button>
           <button class="search-toggle ${local.searchWholeWord ? "active" : ""}" id="searchWholeWord" title="Whole word" aria-label="Whole word">W</button>
         </div>
-        <input id="editorReplaceInput" value="${escapeHtml(local.searchReplace)}" placeholder="Replace with" autocomplete="off" />
+        ${projectScope
+          ? `<div class="project-search-note">All-files search opens matches across the project. Switch to Current file to replace text.</div>`
+          : `<input id="editorReplaceInput" value="${escapeHtml(local.searchReplace)}" placeholder="Replace with" autocomplete="off" />`}
       </div>
       <div class="editor-search-actions">
-        <button class="editor-tool-button" id="searchPrevious" title="Previous match" aria-label="Previous match">↑</button>
-        <button class="editor-tool-button" id="searchNext" title="Next match" aria-label="Next match">↓</button>
-        <button class="btn" id="replaceOne">Replace</button>
-        <button class="btn" id="replaceAll">Replace All</button>
-        <span class="search-status" id="searchStatus">${escapeHtml(local.searchStatus)}</span>
+        <button class="editor-tool-button" id="searchPrevious" title="Previous match" aria-label="Previous match">&uarr;</button>
+        <button class="editor-tool-button" id="searchNext" title="Next match" aria-label="Next match">&darr;</button>
+        <button class="btn" id="replaceOne" ${projectScope ? "disabled" : ""}>Replace</button>
+        <button class="btn" id="replaceAll" ${projectScope ? "disabled" : ""}>Replace All</button>
+        <span class="search-status" id="searchStatus">${searchStatusMarkup()}</span>
         <button class="editor-tool-button" id="closeSearchPanel" title="Close search" aria-label="Close search">x</button>
       </div>
+      ${projectSearchResultsMarkup()}
     </section>
   `;
 }
@@ -2669,6 +4250,8 @@ function editorMoreMenuMarkup(state, selection) {
       </div>
       <div class="editor-more-section">
         ${menuButton("settings", "Settings", "Theme and update checks", { icon: icon("settings") })}
+        ${menuButton("help", "Help", "Q&A and app guidance", { icon: icon("help") })}
+        ${menuButton("about", "About", "Website and project info", { icon: icon("info") })}
         ${updateCheckButtonMarkup("editorCheckUpdates", "Check for updates", "editor-more-update")}
         ${menuButton("set-main", "Set as main file", state.project.mainFile || "No main file", { disabled: !selection.canSetMain, icon: editorToolIcon("ref") })}
         <a class="editor-more-item" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" role="menuitem">
@@ -2693,6 +4276,64 @@ function editorMoreMenuMarkup(state, selection) {
   `;
 }
 
+function closeEditorMoreMenuInPlace() {
+  local.editorMoreMenuOpen = false;
+  document.querySelector(".editor-more-menu")?.remove();
+  const button = document.querySelector("#editorMoreButton");
+  button?.classList.remove("active");
+  button?.setAttribute("aria-expanded", "false");
+}
+
+function openEditorMoreMenuInPlace() {
+  const button = document.querySelector("#editorMoreButton");
+  if (!button || !local.appState?.project) {
+    local.editorMoreMenuOpen = true;
+    render();
+    return;
+  }
+  document.querySelector(".editor-more-menu")?.remove();
+  local.editorMoreMenuOpen = true;
+  button.classList.add("active");
+  button.setAttribute("aria-expanded", "true");
+  const fallbackFile = local.appState.project.mainFile || local.appState.project.files.find((item) => item.type === "text" || item.type === "image")?.path || "";
+  const selection = selectedFileState(local.selectedFile || fallbackFile);
+  button.insertAdjacentHTML("afterend", editorMoreMenuMarkup(local.appState, selection));
+  bindEditorMoreActions();
+}
+
+function bindEditorMoreActions() {
+  document.querySelectorAll("[data-editor-more-action]").forEach((button) => {
+    if (button.dataset.editorMoreBound === "1") return;
+    button.dataset.editorMoreBound = "1";
+    button.addEventListener("click", () => {
+      const action = button.dataset.editorMoreAction;
+      closeEditorMoreMenuInPlace();
+      if (action === "settings") {
+        showSettingsModal("general");
+        return;
+      }
+      if (action === "help") {
+        showHelpModal();
+        return;
+      }
+      if (action === "about") {
+        showAboutModal();
+        return;
+      }
+      if (action === "set-main") {
+        setMainFile();
+        return;
+      }
+      if (action === "toggle-files") setSidebarVisible(!local.sidebarVisible);
+      else if (action === "toggle-editor") toggleLayoutPane("source");
+      else if (action === "toggle-pdf") toggleLayoutPane("preview");
+      else if (action === "toggle-logs") toggleLayoutPane("logs");
+      else if (action === "toggle-chat") setRightRailVisible(!local.rightRailVisible);
+      render();
+    });
+  });
+}
+
 function chatHeaderMarkup() {
   const session = local.appState.session;
   const canShare = Boolean(session.inviteUrl);
@@ -2706,9 +4347,6 @@ function chatHeaderMarkup() {
         <button class="chat-share-button" id="shareInviteFromChat" title="${canShare ? "Copy invite link" : "Start a session first"}" aria-label="Copy invite link" ${canShare ? "" : "disabled"}>
           <span class="link-glyph" aria-hidden="true"></span>
           <span>Share</span>
-        </button>
-        <button class="icon-button chat-tool" id="hideChatRail" title="Hide chat" aria-label="Hide chat">
-          <span class="collapse-right-glyph" aria-hidden="true"></span>
         </button>
       </div>
     </div>
@@ -2729,6 +4367,746 @@ function chatMessageMarkup(message) {
       </div>
     </div>
   `;
+}
+
+function rightRailTabsMarkup() {
+  const tabs = [
+    ["chat", "Chat", ""],
+    ["ai", "AI Helper", ""],
+    ["changes", "Changes", aiPendingCount() ? String(aiPendingCount()) : ""]
+  ];
+  return `
+    <div class="right-rail-tabs" role="tablist" aria-label="Right rail">
+      ${tabs.map(([id, label, badge]) => `
+        <button class="right-rail-tab ${local.rightRailTab === id ? "active" : ""}" data-right-rail-tab="${escapeHtml(id)}" type="button">
+          <span>${escapeHtml(label)}</span>
+          ${badge ? `<b class="rail-tab-badge">${escapeHtml(badge)}</b>` : ""}
+        </button>
+      `).join("")}
+      <button class="icon-button chat-tool" id="hideChatRail" title="Hide right rail" aria-label="Hide right rail">
+        <span class="collapse-right-glyph" aria-hidden="true"></span>
+      </button>
+    </div>
+  `;
+}
+
+function chatRailPanelMarkup() {
+  const state = local.appState;
+  return `
+    <section class="chat-panel right-rail-panel ${local.rightRailTab === "chat" ? "active" : ""}" ${local.rightRailTab === "chat" ? "" : "hidden"}>
+      ${chatHeaderMarkup()}
+      <div class="chat-list">
+        ${state.chat.length ? state.chat.map(chatMessageMarkup).join("") : `<div class="chat-empty">No messages yet.</div>`}
+      </div>
+      <section class="users-panel chat-users-inline">
+        <div class="panel-head">Users (${state.session.users.length})</div>
+        <div class="users-list">
+          ${state.session.users.map(userRowMarkup).join("")}
+        </div>
+      </section>
+      <form class="chat-input" id="chatForm">
+        <input id="chatText" placeholder="Send a message" />
+        <button class="btn" style="height:30px">Send</button>
+      </form>
+    </section>
+  `;
+}
+
+function userRowMarkup(user) {
+  return `
+    <div class="user-row">
+      <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
+      <div>
+        <strong>${escapeHtml(user.name)}</strong><br />
+        <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` Â· ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
+      </div>
+      <span class="online-dot"></span>
+    </div>
+  `;
+}
+
+function selectedEditorText() {
+  const text = currentEditorText();
+  const selection = window.getSelection?.()?.toString?.() || "";
+  return selection && text.includes(selection) ? selection : "";
+}
+
+function aiProposalDiffMarkup(proposal) {
+  const hunks = Array.isArray(proposal.diffHunks) ? proposal.diffHunks : [];
+  if (hunks.length) {
+    const lines = hunks.flatMap((hunk) => hunk.lines || []).slice(0, 80);
+    return `
+      <pre class="ai-diff-preview">${lines.map((line) => {
+        const marker = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
+        return `<span class="diff-${escapeHtml(line.type || "context")}"><b>${marker}</b> ${escapeHtml(line.text || "")}</span>`;
+      }).join("\n") || `<span>Preview unavailable</span>`}</pre>
+    `;
+  }
+  const newText = String(proposal.newText || proposal.replacements?.[0]?.text || "");
+  const lines = newText.split(/\r?\n/).filter(Boolean).slice(-8);
+  return `
+    <pre class="ai-diff-preview">${lines.map((line) => `<span class="diff-added">+ ${escapeHtml(line)}</span>`).join("\n") || `<span>Preview unavailable</span>`}</pre>
+  `;
+}
+
+function proposalProviderLabel(proposal) {
+  const provider = proposal.provider?.name || proposal.providerName || "";
+  const model = proposal.modelId || proposal.modelName || "";
+  return [provider, model].filter(Boolean).join(" / ") || "Local fallback";
+}
+
+function aiApprovalCardMarkup(proposal) {
+  const status = proposal.status || "proposed";
+  const canApply = ["pending", "proposed"].includes(status);
+  return `
+    <article class="ai-change-card ai-approval-card ${escapeHtml(status)}" data-ai-proposal="${escapeHtml(proposal.id)}">
+      <div class="ai-change-head">
+        <div>
+          <strong>${escapeHtml(proposal.path || local.selectedFile || "Current file")}</strong>
+          <span>${escapeHtml(proposal.summary || "AI proposed a text edit.")}</span>
+        </div>
+        <b>${escapeHtml(status)}</b>
+      </div>
+      ${aiProposalDiffMarkup(proposal)}
+      <div class="ai-change-actions">
+        <button class="btn btn-primary" data-apply-ai-proposal="${escapeHtml(proposal.id)}" ${canApply ? "" : "disabled"}>Approve</button>
+        <button class="btn" data-reject-ai-proposal="${escapeHtml(proposal.id)}" ${canApply ? "" : "disabled"}>Reject</button>
+        <button class="btn" data-explain-ai-proposal="${escapeHtml(proposal.id)}">Explain</button>
+      </div>
+    </article>
+  `;
+}
+
+function aiHistoryCardMarkup(proposal) {
+  const status = proposal.status || "proposed";
+  return `
+    <article class="ai-change-card ai-history-card ${escapeHtml(status)}" data-ai-proposal="${escapeHtml(proposal.id)}">
+      <div class="ai-change-head">
+        <div>
+          <strong>${escapeHtml(proposal.path || "Current file")}</strong>
+          <span>${escapeHtml(proposal.summary || "AI proposed a text edit.")}</span>
+        </div>
+        <b>${escapeHtml(status)}</b>
+      </div>
+      <div class="ai-change-meta">
+        <span>${escapeHtml(proposalProviderLabel(proposal))}</span>
+        <span>${escapeHtml(formatAiTime(proposal.appliedAt || proposal.rejectedAt || proposal.createdAt))}</span>
+      </div>
+      ${proposal.userRequest ? `<p class="ai-change-request">${escapeHtml(proposal.userRequest)}</p>` : ""}
+      ${aiProposalDiffMarkup(proposal)}
+      <div class="ai-change-actions">
+        <button class="btn" data-open-ai-proposal="${escapeHtml(proposal.id)}">Open file</button>
+        <button class="btn" data-explain-ai-proposal="${escapeHtml(proposal.id)}">Explain</button>
+        <button class="btn" data-copy-ai-proposal="${escapeHtml(proposal.id)}">Copy diff</button>
+        <button class="btn" data-view-ai-proposal="${escapeHtml(proposal.id)}">View</button>
+      </div>
+    </article>
+  `;
+}
+
+function aiMessageApprovalCardsMarkup(message) {
+  const ids = Array.isArray(message.approvalCards) ? message.approvalCards : [];
+  const direct = Array.isArray(message.proposals) ? message.proposals : [];
+  const cards = ids.length
+    ? ids.map(findAiProposal).filter(Boolean)
+    : direct.filter((proposal) => proposal?.status === "proposed");
+  return cards.length ? `<div class="ai-message-approvals">${cards.map(aiApprovalCardMarkup).join("")}</div>` : "";
+}
+
+function aiMessageMarkup(message) {
+  return `
+    <div class="ai-message ai-message-${escapeHtml(message.role || "assistant")}">
+      <div class="ai-message-body">
+        <span class="ai-message-role">${message.role === "user" ? "You" : "LocalLeaf"}</span>
+        <p>${escapeHtml(message.message || "")}</p>
+        ${aiMessageApprovalCardsMarkup(message)}
+      </div>
+    </div>
+  `;
+}
+
+function aiWorkingMarkup() {
+  return `
+    <div class="ai-message ai-message-assistant ai-message-working" aria-live="polite">
+      <div class="ai-message-body">
+        <span class="ai-message-role">LocalLeaf</span>
+        <p><span class="ai-working-spinner" aria-hidden="true"></span>LocalLeaf is thinking<span class="ai-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
+      </div>
+    </div>
+  `;
+}
+
+function aiSessionActionStripMarkup() {
+  const session = currentAiSession();
+  const queueLabel = local.aiQueueingEnabled ? "Queueing on" : "Queueing off";
+  return `
+    <div class="ai-session-strip">
+      <button type="button" class="ai-session-strip-title" id="aiSessionStripButton" title="AI sessions" aria-label="AI sessions">
+        <span class="ai-strip-branch" aria-hidden="true"></span>
+        <span>${escapeHtml(session.title || "New session")}</span>
+        ${local.aiQueuedPrompts.length ? `<b>${local.aiQueuedPrompts.length} queued</b>` : ""}
+      </button>
+      <div class="ai-session-strip-actions">
+        <button type="button" class="ai-strip-action" id="aiSteerButton" title="Steer this session" aria-label="Steer this session">${editorToolIcon("edit")}<span>Steer</span></button>
+        <button type="button" class="ai-strip-action ai-strip-icon" id="deleteCurrentAiSession" title="Delete current session" aria-label="Delete current session">${editorToolIcon("delete")}</button>
+        <div class="ai-strip-more-wrap ${local.aiSessionMoreMenuOpen ? "open" : ""}">
+          <button type="button" class="ai-strip-action ai-strip-icon" id="aiSessionMoreButton" title="Session actions" aria-label="Session actions" aria-expanded="${local.aiSessionMoreMenuOpen ? "true" : "false"}">...</button>
+          ${local.aiSessionMoreMenuOpen ? `
+            <div class="ai-strip-menu" role="menu">
+              <button type="button" data-edit-current-ai-session role="menuitem">${editorToolIcon("edit")} Edit session name</button>
+              <button type="button" data-toggle-ai-queueing role="menuitem"><span class="ai-strip-queue-dot ${local.aiQueueingEnabled ? "on" : ""}" aria-hidden="true"></span>${local.aiQueueingEnabled ? "Turn off queueing" : "Turn on queueing"}</button>
+              <small>${escapeHtml(queueLabel)}</small>
+            </div>
+          ` : ""}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function aiSessionMenuMarkup() {
+  const sessions = local.aiSessions.slice(0, 8);
+  return `
+    <div class="ai-session-picker ${local.aiSessionMenuOpen ? "open" : ""}">
+      <button class="ai-session-plus" id="aiSessionMenuButton" type="button" title="AI sessions" aria-label="AI sessions" aria-expanded="${local.aiSessionMenuOpen ? "true" : "false"}">${uiGlyph("plus")}</button>
+      ${local.aiSessionMenuOpen ? `
+        <div class="ai-session-menu" role="menu">
+          <button type="button" class="ai-session-new" data-ai-session-new role="menuitem">${uiGlyph("plus")} New session</button>
+          <div class="ai-session-menu-label">Recent sessions</div>
+          ${sessions.map((session) => `
+            <div class="ai-session-menu-row ${session.id === local.aiCurrentSessionId ? "active" : ""}">
+              <button type="button" role="menuitem" data-ai-session="${escapeHtml(session.id)}">
+                <strong>${escapeHtml(session.title || "New session")}</strong>
+                <span>${new Date(session.updatedAt || session.createdAt || Date.now()).toLocaleDateString()}</span>
+              </button>
+              <button type="button" class="ai-session-delete" data-delete-ai-session="${escapeHtml(session.id)}" title="Delete session" aria-label="Delete ${escapeHtml(session.title || "session")}">x</button>
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function aiModelChipMarkup() {
+  const active = activeAiProviderModel();
+  const permissionLabel = local.aiPermissions.yoloMode ? "YOLO" : "Default";
+  const query = local.aiModelSearch.trim().toLowerCase();
+  const items = modelPickerItems().filter((item) => {
+    if (!query) return true;
+    return `${item.label} ${item.detail} ${item.providerName || ""}`.toLowerCase().includes(query);
+  });
+  const grouped = items.reduce((groups, item) => {
+    const key = item.providerName || item.detail || "Models";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+    return groups;
+  }, new Map());
+  return `
+    <div class="ai-model-picker ${local.aiModelPickerOpen ? "open" : ""}">
+      <button class="ai-model-chip" id="aiModelChip" type="button" aria-haspopup="menu" aria-expanded="${local.aiModelPickerOpen ? "true" : "false"}">
+        <span>${escapeHtml(active.providerName)}</span>
+        <strong>${escapeHtml(active.modelName)}</strong>
+      </button>
+      ${local.aiModelPickerOpen ? `
+        <div class="ai-model-menu" role="menu">
+          <div class="ai-model-menu-toolbar">
+            <input id="aiModelSearch" value="${escapeHtml(local.aiModelSearch)}" placeholder="Search models" autocomplete="off" />
+            <button type="button" data-open-provider-dialog title="Connect provider" aria-label="Connect provider">${uiGlyph("plus")}</button>
+            <button type="button" data-open-model-settings title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button>
+            <button type="button" data-close-ai-model-picker title="Close model picker" aria-label="Close model picker">x</button>
+          </div>
+          ${[...grouped.entries()].map(([providerName, providerItems]) => `
+            <div class="ai-model-menu-group">
+              <span class="ai-model-menu-provider">${escapeHtml(providerName)}</span>
+              ${providerItems.slice(0, 10).map((item) => {
+                const sameLocalProvider = ["local", "localleaf-local"].includes(active.providerId) && ["local", "localleaf-local"].includes(item.providerId);
+                const isActive = (active.providerId === item.providerId || sameLocalProvider) && active.modelId === item.modelId;
+                return `
+                  <button type="button" role="menuitem" data-picker-provider="${escapeHtml(item.providerId)}" data-picker-model="${escapeHtml(item.modelId)}" class="${isActive ? "active" : ""}">
+                    <strong>${escapeHtml(item.label)}</strong>
+                    ${isActive ? `<span class="ai-model-check" aria-hidden="true"></span>` : ""}
+                  </button>
+                `;
+              }).join("")}
+            </div>
+          `).join("") || `<div class="ai-model-empty">No models match.</div>`}
+        </div>
+      ` : ""}
+      <button type="button" id="aiPermissionModeButton" class="ai-permission-mode ${local.aiPermissions.yoloMode ? "is-yolo" : ""}" title="Switch AI write permission mode">${escapeHtml(permissionLabel)}</button>
+    </div>
+  `;
+}
+
+function aiHelperPanelMarkup() {
+  return `
+    <section class="ai-helper-panel right-rail-panel ${local.rightRailTab === "ai" ? "active" : ""}" ${local.rightRailTab === "ai" ? "" : "hidden"}>
+      <div class="panel-head ai-helper-head">
+        <div>
+          <strong>AI Helper</strong>
+        </div>
+        <button class="icon-button chat-tool" id="openAiSettings" title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button>
+      </div>
+      <div class="ai-chat-wrap">
+        <div class="ai-chat-list" id="aiChatList">
+          ${local.aiMessages.map(aiMessageMarkup).join("")}
+          ${local.aiBusy ? aiWorkingMarkup() : ""}
+        </div>
+        <button class="ai-scroll-latest ${local.aiChatNeedsJump ? "visible" : ""}" id="aiScrollLatest" type="button" title="Jump to latest" aria-label="Jump to latest" aria-hidden="${local.aiChatNeedsJump ? "false" : "true"}">${downArrowIcon()}</button>
+      </div>
+      ${aiSessionActionStripMarkup()}
+      <form class="ai-input-form" id="aiHelperForm">
+        <textarea id="aiPrompt" rows="2" placeholder="Ask AI Helper...">${escapeHtml(local.aiPrompt)}</textarea>
+        <div class="ai-composer-footer">
+          <div class="ai-composer-left">
+            ${aiSessionMenuMarkup()}
+            ${aiModelChipMarkup()}
+          </div>
+          <button class="btn btn-primary ai-send-button" ${local.aiBusy ? "disabled" : ""} title="Send" aria-label="Send">${local.aiBusy ? `<span class="ai-button-spinner" aria-hidden="true"></span>` : uiGlyph("upload")}</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function changesPanelMarkup() {
+  const items = aiHistoryItems();
+  return `
+    <section class="changes-panel right-rail-panel ${local.rightRailTab === "changes" ? "active" : ""}" ${local.rightRailTab === "changes" ? "" : "hidden"}>
+      <div class="panel-head">
+        <strong>Changes</strong>
+        <small>${items.length} AI proposal${items.length === 1 ? "" : "s"}</small>
+      </div>
+      <div class="change-history-list">
+        ${items.length ? items.map(aiHistoryCardMarkup).join("") : `<div class="chat-empty">AI change history will appear here after LocalLeaf proposes, applies, or rejects edits.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function rightRailMarkup() {
+  return `
+    <aside class="right-rail">
+      ${rightRailTabsMarkup()}
+      ${chatRailPanelMarkup()}
+      ${aiHelperPanelMarkup()}
+      ${changesPanelMarkup()}
+    </aside>
+  `;
+}
+
+function refreshRightRailUi() {
+  const rail = document.querySelector(".right-rail");
+  if (!rail || route().view !== "editor") {
+    render();
+    return;
+  }
+  const previousAiList = rail.querySelector(".ai-chat-list");
+  const aiScroll = previousAiList?.scrollTop || 0;
+  const shouldStickToLatest = local.aiForceScrollBottom || local.aiChatPinnedToBottom || isAiChatNearBottom(previousAiList);
+  const changesScroll = rail.querySelector(".change-history-list")?.scrollTop || 0;
+  rail.outerHTML = rightRailMarkup();
+  bindRightRailControls();
+  bindChatForm();
+  const nextAiList = document.querySelector(".ai-chat-list");
+  const nextChangesList = document.querySelector(".change-history-list");
+  if (nextAiList) {
+    if (local.rightRailTab === "ai" && shouldStickToLatest) {
+      requestAnimationFrame(() => scrollAiChatToBottom());
+    } else {
+      nextAiList.scrollTop = aiScroll;
+      requestAnimationFrame(() => setAiChatJumpVisible(!isAiChatNearBottom(nextAiList)));
+    }
+  }
+  if (nextChangesList) nextChangesList.scrollTop = changesScroll;
+  local.aiForceScrollBottom = false;
+}
+
+function setRightRailTab(tab) {
+  local.rightRailTab = ["chat", "ai", "changes"].includes(tab) ? tab : "chat";
+  localStorage.setItem("localleaf.rightRailTab", local.rightRailTab);
+  if (local.rightRailTab === "ai") local.aiForceScrollBottom = true;
+  refreshRightRailUi();
+}
+
+function findAiProposal(proposalId) {
+  for (const message of local.aiMessages) {
+    const proposal = (message.proposals || []).find((item) => item.id === proposalId);
+    if (proposal) return proposal;
+  }
+  return local.aiChangeHistory.find((item) => item.id === proposalId) || null;
+}
+
+function rememberAiProposal(proposal) {
+  if (!proposal?.id) return;
+  proposal.sessionId = proposal.sessionId || local.aiCurrentSessionId;
+  const existing = local.aiChangeHistory.findIndex((item) => item.id === proposal.id);
+  if (existing >= 0) local.aiChangeHistory.splice(existing, 1, proposal);
+  else local.aiChangeHistory.push(proposal);
+  local.aiChangeHistory = local.aiChangeHistory.slice(-50);
+}
+
+function setAiProposalStatus(proposalId, status, patch = {}) {
+  const proposal = findAiProposal(proposalId);
+  if (!proposal) return;
+  Object.assign(proposal, patch, { status });
+  rememberAiProposal(proposal);
+}
+
+function shouldAutoApplyAiProposal(proposal) {
+  if (!proposal || proposal.status !== "proposed") return false;
+  return proposal.approvalRequired === false || local.aiPermissions.yoloMode;
+}
+
+function isAiChatNearBottom(list) {
+  if (!list) return true;
+  return list.scrollHeight - list.scrollTop - list.clientHeight < 42;
+}
+
+function setAiChatJumpVisible(visible) {
+  local.aiChatNeedsJump = Boolean(visible);
+  const button = document.querySelector("#aiScrollLatest");
+  if (!button) return;
+  button.classList.toggle("visible", local.aiChatNeedsJump);
+  button.setAttribute("aria-hidden", local.aiChatNeedsJump ? "false" : "true");
+}
+
+function scrollAiChatToBottom({ smooth = false } = {}) {
+  const list = document.querySelector("#aiChatList") || document.querySelector(".ai-chat-list");
+  if (!list) return;
+  list.scrollTo({ top: list.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  local.aiChatPinnedToBottom = true;
+  setAiChatJumpVisible(false);
+}
+
+function bindAiChatScrollState() {
+  const list = document.querySelector("#aiChatList") || document.querySelector(".ai-chat-list");
+  if (!list) return;
+  const update = () => {
+    const nearBottom = isAiChatNearBottom(list);
+    local.aiChatPinnedToBottom = nearBottom;
+    setAiChatJumpVisible(!nearBottom);
+  };
+  list.addEventListener("scroll", update, { passive: true });
+  requestAnimationFrame(update);
+}
+
+async function askAiHelper(message) {
+  const prompt = String(message || local.aiPrompt || "").trim();
+  if (!prompt) return;
+  if (local.aiBusy) {
+    if (local.aiQueueingEnabled) {
+      local.aiQueuedPrompts.push(prompt);
+      local.aiPrompt = "";
+      local.aiForceScrollBottom = true;
+      refreshRightRailUi();
+      return;
+    }
+    showAppNotice("AI Helper is still working. Turn queueing on from the session menu to stack follow-up prompts.", { title: "AI Helper" });
+    return;
+  }
+  const activeModel = activeAiProviderModel();
+  local.aiPrompt = "";
+  local.aiBusy = true;
+  local.rightRailTab = "ai";
+  localStorage.setItem("localleaf.rightRailTab", "ai");
+  local.aiForceScrollBottom = true;
+  local.aiMessages.push({ id: `user-${Date.now()}`, role: "user", message: prompt });
+  syncCurrentAiSession(prompt);
+  refreshRightRailUi();
+  try {
+    const response = await api("/api/agent/message", {
+      method: "POST",
+      body: {
+        message: prompt,
+        path: local.selectedFile,
+        currentText: currentEditorText(),
+        selectedText: selectedEditorText(),
+        compileLogs: local.appState?.compile?.logs || [],
+        aiProviderId: activeModel.providerId || "",
+        aiModelId: activeModel.modelId || "",
+        aiPermissions: local.aiPermissions
+      }
+    });
+    const proposals = (response.proposals || []).map((proposal) => ({ ...proposal, status: proposal.status || "proposed", sessionId: local.aiCurrentSessionId }));
+    proposals.forEach(rememberAiProposal);
+    const visibleApprovalIds = [];
+    if (proposals.some(shouldAutoApplyAiProposal)) {
+      for (const proposal of proposals) {
+        try {
+          if (shouldAutoApplyAiProposal(proposal)) await approveAiProposal(proposal.id, { fromYolo: true, renderAfter: false });
+          else visibleApprovalIds.push(proposal.id);
+        } catch {
+          visibleApprovalIds.push(proposal.id);
+        }
+      }
+    } else {
+      visibleApprovalIds.push(...proposals.filter((proposal) => proposal.status === "proposed").map((proposal) => proposal.id));
+    }
+    local.aiMessages.push({
+      id: `assistant-${Date.now()}`,
+      role: "assistant",
+      message: response.reply || "I prepared a response.",
+      proposals,
+      approvalCards: visibleApprovalIds
+    });
+    syncCurrentAiSession(prompt);
+  } catch (error) {
+    local.aiMessages.push({
+      id: `assistant-error-${Date.now()}`,
+      role: "assistant",
+      message: error.message || "AI Helper could not respond."
+    });
+    syncCurrentAiSession(prompt);
+  } finally {
+    local.aiBusy = false;
+    local.aiForceScrollBottom = true;
+    refreshRightRailUi();
+    const queued = local.aiQueueingEnabled ? local.aiQueuedPrompts.shift() : "";
+    if (queued) setTimeout(() => askAiHelper(queued), 0);
+  }
+}
+
+async function approveAiProposal(proposalId, options = {}) {
+  const proposal = findAiProposal(proposalId);
+  if (!proposal) return;
+  try {
+    const result = await api("/api/agent/approval/approve", { method: "POST", body: { proposalId } });
+    setAiProposalStatus(proposalId, result.proposal?.status || "applied", result.proposal || {});
+    await loadState();
+    if (!local.selectedFile || proposal.path === local.selectedFile) {
+      local.selectedFile = proposal.path || local.selectedFile;
+      await loadSelectedFile();
+      updateEditorSourceUi();
+    }
+    if (options.fromYolo) {
+      local.aiMessages.push({
+        id: `assistant-auto-apply-${Date.now()}`,
+        role: "assistant",
+        message: `YOLO mode applied the approved-safe edit to ${proposal.path || "the current file"}.`
+      });
+    }
+  } catch (error) {
+    setAiProposalStatus(proposalId, "stale");
+    local.aiMessages.push({
+      id: `assistant-apply-error-${Date.now()}`,
+      role: "assistant",
+      message: error.message || "Could not apply the proposal."
+    });
+  } finally {
+    syncCurrentAiSession();
+    if (options.renderAfter !== false) refreshRightRailUi();
+  }
+}
+
+async function rejectAiProposal(proposalId) {
+  try {
+    const result = await api("/api/agent/approval/reject", { method: "POST", body: { proposalId } });
+    setAiProposalStatus(proposalId, result.proposal?.status || "rejected", result.proposal || {});
+  } catch (error) {
+    setAiProposalStatus(proposalId, "rejected");
+    local.aiMessages.push({
+      id: `assistant-reject-error-${Date.now()}`,
+      role: "assistant",
+      message: error.message || "Could not reject the proposal on the host."
+    });
+  } finally {
+    syncCurrentAiSession();
+    refreshRightRailUi();
+  }
+}
+
+function explainAiProposal(proposalId) {
+  const proposal = findAiProposal(proposalId);
+  if (!proposal) return;
+  local.aiMessages.push({
+    id: `assistant-explain-${Date.now()}`,
+    role: "assistant",
+    message: `${proposal.summary || "This change updates the selected text file."} It targets ${proposal.path || "the current file"} and is listed in Changes.`
+  });
+  syncCurrentAiSession();
+  refreshRightRailUi();
+}
+
+async function openAiProposalFile(proposalId) {
+  const proposal = findAiProposal(proposalId);
+  if (!proposal?.path) return;
+  local.selectedFile = proposal.path;
+  try {
+    await loadSelectedFile();
+    updateEditorSourceUi();
+    expandToFile(proposal.path);
+    local.rightRailTab = "changes";
+    render();
+  } catch (error) {
+    showAppNotice(error.message || "Could not open the proposal file.", { title: "Open file" });
+  }
+}
+
+function proposalDiffText(proposal) {
+  const hunks = Array.isArray(proposal?.diffHunks) ? proposal.diffHunks : [];
+  if (!hunks.length) return String(proposal?.newText || proposal?.replacements?.[0]?.text || "");
+  return hunks.flatMap((hunk) => (hunk.lines || []).map((line) => {
+    const marker = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
+    return `${marker} ${line.text || ""}`;
+  })).join("\n");
+}
+
+async function copyAiProposalDiff(proposalId) {
+  const proposal = findAiProposal(proposalId);
+  if (!proposal) return;
+  const text = proposalDiffText(proposal);
+  try {
+    await navigator.clipboard.writeText(text);
+    showAppNotice("Diff copied.", { title: "Changes" });
+  } catch {
+    showAppNotice("Could not copy the diff from this browser.", { title: "Changes" });
+  }
+}
+
+function bindRightRailControls() {
+  bindAiChatScrollState();
+  if (local.rightRailTab === "ai" && local.aiForceScrollBottom) {
+    requestAnimationFrame(() => {
+      scrollAiChatToBottom();
+      local.aiForceScrollBottom = false;
+    });
+  }
+  document.querySelectorAll("[data-right-rail-tab]").forEach((button) => {
+    button.addEventListener("click", () => setRightRailTab(button.dataset.rightRailTab));
+  });
+  document.querySelector("#openAiSettings")?.addEventListener("click", () => showSettingsModal("models"));
+  document.querySelectorAll("[data-open-model-settings]").forEach((button) => {
+    button.addEventListener("click", () => showSettingsModal("models"));
+  });
+  document.querySelector("#aiModelChip")?.addEventListener("click", () => {
+    local.aiModelPickerOpen = !local.aiModelPickerOpen;
+    local.aiSessionMoreMenuOpen = false;
+    refreshRightRailUi();
+  });
+  document.querySelector("#aiPermissionModeButton")?.addEventListener("click", () => {
+    toggleAiPermissionMode();
+    local.aiForceScrollBottom = false;
+    syncAiPermissionInputs(document);
+    refreshRightRailUi();
+  });
+  document.querySelector("#aiScrollLatest")?.addEventListener("click", () => scrollAiChatToBottom({ smooth: true }));
+  document.querySelector("#aiModelSearch")?.addEventListener("input", (event) => {
+    local.aiModelSearch = event.currentTarget.value;
+    refreshRightRailUi();
+    setTimeout(() => {
+      const input = document.querySelector("#aiModelSearch");
+      input?.focus();
+      input?.setSelectionRange?.(input.value.length, input.value.length);
+    }, 0);
+  });
+  document.querySelectorAll("[data-picker-provider]").forEach((button) => {
+    button.addEventListener("click", () => useProviderModel(button.dataset.pickerProvider, button.dataset.pickerModel));
+  });
+  document.querySelectorAll("[data-open-provider-dialog]").forEach((button) => {
+    button.addEventListener("click", () => {
+      local.aiModelPickerOpen = false;
+      refreshRightRailUi();
+      showProviderDialog({ mode: "key" });
+    });
+  });
+  document.querySelector("[data-close-ai-model-picker]")?.addEventListener("click", () => {
+    local.aiModelPickerOpen = false;
+    refreshRightRailUi();
+  });
+  document.querySelectorAll("[data-ai-quick]").forEach((button) => {
+    button.addEventListener("click", () => askAiHelper(button.dataset.aiQuick));
+  });
+  document.querySelector("#aiSessionMenuButton")?.addEventListener("click", () => {
+    local.aiSessionMenuOpen = !local.aiSessionMenuOpen;
+    local.aiSessionMoreMenuOpen = false;
+    refreshRightRailUi();
+  });
+  document.querySelector("#aiSessionStripButton")?.addEventListener("click", () => {
+    local.aiSessionMenuOpen = !local.aiSessionMenuOpen;
+    local.aiSessionMoreMenuOpen = false;
+    refreshRightRailUi();
+  });
+  document.querySelector("#aiSteerButton")?.addEventListener("click", () => {
+    const prompt = document.querySelector("#aiPrompt");
+    prompt?.focus();
+    prompt?.setSelectionRange?.(prompt.value.length, prompt.value.length);
+  });
+  document.querySelector("#deleteCurrentAiSession")?.addEventListener("click", () => deleteAiSession(local.aiCurrentSessionId, { keepMenu: false }));
+  document.querySelector("#aiSessionMoreButton")?.addEventListener("click", () => {
+    local.aiSessionMoreMenuOpen = !local.aiSessionMoreMenuOpen;
+    local.aiSessionMenuOpen = false;
+    refreshRightRailUi();
+  });
+  document.querySelector("[data-edit-current-ai-session]")?.addEventListener("click", renameCurrentAiSession);
+  document.querySelector("[data-toggle-ai-queueing]")?.addEventListener("click", () => {
+    setAiQueueingEnabled(!local.aiQueueingEnabled);
+    local.aiSessionMoreMenuOpen = false;
+    refreshRightRailUi();
+  });
+  document.querySelector("[data-ai-session-new]")?.addEventListener("click", startNewAiSession);
+  document.querySelectorAll("[data-ai-session]").forEach((button) => {
+    button.addEventListener("click", () => switchAiSession(button.dataset.aiSession));
+  });
+  document.querySelectorAll("[data-delete-ai-session]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteAiSession(button.dataset.deleteAiSession);
+    });
+  });
+  document.querySelector("#aiPrompt")?.addEventListener("input", (event) => {
+    local.aiPrompt = event.currentTarget.value;
+  });
+  document.querySelector("#aiPrompt")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      askAiHelper();
+    }
+  });
+  document.querySelector("#aiHelperForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    askAiHelper();
+  });
+  document.querySelectorAll("[data-apply-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => approveAiProposal(button.dataset.applyAiProposal));
+  });
+  document.querySelectorAll("[data-reject-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => rejectAiProposal(button.dataset.rejectAiProposal));
+  });
+  document.querySelectorAll("[data-explain-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => explainAiProposal(button.dataset.explainAiProposal));
+  });
+  document.querySelectorAll("[data-focus-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      local.rightRailTab = "ai";
+      localStorage.setItem("localleaf.rightRailTab", "ai");
+      refreshRightRailUi();
+    });
+  });
+  document.querySelectorAll("[data-open-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => openAiProposalFile(button.dataset.openAiProposal));
+  });
+  document.querySelectorAll("[data-copy-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => copyAiProposalDiff(button.dataset.copyAiProposal));
+  });
+  document.querySelectorAll("[data-view-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      local.rightRailTab = "changes";
+      localStorage.setItem("localleaf.rightRailTab", "changes");
+      refreshRightRailUi();
+    });
+  });
+}
+
+function bindChatForm() {
+  document.querySelector("#chatForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = document.querySelector("#chatText");
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+    await api("/api/chat", { method: "POST", body: { author: local.userName, message } });
+  });
 }
 
 function hideExportModal() {
@@ -2830,15 +5208,17 @@ function editorView() {
   const isCompiling = state.compile.status === "running";
   const editorSurface = editorSurfaceMarkup(file, selection.selectedMeta);
   const preview = compiledPreviewMarkup();
+  const hostBackButton = isGuestClient() ? "" : `
+            <button class="icon-button editor-back-button" id="backToProject" title="Back" aria-label="Back">
+              <span class="chevron-left" aria-hidden="true"></span>
+            </button>`;
 
   return `
     <section class="${editorShellClasses()}" style="${editorInlineStyle()}">
       <header class="editor-topbar editor-topbar-v11">
         <div class="editor-primary-row">
           <div class="toolbar-actions">
-            <button class="icon-button editor-back-button" id="backToProject" title="Back" aria-label="Back">
-              <span class="chevron-left" aria-hidden="true"></span>
-            </button>
+            ${hostBackButton}
             <button class="icon-button editor-more-button ${local.editorMoreMenuOpen ? "active" : ""}" id="editorMoreButton" title="More editor actions" aria-label="More editor actions" aria-expanded="${local.editorMoreMenuOpen ? "true" : "false"}">
               ${editorToolIcon("menu")}
             </button>
@@ -2850,7 +5230,7 @@ function editorView() {
           </div>
           <div class="editor-title-block">
             <h1>${escapeHtml(state.project.name)}</h1>
-            <span class="editor-subtitle">Main: ${escapeHtml(state.project.mainFile || "none")} · ${escapeHtml(local.saveStatus)}</span>
+            <span class="editor-subtitle">Main: ${escapeHtml(state.project.mainFile || "none")} Â· ${escapeHtml(local.saveStatus)}</span>
           </div>
             <div class="toolbar-actions editor-run-actions">
               <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling ? "disabled" : ""}>
@@ -2924,33 +5304,7 @@ function editorView() {
         </section>
 
         <div class="right-rail-resizer" id="rightRailResizer" title="Resize chat panel"></div>
-        <aside class="right-rail">
-          <section class="chat-panel">
-            ${chatHeaderMarkup()}
-            <div class="chat-list">
-              ${state.chat.length ? state.chat.map(chatMessageMarkup).join("") : `<div class="chat-empty">No messages yet.</div>`}
-            </div>
-            <form class="chat-input" id="chatForm">
-              <input id="chatText" placeholder="Send a message" />
-              <button class="btn" style="height:30px">Send</button>
-            </form>
-          </section>
-          <section class="users-panel">
-            <div class="panel-head">Users (${state.session.users.length})</div>
-            <div class="users-list">
-              ${state.session.users.map((user) => `
-                <div class="user-row">
-                  <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
-                  <div>
-                    <strong>${escapeHtml(user.name)}</strong><br />
-                    <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` · ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
-                  </div>
-                  <span class="online-dot"></span>
-                </div>
-              `).join("")}
-            </div>
-          </section>
-        </aside>
+        ${rightRailMarkup()}
       </div>
 
         <footer class="log-dock">
@@ -2971,6 +5325,8 @@ function editorView() {
 
 async function loadState() {
   local.appState = await api("/api/state");
+  syncAiProposalsFromAppState();
+  if (!isGuestClient()) rememberRecentProject(local.appState.project);
   if (!local.guestToken && !new URLSearchParams(location.search).get("name")) {
     const hostUser = local.appState.session.users.find((user) => user.role === "host");
     if (hostUser?.name) local.userName = hostUser.name;
@@ -2996,8 +5352,24 @@ async function loadSelectedFile() {
 
 function bindCommon() {
   document.querySelector("#goHome")?.addEventListener("click", () => setView("home"));
+  document.querySelector("#railCollapse")?.addEventListener("click", () => {
+    local.hostRailCollapsed = !local.hostRailCollapsed;
+    localStorage.setItem("localleaf.hostRailCollapsed", local.hostRailCollapsed ? "1" : "0");
+    render();
+  });
   document.querySelector("#railHome")?.addEventListener("click", () => setView("home"));
   document.querySelector("#railSession")?.addEventListener("click", () => setView("session"));
+  document.querySelector("#railRecent")?.addEventListener("click", () => {
+    setView("home");
+    setTimeout(() => document.querySelector(".home-current-panel")?.scrollIntoView({ block: "start", behavior: "smooth" }), 0);
+  });
+  document.querySelector("#railTemplates")?.addEventListener("click", () => {
+    showAppNotice("Templates are coming soon.", { title: "Templates", detail: "The starter project remains available through New Project." });
+  });
+  document.querySelector("#railModels")?.addEventListener("click", () => showSettingsModal("models"));
+  document.querySelector("#railSettings")?.addEventListener("click", () => showSettingsModal());
+  document.querySelector("#railHelp")?.addEventListener("click", showHelpModal);
+  document.querySelector("#railAbout")?.addEventListener("click", showAboutModal);
   document.querySelector("#goBackHome")?.addEventListener("click", goBackHome);
 }
 
@@ -3016,6 +5388,12 @@ function goBackHome() {
 
 function bindHome() {
   document.querySelector("#openCurrentCard")?.addEventListener("click", () => setView("project"));
+  document.querySelector("#homeOpenModels")?.addEventListener("click", () => showSettingsModal("models"));
+  document.querySelector("#homeBringKey")?.addEventListener("click", () => showProviderDialog({ mode: "key" }));
+  document.querySelector("#homeCustomModel")?.addEventListener("click", () => showProviderDialog({ mode: "custom" }));
+  document.querySelectorAll("[data-open-recent]").forEach((button) => {
+    button.addEventListener("click", () => openRecentProject(button.dataset.openRecent));
+  });
   document.querySelector("#newProject")?.addEventListener("click", createNewProject);
   document.querySelector("#importZip")?.addEventListener("click", () => importZipProject());
   document.querySelector("#importFiles")?.addEventListener("click", openHomeImportPicker);
@@ -3024,9 +5402,24 @@ function bindHome() {
   bindHomeImportTray();
 }
 
+async function openRecentProject(projectRoot) {
+  if (!projectRoot) return;
+  try {
+    local.appState = await api("/api/project/open", { method: "POST", body: { path: projectRoot } });
+    rememberRecentProject(local.appState.project);
+    local.selectedFile = local.appState.project.mainFile;
+    expandToFile(local.selectedFile);
+    await loadSelectedFile();
+    setView("project");
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Could not open project" });
+  }
+}
+
 async function createNewProject() {
   try {
     local.appState = await api("/api/project/new", { method: "POST", body: {} });
+    rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
     await loadSelectedFile();
@@ -3050,6 +5443,7 @@ async function openProjectPrompt() {
   if (!input) return;
   try {
     local.appState = await api("/api/project/open", { method: "POST", body: { path: input } });
+    rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
     await loadSelectedFile();
@@ -3104,10 +5498,21 @@ function openHomeImportPicker() {
 
 function setHomeImportFiles(fileList) {
   const files = [...(fileList || [])].filter((file) => file?.name);
+  const unsupported = unsupportedProjectFiles(files);
   local.homeImportFiles = files;
-  local.homeImportStatus = files.length ? "" : "No files were selected.";
+  local.homeImportStatus = files.length
+    ? unsupported.length
+      ? unsupportedFilesMessage(unsupported)
+      : ""
+    : "No files were selected.";
   local.homeImportDragActive = false;
   render();
+  if (unsupported.length) {
+    showImportError(
+      unsupportedFilesMessage(unsupported),
+      "LocalLeaf supports LaTeX source/support files, bibliography/data files, and image/PDF assets."
+    );
+  }
 }
 
 function arrayBufferToBase64(buffer) {
@@ -3125,7 +5530,24 @@ async function importStagedHomeFiles() {
   if (!files.length || local.homeImportBusy) return;
   const zipFiles = files.filter(isZipImportFile);
   if (zipFiles.length && files.length > 1) {
-    local.homeImportStatus = "Select a ZIP by itself, or choose loose project files without a ZIP.";
+    showImportError("Select a ZIP by itself, or choose loose project files without a ZIP.");
+    render();
+    return;
+  }
+  const unsupported = unsupportedProjectFiles(files);
+  if (unsupported.length) {
+    showImportError(
+      unsupportedFilesMessage(unsupported),
+      "Remove unsupported files, then try the import again."
+    );
+    render();
+    return;
+  }
+  if (!zipFiles.length && !files.some((file) => /\.tex$/i.test(stagedImportPath(file)))) {
+    showImportError(
+      "Imported files must include at least one .tex file.",
+      "Add the main LaTeX source file, then import the group again."
+    );
     render();
     return;
   }
@@ -3163,6 +5585,7 @@ async function importStagedHomeFiles() {
         files: payloadFiles
       })
     });
+    rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
     await loadSelectedFile();
@@ -3171,7 +5594,7 @@ async function importStagedHomeFiles() {
     local.saveStatus = "Imported files";
     setView("project");
   } catch (error) {
-    local.homeImportStatus = error.message;
+    showImportError(error.message);
     render();
   } finally {
     local.homeImportBusy = false;
@@ -3223,6 +5646,7 @@ async function importZipFile(file) {
       },
       rawBody: buffer
     });
+    rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
     await loadSelectedFile();
@@ -3232,11 +5656,11 @@ async function importZipFile(file) {
     setView("project");
   } catch (error) {
     if (route().view === "home") {
-      local.homeImportStatus = error.message;
+      showImportError(error.message, isZipImportFile(file) ? "Make sure the archive contains at least one .tex file." : "");
       render();
       return;
     }
-    alert(error.message);
+    showImportError(error.message, isZipImportFile(file) ? "Make sure the archive contains at least one .tex file." : "");
   }
 }
 
@@ -3969,6 +6393,7 @@ function mountVisualRawEditors(host, getText, handleInput, documentNode) {
       filePath: local.selectedFile,
       suggestions: local.editorSuggestions || {},
       visibleLineBreaks: false,
+      onSearch: openEditorSearchPanel,
       onChange: () => {
         syncVisualRawFallback(block);
         markEditorChanged(getText());
@@ -4003,6 +6428,7 @@ function mountCodeEditor() {
     onChange: (text) => markEditorChanged(text),
     onSave: saveAndCompile,
     onCompile: compile,
+    onSearch: openEditorSearchPanel,
     onFocus: () => {
       local.editingNow = true;
     },
@@ -4329,6 +6755,38 @@ function createAppSearchRegex(query, options = {}) {
   }
 }
 
+function lineInfoForSearchIndex(text, index) {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, index - 1)) + 1;
+  const lineEnd = text.indexOf("\n", index);
+  const before = text.slice(0, index);
+  const rawLine = text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd);
+  return {
+    line: before.split("\n").length,
+    column: index - lineStart + 1,
+    preview: rawLine.trim().slice(0, 260) || rawLine.slice(0, 260)
+  };
+}
+
+function searchTextMatches(text, query, options = {}) {
+  const regex = createAppSearchRegex(query, options);
+  if (!regex) return [];
+  const matches = [];
+  let match;
+  while ((match = regex.exec(String(text || "")))) {
+    if (!match[0]) {
+      regex.lastIndex += 1;
+      continue;
+    }
+    matches.push({
+      from: match.index,
+      to: match.index + match[0].length,
+      text: match[0],
+      ...lineInfoForSearchIndex(text, match.index)
+    });
+  }
+  return matches;
+}
+
 function replaceWithRegex(text, query, replacement, options = {}) {
   const regex = createAppSearchRegex(query, options);
   if (!regex) return { text, count: 0 };
@@ -4428,12 +6886,177 @@ function updateSearchStatus(result, action = "find") {
   else if (!result.found) local.searchStatus = "No matches";
   else local.searchStatus = `${result.index || 1} of ${result.total}`;
   const status = document.querySelector("#searchStatus");
-  if (status) status.textContent = local.searchStatus;
+  if (status) status.innerHTML = searchStatusMarkup();
+}
+
+function updateProjectSearchStatus() {
+  const total = local.searchResults.length;
+  if (!local.searchQuery.trim()) local.searchStatus = "";
+  else if (local.searchLoading) local.searchStatus = `${total} found`;
+  else if (!total) local.searchStatus = "No matches";
+  else local.searchStatus = `${Math.max(local.searchResultIndex + 1, 1)} of ${total}`;
+}
+
+function bindProjectSearchResults() {
+  document.querySelectorAll("[data-search-result]").forEach((button) => {
+    button.addEventListener("click", () => {
+      jumpToProjectSearchResult(Number(button.dataset.searchResult || 0));
+    });
+  });
+}
+
+function updateSearchPanelDynamicState() {
+  updateProjectSearchStatus();
+  const status = document.querySelector("#searchStatus");
+  if (status) status.innerHTML = searchStatusMarkup();
+  const results = document.querySelector("#projectSearchResults");
+  const empty = document.querySelector(".project-search-empty");
+  const markup = projectSearchResultsMarkup();
+  if (results || empty) {
+    const container = results || empty;
+    container.outerHTML = markup;
+  }
+  document.querySelectorAll(".project-search-result").forEach((button) => {
+    button.classList.toggle("active", Number(button.dataset.searchResult || -1) === local.searchResultIndex);
+  });
+  document.querySelector(".project-search-result.active")?.scrollIntoView({ block: "nearest" });
+  bindProjectSearchResults();
+}
+
+function openEditorSearchPanel() {
+  local.searchOpen = true;
+  local.tablePickerOpen = false;
+  local.editorStyleMenuOpen = false;
+  refreshEditorToolbarPanels();
+  if (local.searchScope === "project") scheduleProjectSearch(0);
+  setTimeout(() => {
+    const input = document.querySelector("#editorSearchInput");
+    input?.focus();
+    input?.select();
+  }, 0);
+}
+
+function setSearchScope(scope) {
+  local.searchScope = scope === "file" ? "file" : "project";
+  localStorage.setItem(SEARCH_SCOPE_STORAGE_KEY, local.searchScope);
+  local.visualSearchIndex = 0;
+  local.searchResultIndex = -1;
+  local.searchResults = [];
+  local.searchTruncated = false;
+  clearTimeout(local.searchTimer);
+  local.searchRunId += 1;
+  local.searchLoading = false;
+  local.searchStatus = "";
+  refreshEditorToolbarPanels();
+  if (local.searchScope === "project") scheduleProjectSearch(0);
+}
+
+function scheduleProjectSearch(delay = 180) {
+  clearTimeout(local.searchTimer);
+  local.searchRunId += 1;
+  const runId = local.searchRunId;
+  local.searchResults = [];
+  local.searchResultIndex = -1;
+  local.searchTruncated = false;
+  local.searchLoading = Boolean(local.searchQuery.trim());
+  updateSearchPanelDynamicState();
+  if (!local.searchLoading) return;
+  local.searchTimer = setTimeout(() => runProjectSearch(runId), delay);
+}
+
+async function runProjectSearch(runId) {
+  const query = local.searchQuery.trim();
+  if (!query || local.searchScope !== "project" || runId !== local.searchRunId) return;
+  const options = activeSearchOptions();
+  const files = (local.appState?.project?.files || [])
+    .filter((file) => file.type === "text" && Number(file.size || 0) <= PROJECT_SEARCH_MAX_FILE_BYTES)
+    .sort((left, right) => left.path.localeCompare(right.path));
+
+  try {
+    for (const file of files) {
+      if (runId !== local.searchRunId || local.searchScope !== "project") return;
+      let content = "";
+      if (file.path === local.selectedFile) {
+        content = currentEditorText();
+      } else {
+        const response = await api(`/api/file?path=${encodeURIComponent(file.path)}`, { timeoutMs: 12000 });
+        content = response.content || "";
+      }
+      const matches = searchTextMatches(content, query, options).slice(0, PROJECT_SEARCH_MAX_RESULTS_PER_FILE);
+      if (matches.length) {
+        const remaining = PROJECT_SEARCH_MAX_RESULTS - local.searchResults.length;
+        local.searchResults.push(...matches.slice(0, remaining).map((match) => ({
+          ...match,
+          path: file.path
+        })));
+        if (matches.length > remaining || matches.length >= PROJECT_SEARCH_MAX_RESULTS_PER_FILE) {
+          local.searchTruncated = true;
+        }
+        if (local.searchResults.length >= PROJECT_SEARCH_MAX_RESULTS) {
+          local.searchTruncated = true;
+          break;
+        }
+      }
+      updateSearchPanelDynamicState();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  } catch (error) {
+    if (runId === local.searchRunId) {
+      local.searchStatus = error.message || "Search failed";
+    }
+  } finally {
+    if (runId === local.searchRunId) {
+      local.searchLoading = false;
+      updateSearchPanelDynamicState();
+    }
+  }
+}
+
+async function jumpToProjectSearchResult(index) {
+  const results = local.searchResults;
+  if (!results.length) {
+    updateSearchStatus({ found: false, total: 0 });
+    return;
+  }
+  const nextIndex = (index + results.length) % results.length;
+  local.searchResultIndex = nextIndex;
+  const result = results[nextIndex];
+  updateSearchPanelDynamicState();
+  if (result.path !== local.selectedFile) {
+    await selectProjectFile(result.path);
+  }
+  requestAnimationFrame(() => {
+    if (!local.codeEditor && local.editorMode !== "code") {
+      setEditorMode("code");
+    }
+    local.codeEditor?.selectRange?.(result.from, result.to);
+    updateSearchPanelDynamicState();
+  });
+}
+
+function runProjectSearchNavigation(direction = "next") {
+  if (!local.searchQuery.trim()) {
+    updateSearchStatus({ found: false, total: 0 });
+    return;
+  }
+  if (!local.searchResults.length) {
+    scheduleProjectSearch(0);
+    return;
+  }
+  const offset = direction === "prev" ? -1 : 1;
+  const start = local.searchResultIndex < 0
+    ? direction === "prev" ? local.searchResults.length : -1
+    : local.searchResultIndex;
+  jumpToProjectSearchResult(start + offset);
 }
 
 function runEditorSearch(direction = "next") {
   if (!local.searchQuery) {
     updateSearchStatus({ found: false, total: 0 });
+    return;
+  }
+  if (local.searchScope === "project") {
+    runProjectSearchNavigation(direction);
     return;
   }
   const result = local.codeEditor
@@ -4444,6 +7067,11 @@ function runEditorSearch(direction = "next") {
 
 function runEditorReplace(all = false) {
   if (!local.searchQuery) return;
+  if (local.searchScope === "project") {
+    local.searchStatus = "Switch to File to replace";
+    updateSearchPanelDynamicState();
+    return;
+  }
   const options = activeSearchOptions();
   if (local.codeEditor) {
     const result = all
@@ -4469,6 +7097,9 @@ function runEditorReplace(all = false) {
 
 function closeEditorSearchPanel() {
   if (!local.searchOpen) return false;
+  clearTimeout(local.searchTimer);
+  local.searchRunId += 1;
+  local.searchLoading = false;
   local.searchOpen = false;
   refreshEditorToolbarPanels();
   local.codeEditor?.focus?.();
@@ -4734,31 +7365,12 @@ function bindEditor() {
   document.querySelector("#compileButton")?.addEventListener("click", compile);
   document.querySelector("#exportButton")?.addEventListener("click", showExportModal);
   document.querySelector("#editorMoreButton")?.addEventListener("click", () => {
-    local.editorMoreMenuOpen = !local.editorMoreMenuOpen;
-    render();
+    if (local.editorMoreMenuOpen) closeEditorMoreMenuInPlace();
+    else openEditorMoreMenuInPlace();
   });
   document.querySelector("#editorCheckUpdates")?.addEventListener("click", manualCheckForUpdates);
   document.querySelector("#saveButton")?.addEventListener("click", saveAndCompile);
-  document.querySelectorAll("[data-editor-more-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const action = button.dataset.editorMoreAction;
-      local.editorMoreMenuOpen = false;
-      if (action === "settings") {
-        render();
-        setTimeout(showSettingsModal, 0);
-        return;
-      }
-      if (action === "set-main") setMainFile();
-      else {
-        if (action === "toggle-files") setSidebarVisible(!local.sidebarVisible);
-        else if (action === "toggle-editor") toggleLayoutPane("source");
-        else if (action === "toggle-pdf") toggleLayoutPane("preview");
-        else if (action === "toggle-logs") toggleLayoutPane("logs");
-        else if (action === "toggle-chat") setRightRailVisible(!local.rightRailVisible);
-        render();
-      }
-    });
-  });
+  bindEditorMoreActions();
   document.querySelector("#toggleSourcePane")?.addEventListener("click", () => toggleLayoutPane("source"));
   document.querySelector("#togglePreviewPane")?.addEventListener("click", () => toggleLayoutPane("preview"));
   document.querySelector("#toggleLogs")?.addEventListener("click", () => toggleLayoutPane("logs"));
@@ -4796,6 +7408,7 @@ function bindEditor() {
   bindSidebarControls();
 
   bindEditorToolbar();
+  bindRightRailControls();
   mountActiveEditor();
   bindPdfPreviewControls();
   bindPdfWheelZoom();
@@ -5081,11 +7694,8 @@ function bindEditorToolbar() {
     });
   });
     document.querySelector("#editorSearchToggle")?.addEventListener("click", () => {
-      local.searchOpen = !local.searchOpen;
-      local.tablePickerOpen = false;
-      local.editorStyleMenuOpen = false;
-      refreshEditorToolbarPanels();
-      setTimeout(() => document.querySelector("#editorSearchInput")?.focus(), 0);
+      if (local.searchOpen) closeEditorSearchPanel();
+      else openEditorSearchPanel();
     });
     document.querySelector("#editorStyleButton")?.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -5120,9 +7730,10 @@ function bindEditorToolbarPanels() {
   searchInput?.addEventListener("input", (event) => {
     local.searchQuery = event.target.value;
     local.visualSearchIndex = 0;
+    local.searchResultIndex = -1;
     local.searchStatus = "";
-    const status = document.querySelector("#searchStatus");
-    if (status) status.textContent = "";
+    if (local.searchScope === "project") scheduleProjectSearch();
+    else updateSearchPanelDynamicState();
   });
   searchInput?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -5152,18 +7763,24 @@ function bindEditorToolbarPanels() {
   document.querySelector("#closeSearchPanel")?.addEventListener("click", () => {
     closeEditorSearchPanel();
   });
-  document.querySelector("#searchMatchCase")?.addEventListener("click", () => {
-    local.searchMatchCase = !local.searchMatchCase;
+  document.querySelectorAll("[data-search-scope]").forEach((button) => {
+    button.addEventListener("click", () => setSearchScope(button.dataset.searchScope));
+  });
+  const toggleSearchOption = (key) => {
+    local[key] = !local[key];
     refreshEditorToolbarPanels();
+    if (local.searchScope === "project") scheduleProjectSearch(0);
+  };
+  document.querySelector("#searchMatchCase")?.addEventListener("click", () => {
+    toggleSearchOption("searchMatchCase");
   });
   document.querySelector("#searchRegex")?.addEventListener("click", () => {
-    local.searchRegex = !local.searchRegex;
-    refreshEditorToolbarPanels();
+    toggleSearchOption("searchRegex");
   });
   document.querySelector("#searchWholeWord")?.addEventListener("click", () => {
-    local.searchWholeWord = !local.searchWholeWord;
-    refreshEditorToolbarPanels();
+    toggleSearchOption("searchWholeWord");
   });
+  bindProjectSearchResults();
   document.querySelector("#tableFromText")?.addEventListener("click", () => insertVisualTable(2, 2));
   const tableCells = [...document.querySelectorAll(".table-size-cell")];
   const tableHint = document.querySelector("#tableSizeHint");
@@ -5329,7 +7946,7 @@ function updateUsersPresenceUi() {
       <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
       <div>
         <strong>${escapeHtml(user.name)}</strong><br />
-        <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` · ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
+        <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` Â· ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
       </div>
       <span class="online-dot"></span>
     </div>
@@ -5700,15 +8317,32 @@ async function uploadProjectFile(baseDirOverride = undefined) {
   const baseDirOverridePath = typeof baseDirOverride === "string" ? baseDirOverride : undefined;
   const input = document.createElement("input");
   input.type = "file";
+  input.accept = ".tex,.latex,.bib,.bst,.cls,.sty,.clo,.cfg,.def,.ldf,.bbx,.cbx,.bbl,.txt,.md,.tikz,.csv,.dat,.json,.asy,.py,.png,.jpg,.jpeg,.gif,.webp,.svg,.pdf,.eps";
   input.addEventListener("change", async () => {
     const upload = input.files?.[0];
     if (!upload) return;
+    if (!isSupportedProjectFileName(upload.name)) {
+      showAppNotice(`Unsupported file type: ${upload.name}.`, {
+        type: "error",
+        title: "Upload failed",
+        detail: "Upload LaTeX source/support files, bibliography/data files, or image/PDF assets."
+      });
+      return;
+    }
     const baseDir = baseDirOverridePath ?? selectedDirectoryPath();
     const defaultName = upload.type.startsWith("image/") && !baseDir ? `images/${upload.name}` : joinProjectPath(baseDir, upload.name);
     const targetPath = prompt("Upload to path:", defaultName);
     if (!targetPath) return;
+    if (!isSupportedProjectFileName(targetPath)) {
+      showAppNotice(`Unsupported file type: ${importFileName(targetPath) || targetPath}.`, {
+        type: "error",
+        title: "Upload failed",
+        detail: "Keep the file extension as a supported LaTeX, data, image, PDF, or EPS asset."
+      });
+      return;
+    }
     try {
-      const buffer = await upload.arrayBuffer();
+      const buffer = await readImportFileBuffer(upload);
       const result = await api("/api/file/upload", {
         method: "POST",
         headers: {
@@ -5725,7 +8359,7 @@ async function uploadProjectFile(baseDirOverride = undefined) {
       local.saveStatus = "Uploaded";
       render();
     } catch (error) {
-      alert(error.message);
+      showAppNotice(error.message, { type: "error", title: "Upload failed" });
     }
   });
   input.click();
@@ -5796,7 +8430,14 @@ async function render() {
     await loadState();
   }
 
-  const current = route();
+  let current = route();
+  if (isGuestClient() && !["editor", "ended"].includes(current.view)) {
+    const params = new URLSearchParams({ view: "editor", token: local.guestToken });
+    if (local.userName && local.userName !== "Host") params.set("name", local.userName);
+    history.replaceState({}, "", `/?${params.toString()}`);
+    local.view = "editor";
+    current = route();
+  }
   destroyEditorSurfaces();
   app.className = `app-shell app-shell-${current.view}`;
   if (current.view === "join") {
@@ -5826,6 +8467,7 @@ async function render() {
   bindEditor();
   settleEditorUi();
   renderUpdateToast();
+  renderAppNotice();
 }
 
 function connectEvents() {
@@ -5850,6 +8492,7 @@ function connectEvents() {
     clearTimeout(local.eventDisconnectTimer);
     local.eventDisconnectTimer = null;
     local.appState = JSON.parse(event.data);
+    syncAiProposalsFromAppState();
     const current = route();
     if (current.view === "editor") {
       local.appState.session.joinRequests
@@ -5953,8 +8596,24 @@ window.addEventListener("pointerdown", (event) => {
 window.addEventListener("pointerdown", (event) => {
   if (!local.editorMoreMenuOpen) return;
   if (event.target.closest?.(".editor-more-menu, #editorMoreButton")) return;
-  local.editorMoreMenuOpen = false;
-  render();
+  closeEditorMoreMenuInPlace();
+});
+
+window.addEventListener("pointerdown", (event) => {
+  let shouldRender = false;
+  if (local.aiSessionMenuOpen && !event.target.closest?.(".ai-session-picker")) {
+    local.aiSessionMenuOpen = false;
+    shouldRender = true;
+  }
+  if (local.aiSessionMoreMenuOpen && !event.target.closest?.(".ai-strip-more-wrap")) {
+    local.aiSessionMoreMenuOpen = false;
+    shouldRender = true;
+  }
+  if (local.aiModelPickerOpen && !event.target.closest?.(".ai-model-picker")) {
+    local.aiModelPickerOpen = false;
+    shouldRender = true;
+  }
+  if (shouldRender) refreshRightRailUi();
 });
 
 window.addEventListener("keydown", (event) => {
@@ -5966,8 +8625,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && route().view === "editor") {
     if (local.editorMoreMenuOpen) {
       event.preventDefault();
-      local.editorMoreMenuOpen = false;
-      render();
+      closeEditorMoreMenuInPlace();
       return;
     }
     if (local.treeContextMenu) {
@@ -5997,10 +8655,7 @@ window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
   if (key === "f") {
     event.preventDefault();
-    local.searchOpen = true;
-    local.tablePickerOpen = false;
-    refreshEditorToolbarPanels();
-    setTimeout(() => document.querySelector("#editorSearchInput")?.focus(), 0);
+    openEditorSearchPanel();
     return;
   }
   if (key === "s") {

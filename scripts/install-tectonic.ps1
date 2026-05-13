@@ -5,15 +5,17 @@ $bin = Join-Path $root "bin"
 $target = Join-Path $bin "tectonic.exe"
 $licenseDir = Join-Path $bin "licenses"
 $licenseTarget = Join-Path $licenseDir "TECTONIC_LICENSE.txt"
-$apiUrl = "https://api.github.com/repos/tectonic-typesetting/tectonic/releases/latest"
+$assetName = "tectonic-0.16.9-x86_64-pc-windows-msvc.zip"
+$expectedSha256 = "131a24604785a9600989a3d91225f597df52ac06f00aeffe86fd529f99ee5cdd"
+$apiUrl = "https://api.github.com/repos/tectonic-typesetting/tectonic/releases/tags/tectonic%400.16.9"
 
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 New-Item -ItemType Directory -Force -Path $licenseDir | Out-Null
 
-Write-Host "Finding latest Tectonic release from GitHub..."
+Write-Host "Finding pinned Tectonic release from GitHub..."
 $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "LocalLeaf Installer" }
 $asset = $release.assets |
-  Where-Object { $_.name -match "x86_64-pc-windows-msvc\.zip$" } |
+  Where-Object { $_.name -eq $assetName } |
   Select-Object -First 1
 
 if (-not $asset) {
@@ -30,6 +32,10 @@ New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
 try {
   Write-Host "Downloading $($asset.name)..."
   Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+  $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+  if ($actualSha256 -ne $expectedSha256) {
+    throw "Checksum mismatch for $($asset.name). Expected $expectedSha256 but got $actualSha256."
+  }
 
   Write-Host "Extracting Tectonic..."
   Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
@@ -47,7 +53,7 @@ try {
   if ($license) {
     Copy-Item -LiteralPath $license.FullName -Destination $licenseTarget -Force
   } else {
-    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tectonic-typesetting/tectonic/master/LICENSE" -OutFile $licenseTarget
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tectonic-typesetting/tectonic/tectonic%400.16.9/LICENSE" -OutFile $licenseTarget
   }
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

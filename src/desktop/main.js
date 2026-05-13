@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
-const { app, BrowserWindow, Menu, ipcMain, nativeImage, nativeTheme, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeImage, nativeTheme, safeStorage, shell } = require("electron");
 const { createLocalLeafServer } = require("../server/index");
 
 let hostServer;
@@ -126,8 +126,73 @@ function iconPath() {
     : path.join(__dirname, "../../public/assets/localleaf-icon.png");
 }
 
+function defaultModelRoot() {
+  return path.join(app.getPath("userData"), "LocalLeafModel");
+}
+
+function createAiSecretStore() {
+  let root = defaultModelRoot();
+  const memorySecrets = new Map();
+
+  function filePath() {
+    return path.join(root, "provider-secrets.json");
+  }
+
+  function readSecrets() {
+    try {
+      return JSON.parse(fs.readFileSync(filePath(), "utf8"));
+    } catch {
+      return {};
+    }
+  }
+
+  function writeSecrets(payload) {
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(filePath(), JSON.stringify(payload, null, 2), "utf8");
+  }
+
+  return {
+    setRoot(nextRoot) {
+      root = nextRoot || root;
+    },
+    async getSecret(id) {
+      if (!safeStorage.isEncryptionAvailable()) return memorySecrets.get(id) || "";
+      const payload = readSecrets();
+      const encrypted = payload[id];
+      if (!encrypted) return "";
+      return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+    },
+    async setSecret(id, value) {
+      if (!value) {
+        await this.deleteSecret(id);
+        return;
+      }
+      if (!safeStorage.isEncryptionAvailable()) {
+        memorySecrets.set(id, value);
+        return;
+      }
+      const payload = readSecrets();
+      payload[id] = safeStorage.encryptString(value).toString("base64");
+      writeSecrets(payload);
+    },
+    async deleteSecret(id) {
+      memorySecrets.delete(id);
+      if (!safeStorage.isEncryptionAvailable()) return;
+      const payload = readSecrets();
+      delete payload[id];
+      writeSecrets(payload);
+    }
+  };
+}
+
 async function startHostServer() {
-  hostServer = createLocalLeafServer({ port: 4317 });
+  const modelRoot = defaultModelRoot();
+  try {
+    fs.mkdirSync(modelRoot, { recursive: true });
+  } catch {
+    // The server can decide how to fall back if the desktop default is unavailable.
+  }
+  hostServer = createLocalLeafServer({ port: 4317, modelRoot, aiSecretStore: createAiSecretStore() });
   await hostServer.start(4317);
   return `http://localhost:4317/?host=${encodeURIComponent(hostServer.state.hostToken)}`;
 }
@@ -187,6 +252,18 @@ ipcMain.handle("localleaf:install-update", async (event, update = {}) => {
     targetWindow.focus();
   }
   return { ok: true, installerPath };
+});
+
+ipcMain.handle("localleaf:choose-model-folder", async (event) => {
+  const targetWindow = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(targetWindow || undefined, {
+    title: "Choose AI model folder",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  return {
+    canceled: result.canceled,
+    folderPath: result.canceled ? null : result.filePaths[0] || null
+  };
 });
 
 app.whenReady().then(async () => {

@@ -21,6 +21,7 @@ const {
 } = require("./safe-path");
 const { compileProject, commandExists, detectCompiler } = require("./compiler");
 const { collectProjectEditorSuggestions } = require("./editor-suggestions");
+const { createAiModelManager } = require("./ai-models");
 
 let localtunnelClient = null;
 try {
@@ -93,6 +94,19 @@ function jsonResponse(response, statusCode, payload) {
     "cache-control": "no-store"
   });
   response.end(JSON.stringify(payload));
+}
+
+function beginNdjsonResponse(response) {
+  response.writeHead(200, {
+    ...securityHeaders(),
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-store",
+    "x-accel-buffering": "no"
+  });
+}
+
+function sendNdjson(response, event) {
+  response.write(`${JSON.stringify({ at: Date.now(), ...event })}\n`);
 }
 
 function textResponse(response, statusCode, payload, contentType = "text/plain; charset=utf-8") {
@@ -518,6 +532,9 @@ function importLooseFilesProject(fileRecords, projectName) {
 
       const target = path.resolve(projectRoot, relativePath);
       assertInsideDirectory(projectRoot, target);
+      if (!isTextFile(target) && !isImageFile(target)) {
+        throw new Error(`Unsupported import file type: ${relativePath}`);
+      }
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, data);
     }
@@ -929,6 +946,14 @@ function createInitialState(options = {}) {
       version: 0
     },
     chat: [],
+    ai: {
+      models: createAiModelManager({
+        modelRoot: options.modelRoot,
+        secretStore: options.aiSecretStore,
+        fetchImpl: options.aiFetch || options.fetchImpl
+      }),
+      proposals: new Map()
+    },
     clients: new Map(),
     collabClients: new Map(),
     tunnelCheck: options.checkPublicTunnel || checkPublicTunnel
@@ -998,6 +1023,23 @@ function publicState(state, options = {}) {
           previewHtml: "",
           pdfPath: null,
           version: state.compile.version
+        },
+    ai: isHost
+      ? {
+          ...state.ai.models.publicState(),
+          proposals: Array.from(state.ai.proposals.values()).map(publicProposal)
+        }
+      : {
+          activeModelId: null,
+          runtime: "host-only",
+          permissions: {
+            canReadTextFiles: false,
+            canProposeTextEdits: false,
+            canWriteWithoutApproval: false,
+            canDeleteRenameMoveUploadShell: false,
+            textFilesOnly: true
+          },
+          models: []
         },
     chat: canRead ? state.chat : []
   };
@@ -1319,6 +1361,540 @@ function refreshProject(state) {
   if (!state.project.mainFile) {
     state.project.mainFile = detectMainFile(state.project.root);
   }
+}
+
+function textHash(text) {
+  return crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
+}
+
+function inferAgentPath(state, requestedPath) {
+  const candidate = String(requestedPath || state.project.mainFile || "").trim();
+  const fullPath = resolveProjectPath(state.project.root, candidate);
+  if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+    throw new Error("Choose an existing text file before asking LocalLeaf AI for edits.");
+  }
+  if (!isTextFile(fullPath)) {
+    throw new Error("LocalLeaf AI can only propose edits to text files.");
+  }
+  return { relativePath: normalizeRelativePath(candidate), fullPath };
+}
+
+function createDeterministicAgentProposal(state, body) {
+  const message = String(body.message || "").trim().slice(0, 2000);
+  if (!message) throw new Error("Message is required.");
+
+  const { relativePath, fullPath } = inferAgentPath(state, body.path);
+  const originalText = fs.readFileSync(fullPath, "utf8");
+  const lowerMessage = message.toLowerCase();
+  let newText = originalText;
+  let summary = "Prepared a safe text edit proposal.";
+  const replacementInstruction = exactReplacementInstruction(message);
+
+  if (replacementInstruction && originalText.includes(replacementInstruction.find)) {
+    newText = originalText.replace(replacementInstruction.find, replacementInstruction.replace);
+    summary = `Replace "${replacementInstruction.find}" with "${replacementInstruction.replace}".`;
+  } else if (lowerMessage.includes("table")) {
+    const table = [
+      "\\begin{table}[h]",
+      "\\centering",
+      "\\begin{tabular}{ll}",
+      "\\hline",
+      "Item & Notes \\\\",
+      "\\hline",
+      "Example & Replace with your data \\\\",
+      "\\hline",
+      "\\end{tabular}",
+      "\\caption{Generated table draft}",
+      "\\end{table}"
+    ].join("\n");
+    newText = `${originalText.replace(/\s*$/u, "")}\n\n${table}\n`;
+    summary = "Append a small LaTeX table draft.";
+  } else if (lowerMessage.includes("rewrite")) {
+    newText = originalText.replace(/\butilize\b/gi, "use").replace(/\bin order to\b/gi, "to");
+    if (newText === originalText) {
+      newText = `${originalText.replace(/\s*$/u, "")}\n\n% LocalLeaf AI rewrite note: tighten wording in this section.\n`;
+    }
+    summary = "Rewrite common verbose phrases without changing project structure.";
+  } else if (lowerMessage.includes("fix")) {
+    newText = originalText
+      .replace(/[ \t]+$/gm, "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{4,}/g, "\n\n\n");
+    if (newText === originalText) {
+      newText = `${originalText.replace(/\s*$/u, "")}\n`;
+    }
+    summary = "Fix whitespace and line ending issues.";
+  } else {
+    newText = `${originalText.replace(/\s*$/u, "")}\n\n% LocalLeaf AI note: ${message.replace(/\s+/g, " ").slice(0, 160)}\n`;
+    summary = "Add a comment note for the requested edit.";
+  }
+
+  const proposal = createAiProposalRecord({
+    path: relativePath,
+    originalText,
+    newText,
+    summary,
+    userRequest: message,
+    provider: null,
+    modelId: "deterministic-fallback"
+  });
+  state.ai.proposals.set(proposal.id, proposal);
+  return proposal;
+}
+
+function createAgentProposalFromText(state, body, newText, summary, metadata = {}) {
+  const { relativePath, fullPath } = inferAgentPath(state, body.path);
+  const originalText = fs.readFileSync(fullPath, "utf8");
+  const cleanText = String(newText || "");
+  if (!cleanText) throw new Error("AI provider did not return replacement text.");
+  if (cleanText === originalText) throw new Error("AI provider returned the original file without changes.");
+
+  const proposal = createAiProposalRecord({
+    path: relativePath,
+    originalText,
+    newText: cleanText,
+    summary: String(summary || "AI provider proposed a text edit.").slice(0, 220),
+    userRequest: String(body.message || "").trim().slice(0, 2000),
+    provider: metadata.provider || null,
+    modelId: metadata.modelId || ""
+  });
+  state.ai.proposals.set(proposal.id, proposal);
+  return proposal;
+}
+
+function createAiProposalRecord({ path: relativePath, originalText, newText, summary, userRequest, provider, modelId }) {
+  const cleanOriginal = String(originalText || "");
+  const cleanText = String(newText || "");
+  return {
+    id: randomId(8),
+    path: relativePath,
+    baseHash: textHash(cleanOriginal),
+    originalText: cleanOriginal,
+    replacements: [
+      {
+        start: 0,
+        end: cleanOriginal.length,
+        text: cleanText
+      }
+    ],
+    newText: cleanText,
+    status: "proposed",
+    approvalRequired: true,
+    summary: String(summary || "AI proposed a text edit.").slice(0, 220),
+    userRequest: String(userRequest || "").slice(0, 2000),
+    provider: provider ? {
+      id: provider.id || "",
+      name: provider.name || provider.id || "Provider"
+    } : null,
+    modelId: String(modelId || ""),
+    createdAt: Date.now()
+  };
+}
+
+function compactLineDiff(before, after, context = 3) {
+  const beforeLines = String(before || "").split(/\r?\n/u);
+  const afterLines = String(after || "").split(/\r?\n/u);
+  let start = 0;
+  while (start < beforeLines.length && start < afterLines.length && beforeLines[start] === afterLines[start]) start += 1;
+  let beforeEnd = beforeLines.length - 1;
+  let afterEnd = afterLines.length - 1;
+  while (beforeEnd >= start && afterEnd >= start && beforeLines[beforeEnd] === afterLines[afterEnd]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  if (start > beforeEnd && start > afterEnd) return [];
+  const beforeFrom = Math.max(0, start - context);
+  const afterFrom = Math.max(0, start - context);
+  const beforeTo = Math.min(beforeLines.length - 1, beforeEnd + context);
+  const afterTo = Math.min(afterLines.length - 1, afterEnd + context);
+  const lines = [];
+  for (let index = beforeFrom; index <= beforeTo; index += 1) {
+    if (index < start || index > beforeEnd) lines.push({ type: "context", lineNumber: index + 1, text: beforeLines[index] || "" });
+    else lines.push({ type: "removed", lineNumber: index + 1, text: beforeLines[index] || "" });
+  }
+  for (let index = afterFrom; index <= afterTo; index += 1) {
+    if (index >= start && index <= afterEnd) lines.push({ type: "added", lineNumber: index + 1, text: afterLines[index] || "" });
+  }
+  return [{
+    oldStart: beforeFrom + 1,
+    newStart: afterFrom + 1,
+    lines: lines.slice(0, 80)
+  }];
+}
+
+function extractJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : raw;
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    try {
+      return JSON.parse(candidate.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
+function wantsFileEdit(message) {
+  const lower = String(message || "").toLowerCase();
+  return ["fix", "rewrite", "table", "change", "edit", "update", "replace", "insert", "add", "write", "latex", "error"].some((word) => lower.includes(word));
+}
+
+function agentPermissions(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    askBeforeEdits: source.askBeforeEdits !== false,
+    yoloMode: source.yoloMode === true,
+    localModelOnly: source.localModelOnly === true,
+    rewriteTools: source.rewriteTools !== false,
+    multiFileEdits: source.multiFileEdits === true,
+    fileManagement: source.fileManagement === true,
+    fileUploads: source.fileUploads === true,
+    shellCommands: source.shellCommands === true,
+    binaryFiles: source.binaryFiles === true
+  };
+}
+
+function requestedAgentCapabilities(message) {
+  const text = String(message || "");
+  return {
+    fileManagement: /\b(delete|rename|move|create\s+(?:a\s+)?(?:file|folder|directory)|new\s+(?:file|folder|directory))\b/iu.test(text),
+    fileUploads: /\b(upload|import|attach|add\s+(?:an?\s+)?(?:image|asset|file|pdf))\b/iu.test(text),
+    shellCommands: /\b(shell|terminal|command|execute|run\s+script|npm|node|powershell|cmd)\b/iu.test(text),
+    binaryFiles: /\b(binary|image|png|jpe?g|gif|webp|pdf|eps|asset)\b/iu.test(text)
+  };
+}
+
+function blockedAgentCapabilities(message, permissions) {
+  const requested = requestedAgentCapabilities(message);
+  const labels = [];
+  if (requested.fileManagement && !permissions.fileManagement) labels.push("Create, rename, move, and delete");
+  if (requested.fileUploads && !permissions.fileUploads) labels.push("Uploads and imports");
+  if (requested.shellCommands && !permissions.shellCommands) labels.push("Shell commands");
+  if (requested.binaryFiles && !permissions.binaryFiles) labels.push("Binary files");
+  return labels;
+}
+
+function hasAdvancedAgentRequest(message) {
+  return Object.values(requestedAgentCapabilities(message)).some(Boolean);
+}
+
+function agentPermissionSummary(permissions) {
+  return [
+    `Ask before edits: ${permissions.askBeforeEdits ? "on" : "off"}`,
+    `YOLO mode: ${permissions.yoloMode ? "on" : "off"}`,
+    `Rewrite tools: ${permissions.rewriteTools ? "on" : "off"}`,
+    `Multi-file edits: ${permissions.multiFileEdits ? "on" : "off"}`,
+    `File management: ${permissions.fileManagement ? "on" : "off"}`,
+    `Uploads/imports: ${permissions.fileUploads ? "on" : "off"}`,
+    `Shell commands: ${permissions.shellCommands ? "on" : "off"}`,
+    `Binary files: ${permissions.binaryFiles ? "on" : "off"}`
+  ].join("\n");
+}
+
+function setProposalApprovalFromPermissions(proposal, permissions) {
+  if (!proposal || typeof proposal !== "object") return proposal;
+  proposal.approvalRequired = permissions.askBeforeEdits && !permissions.yoloMode;
+  return proposal;
+}
+
+function applyPermissionsToAgentResult(result, permissions) {
+  const proposals = Array.isArray(result?.proposals) ? result.proposals.map((proposal) => setProposalApprovalFromPermissions(proposal, permissions)) : [];
+  return { ...result, proposals };
+}
+
+function agentListProjectFiles(state) {
+  return state.project.files
+    .filter((item) => item.type === "text" || item.type === "file")
+    .map((item) => ({
+      path: item.path,
+      type: item.type,
+      size: item.size || 0
+    }))
+    .slice(0, 300);
+}
+
+function agentReadProjectFile(state, requestedPath) {
+  const { relativePath, fullPath } = inferAgentPath(state, requestedPath);
+  const content = fs.readFileSync(fullPath, "utf8");
+  return {
+    path: relativePath,
+    hash: textHash(content),
+    content
+  };
+}
+
+function agentCompileLogs(state) {
+  return (Array.isArray(state.compile.logs) ? state.compile.logs : [])
+    .map((line) => String(line || ""))
+    .slice(-200);
+}
+
+function compactAgentFileContext(text) {
+  const source = String(text || "");
+  if (source.length <= 42000) return source;
+  const head = source.slice(0, 28000);
+  const tail = source.slice(-10000);
+  return `${head}\n\n% ... LocalLeaf omitted the middle of this large file for model context ...\n\n${tail}`;
+}
+
+function exactReplacementInstruction(message) {
+  const normalized = String(message || "").replace(/\s+/g, " ").trim();
+  const match = normalized.match(/\bfrom\s+["'“]?(.+?)["'”]?\s+\bto\s+["'“]?(.+?)(?=["'”]?(?:$|[.!?])|\s+\b(?:in|inside|on|at|within|under)\b)/iu);
+  if (!match) return null;
+  const find = String(match[1] || "").trim();
+  let replace = String(match[2] || "").trim();
+  const findPunctuation = find.match(/[.!?]$/u)?.[0];
+  if (findPunctuation && !/[.!?]$/u.test(replace) && normalized.endsWith(findPunctuation)) {
+    replace += findPunctuation;
+  }
+  if (!find || !replace || find === replace) return null;
+  return { find, replace };
+}
+
+function applyExactReplacementInstructions(originalText, replacements = []) {
+  const source = String(originalText || "");
+  const exactItems = [];
+  const rangeItems = [];
+  for (const item of Array.isArray(replacements) ? replacements.slice(0, 20) : []) {
+    if (!item || typeof item !== "object") continue;
+    const start = Number(item.start);
+    const end = Number(item.end);
+    const text = typeof item.text === "string" ? item.text : typeof item.replace === "string" ? item.replace : typeof item.newText === "string" ? item.newText : "";
+    if (Number.isInteger(start) && Number.isInteger(end) && start >= 0 && end >= start && end <= source.length && text) {
+      rangeItems.push({ start, end, text });
+      continue;
+    }
+    const find = typeof item.find === "string" ? item.find : typeof item.oldText === "string" ? item.oldText : typeof item.from === "string" ? item.from : "";
+    const replace = typeof item.replace === "string" ? item.replace : typeof item.text === "string" ? item.text : typeof item.newText === "string" ? item.newText : typeof item.to === "string" ? item.to : "";
+    if (find && replace !== "" && find !== replace) exactItems.push({ find, replace, all: item.all === true });
+  }
+  if (rangeItems.length) {
+    let next = source;
+    for (const item of rangeItems.sort((left, right) => right.start - left.start)) {
+      next = `${next.slice(0, item.start)}${item.text}${next.slice(item.end)}`;
+    }
+    return next === source ? "" : next;
+  }
+  let next = source;
+  for (const item of exactItems) {
+    if (!next.includes(item.find)) continue;
+    next = item.all ? next.split(item.find).join(item.replace) : next.replace(item.find, item.replace);
+  }
+  return next === source ? "" : next;
+}
+
+async function createProviderAgentResponse(state, body) {
+  const message = String(body.message || "").trim().slice(0, 2000);
+  if (!message) throw new Error("Message is required.");
+  const permissions = agentPermissions(body.aiPermissions || body.permissions);
+  const currentFile = agentReadProjectFile(state, body.path);
+  const relativePath = currentFile.path;
+  const originalText = currentFile.content;
+  const compileLogs = Array.isArray(body.compileLogs)
+    ? body.compileLogs.map((item) => String(item || "")).join("\n").slice(-8000)
+    : "";
+  const selectedText = String(body.selectedText || "").slice(0, 8000);
+  const prompt = [
+    "You are LocalLeaf AI, a careful LaTeX project assistant.",
+    "Return JSON only with this shape:",
+    '{"reply":"short explanation","summary":"short change summary","replacements":[{"find":"exact text from the file","replace":"replacement text"}],"newText":"full replacement file text or empty string"}',
+    "Prefer replacements for small edits. Only set newText for larger structural edits. Keep LaTeX valid. Do not delete unrelated content.",
+    "Each replacement find value must exactly match text shown from the file.",
+    "Current AI Helper permissions:",
+    agentPermissionSummary(permissions),
+    "If an advanced action is allowed, explain the intended action clearly. For this MVP, file writes still happen through LocalLeaf proposals and approval cards.",
+    `File path: ${relativePath}`,
+    "Current file:",
+    compactAgentFileContext(originalText),
+    selectedText ? `Selected text:\n${selectedText}` : "",
+    compileLogs ? `Compile logs:\n${compileLogs}` : "",
+    `User request: ${message}`
+  ].filter(Boolean).join("\n\n");
+
+  const requestedProviderId = String(body.aiProviderId || body.providerId || "").trim();
+  const requestedModelId = String(body.aiModelId || body.modelId || "").trim();
+  const result = await state.ai.models.askActiveProvider([
+    { role: "system", content: "You are a precise LaTeX editor. Respond with JSON only." },
+    { role: "user", content: prompt }
+  ], {
+    providerId: requestedProviderId || undefined,
+    modelId: requestedModelId || undefined,
+    maxTokens: 1800,
+    temperature: 0.1
+  });
+
+  const parsed = extractJsonObject(result?.content);
+  const proposals = [];
+  let reply = result?.content || "The provider responded.";
+  if (parsed && typeof parsed === "object") {
+    reply = String(parsed.reply || "I prepared a response.");
+    const replacementText = applyExactReplacementInstructions(originalText, parsed.replacements);
+    const proposedText = replacementText || (typeof parsed.newText === "string" && parsed.newText.trim() ? parsed.newText : "");
+    if (proposedText) {
+      proposals.push(setProposalApprovalFromPermissions(createAgentProposalFromText(state, body, proposedText, parsed.summary || parsed.reply, {
+        provider: result.provider,
+        modelId: result.modelId
+      }), permissions));
+    }
+  } else if (wantsFileEdit(message)) {
+    proposals.push(setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions));
+    reply = `${reply}\n\nI drafted a file change and added it to Changes.`;
+  }
+
+  return {
+    reply,
+    runtime: state.ai.models.publicState().runtime,
+    provider: result?.provider ? {
+      id: result.provider.id,
+      name: result.provider.name,
+      modelId: result.modelId
+    } : null,
+    proposals: proposals.map((proposal) => setProposalApprovalFromPermissions(publicProposal(proposal), permissions))
+  };
+}
+
+async function createAgentMessageResponse(state, body) {
+  const message = String(body.message || "").trim().slice(0, 2000);
+  const permissions = agentPermissions(body.aiPermissions || body.permissions);
+  if (!permissions.rewriteTools && /\b(rewrite|humanize|clarity|simplify)\b/iu.test(message)) {
+    throw new Error("Rewrite tools are off. Enable Rewrite tools in Settings > AI Permissions to use this request.");
+  }
+  const blocked = blockedAgentCapabilities(message, permissions);
+  if (blocked.length) {
+    throw new Error(`This request needs AI permission for ${blocked.join(", ")}. Enable it in Settings > AI Permissions.`);
+  }
+  const providerChoice = String(body.aiProviderId || body.providerId || "").trim();
+  const hasExplicitChoice = Object.prototype.hasOwnProperty.call(body, "aiProviderId") || Object.prototype.hasOwnProperty.call(body, "providerId");
+  const providerRequested = providerChoice && providerChoice !== "local" && providerChoice !== "localleaf-local";
+  const activeAi = state.ai.models.publicState().activeProviderId;
+  if (permissions.localModelOnly && providerRequested) {
+    throw new Error("Local model only is on. Disable it in Settings > AI Permissions or choose a local model in the AI chat.");
+  }
+  if ((providerRequested || (!hasExplicitChoice && activeAi)) && !permissions.localModelOnly) {
+    try {
+      return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body), permissions);
+    } catch (error) {
+      if (/timed out/i.test(error.message || "") && wantsFileEdit(message)) {
+        const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+        return {
+          reply: `${error.message} I prepared a safe local fallback proposal so you can still review the change.`,
+          runtime: state.ai.models.publicState().runtime,
+          provider: null,
+          proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
+        };
+      }
+      throw error;
+    }
+  }
+
+  if (hasAdvancedAgentRequest(message)) {
+    return {
+      reply: "That permission is enabled. The current local fallback can acknowledge advanced actions, but only text edits are automated in this MVP. Choose a hosted provider model for richer planning, or ask for a safe text edit I can propose now.",
+      runtime: state.ai.models.publicState().runtime,
+      provider: null,
+      proposals: []
+    };
+  }
+
+  if (!wantsFileEdit(message)) {
+    return {
+      reply: "I'm ready to help with LaTeX errors, rewrites, tables, and project edits. Tell me what you want changed or which compile issue to inspect.",
+      runtime: state.ai.models.publicState().runtime,
+      provider: null,
+      proposals: []
+    };
+  }
+
+  const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+  return {
+    reply: `${proposal.summary} Review the proposed edit in this chat before it is written.`,
+    runtime: state.ai.models.publicState().runtime,
+    provider: null,
+    proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
+  };
+}
+
+function publicProposal(proposal) {
+  return {
+    id: proposal.id,
+    path: proposal.path,
+    baseHash: proposal.baseHash,
+    replacements: proposal.replacements,
+    newText: proposal.newText,
+    status: proposal.status,
+    summary: proposal.summary,
+    userRequest: proposal.userRequest || "",
+    provider: proposal.provider || null,
+    modelId: proposal.modelId || "",
+    approvalRequired: proposal.approvalRequired !== false,
+    diffHunks: compactLineDiff(proposal.originalText || "", proposal.newText || ""),
+    createdAt: proposal.createdAt,
+    appliedAt: proposal.appliedAt || null,
+    rejectedAt: proposal.rejectedAt || null
+  };
+}
+
+function applyAgentProposalAndBroadcast(state, proposal) {
+  const applied = applyAiProposalToFile(state, proposal);
+  broadcastCollab(state, {
+    type: "file_updated",
+    filePath: proposal.path,
+    newText: proposal.newText,
+    userId: "host",
+    name: "LocalLeaf AI",
+    version: applied.version
+  });
+  broadcastProject(state, "file-update", {
+    path: proposal.path,
+    content: proposal.newText,
+    user: "LocalLeaf AI",
+    version: applied.version
+  });
+  broadcastState(state);
+  return applied;
+}
+
+function applyAiProposalToFile(state, proposal) {
+  const fullPath = resolveProjectPath(state.project.root, proposal.path);
+  if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+    const error = new Error("Proposal target file was not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!isTextFile(fullPath)) {
+    const error = new Error("LocalLeaf AI proposals can only edit text files.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const currentText = fs.readFileSync(fullPath, "utf8");
+  if (textHash(currentText) !== proposal.baseHash) {
+    proposal.status = "stale";
+    const error = new Error("File changed since this AI proposal was created.");
+    error.statusCode = 409;
+    error.proposal = publicProposal(proposal);
+    throw error;
+  }
+  fs.writeFileSync(fullPath, proposal.newText, "utf8");
+  proposal.status = "applied";
+  proposal.appliedAt = Date.now();
+  refreshProject(state);
+  return {
+    version: Date.now(),
+    proposal: publicProposal(proposal)
+  };
+}
+
+function rejectAiProposal(state, proposal) {
+  proposal.status = "rejected";
+  proposal.rejectedAt = Date.now();
+  return publicProposal(proposal);
 }
 
 function setProjectRoot(state, projectRoot) {
@@ -1843,6 +2419,352 @@ function createLocalLeafServer(options = {}) {
       return;
     }
 
+    if (request.method === "GET" && (url.pathname === "/api/ai/models" || url.pathname === "/api/ai/models/status")) {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can manage LocalLeaf AI models.");
+        return;
+      }
+      jsonResponse(response, 200, state.ai.models.publicState());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/models/storage") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can change LocalLeaf AI model storage.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = state.ai.models.setStoragePath(body.path);
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/models/download") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can download LocalLeaf AI models.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = state.ai.models.simulateDownload(String(body.modelId || ""));
+        broadcastState(state);
+        jsonResponse(response, 202, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/models/delete") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can delete LocalLeaf AI models.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = state.ai.models.deleteModel(String(body.modelId || ""));
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/models/activate") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can activate LocalLeaf AI models.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = state.ai.models.activateModel(String(body.modelId || ""));
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/ai/providers/status") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can manage LocalLeaf AI providers.");
+        return;
+      }
+      jsonResponse(response, 200, state.ai.models.publicState());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/providers/save") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can save LocalLeaf AI providers.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const payload = body.provider ? { ...body.provider, activate: body.activate, modelId: body.modelId || body.provider.model || body.provider.modelId } : body;
+        const aiState = await state.ai.models.saveProvider(payload);
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/providers/validate") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can validate LocalLeaf AI providers.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const result = await state.ai.models.validateProvider(body);
+        broadcastState(state);
+        jsonResponse(response, 200, result);
+      } catch (error) {
+        const status = error.statusCode === 401 ? 401 : error.statusCode === 502 ? 502 : 400;
+        jsonResponse(response, status, { error: error.message || "Provider validation failed." });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname.startsWith("/api/ai/providers/presets/")) {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can configure LocalLeaf AI provider presets.");
+        return;
+      }
+      const body = await readBody(request);
+      const presetId = decodeURIComponent(url.pathname.split("/").pop() || "");
+      try {
+        const aiState = await state.ai.models.saveProvider({
+          templateId: presetId,
+          id: presetId,
+          apiKey: body.apiKey,
+          activate: body.activate !== false,
+          modelId: body.modelId
+        });
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/providers/test") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can test LocalLeaf AI providers.");
+        return;
+      }
+      const body = await readBody(request);
+      const payload = body.provider ? { ...body.provider, apiKey: body.provider.apiKey ?? body.apiKey, modelId: body.modelId || body.provider.model || body.provider.modelId } : body;
+      const result = await state.ai.models.testProvider(payload);
+      broadcastState(state);
+      jsonResponse(response, result.ok ? 200 : 400, result.ok ? result : { ...result, error: result.message });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/providers/activate") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can activate LocalLeaf AI providers.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = state.ai.models.activateProvider(body.providerId || body.id, body.modelId);
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/providers/delete") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can delete LocalLeaf AI providers.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = await state.ai.models.deleteProvider(body.providerId || body.id);
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/smoke-test") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can run LocalLeaf AI smoke tests.");
+        return;
+      }
+      const body = await readBody(request);
+      const smokeFile = `localleaf-ai-smoke-${randomId(5)}.tex`;
+      const smokePath = resolveProjectPath(state.project.root, smokeFile);
+      let proposal = null;
+      try {
+        const provider = await state.ai.models.runSmokeTest({
+          apiKey: body.apiKey,
+          timeoutMs: body.timeoutMs
+        });
+        fs.writeFileSync(smokePath, "\\documentclass{article}\n\\begin{document}\nWe utilize this draft.\n\\end{document}\n", "utf8");
+        refreshProject(state);
+        proposal = createDeterministicAgentProposal(state, { path: smokeFile, message: "rewrite this section" });
+        const applied = applyAiProposalToFile(state, proposal);
+        const editOk = /We use this draft/.test(fs.readFileSync(smokePath, "utf8"));
+        jsonResponse(response, editOk && provider.ok ? 200 : 400, {
+          ok: editOk && provider.ok,
+          provider,
+          edit: {
+            ok: editOk,
+            proposalId: applied.proposal.id,
+            status: applied.proposal.status
+          }
+        });
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      } finally {
+        if (proposal) state.ai.proposals.delete(proposal.id);
+        fs.rmSync(smokePath, { force: true });
+        refreshProject(state);
+        broadcastState(state);
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/agent/message") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can ask LocalLeaf AI to inspect project text.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const result = await createAgentMessageResponse(state, body);
+        broadcastState(state);
+        jsonResponse(response, 200, result);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/agent/run") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can run LocalLeaf AI.");
+        return;
+      }
+      const body = await readBody(request);
+      beginNdjsonResponse(response);
+      try {
+        const runId = randomId(8);
+        const files = agentListProjectFiles(state);
+        const currentFile = agentReadProjectFile(state, body.path);
+        const logs = agentCompileLogs(state);
+        sendNdjson(response, { type: "run_started", runId });
+        sendNdjson(response, {
+          type: "tool_call",
+          runId,
+          tool: "list_project_files",
+          status: "completed",
+          result: { count: files.length, files: files.slice(0, 40) }
+        });
+        sendNdjson(response, {
+          type: "tool_call",
+          runId,
+          tool: "read_file",
+          status: "completed",
+          result: { path: currentFile.path, hash: currentFile.hash, bytes: currentFile.content.length }
+        });
+        if (logs.length) {
+          sendNdjson(response, {
+            type: "tool_call",
+            runId,
+            tool: "get_compile_logs",
+            status: "completed",
+            result: { lines: logs.length }
+          });
+        }
+        const result = await createAgentMessageResponse(state, body);
+        sendNdjson(response, { type: "assistant_delta", runId, delta: result.reply || "" });
+        for (const proposal of result.proposals || []) {
+          sendNdjson(response, { type: "proposal_created", runId, proposal });
+          if (proposal.approvalRequired !== false && proposal.status === "proposed") {
+            sendNdjson(response, { type: "approval_required", runId, proposal });
+          }
+        }
+        broadcastState(state);
+        sendNdjson(response, { type: "run_done", runId, result });
+      } catch (error) {
+        sendNdjson(response, { type: "run_error", error: error.message });
+      } finally {
+        response.end();
+      }
+      return;
+    }
+
+    if (request.method === "POST" && (url.pathname === "/api/agent/proposal/apply" || url.pathname === "/api/agent/approval/approve")) {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can apply LocalLeaf AI proposals.");
+        return;
+      }
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before applying LocalLeaf AI proposals.");
+        return;
+      }
+      const body = await readBody(request);
+      const proposal = state.ai.proposals.get(String(body.proposalId || body.id || ""));
+      if (!proposal) {
+        jsonResponse(response, 404, { error: "AI proposal was not found." });
+        return;
+      }
+      if (proposal.status !== "proposed") {
+        jsonResponse(response, 409, { error: `AI proposal is already ${proposal.status}.` });
+        return;
+      }
+
+      try {
+        const applied = applyAgentProposalAndBroadcast(state, proposal);
+        jsonResponse(response, 200, { ok: true, proposal: applied.proposal });
+      } catch (error) {
+        jsonResponse(response, error.statusCode || 400, {
+          error: error.message,
+          ...(error.proposal ? { proposal: error.proposal } : {})
+        });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/agent/approval/reject") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can reject LocalLeaf AI proposals.");
+        return;
+      }
+      const body = await readBody(request);
+      const proposal = state.ai.proposals.get(String(body.proposalId || body.id || ""));
+      if (!proposal) {
+        jsonResponse(response, 404, { error: "AI proposal was not found." });
+        return;
+      }
+      if (proposal.status !== "proposed") {
+        jsonResponse(response, 409, { error: `AI proposal is already ${proposal.status}.` });
+        return;
+      }
+      const rejected = rejectAiProposal(state, proposal);
+      broadcastState(state);
+      jsonResponse(response, 200, { ok: true, proposal: rejected });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/editor/suggestions") {
       if (!canReadProject(state, request, url)) {
         deny(response, "Join approval is required before reading project suggestions.");
@@ -2110,6 +3032,10 @@ function createLocalLeafServer(options = {}) {
       }
       const filePath = String(request.headers["x-file-path"] || request.headers["x-file-name"] || "").trim();
       const fullPath = resolveProjectPath(state.project.root, filePath);
+      if (!isTextFile(fullPath) && !isImageFile(fullPath)) {
+        jsonResponse(response, 400, { error: "Only LaTeX source/support files and image/PDF assets can be uploaded." });
+        return;
+      }
       if (fs.existsSync(fullPath)) {
         jsonResponse(response, 409, { error: "A file already exists at that path." });
         return;

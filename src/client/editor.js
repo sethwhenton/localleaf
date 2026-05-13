@@ -12,7 +12,6 @@ import {
 } from "@codemirror/commands";
 import { StreamLanguage, HighlightStyle, bracketMatching, syntaxHighlighting } from "@codemirror/language";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
-import { searchKeymap } from "@codemirror/search";
 import { EditorSelection, EditorState, Prec, Transaction } from "@codemirror/state";
 import { Decoration, EditorView, MatchDecorator, ViewPlugin, keymap } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
@@ -484,6 +483,12 @@ function createEditor(parent, options = {}) {
     return true;
   }
 
+  function selectRange(from, to = from) {
+    const start = Math.max(0, Math.min(Number(from) || 0, view.state.doc.length));
+    const end = Math.max(start, Math.min(Number(to) || start, view.state.doc.length));
+    return selectMatch({ from: start, to: end });
+  }
+
   function findSearch(query, options = {}) {
     const matches = searchMatches(query, options);
     if (!matches.length) return { found: false, total: 0 };
@@ -602,6 +607,7 @@ function createEditor(parent, options = {}) {
 
   const highPriorityKeys = [
     { key: "Mod-s", run: () => (options.onSave?.(), true) },
+    { key: "Mod-f", run: () => (options.onSearch?.(), true) },
     { key: "Mod-Enter", run: () => (options.onCompile?.(), true) },
     { key: "Mod-z", run: () => exec("undo") },
     { key: "Mod-y", run: () => exec("redo") },
@@ -642,7 +648,7 @@ function createEditor(parent, options = {}) {
     Prec.highest(
       keymap.of(highPriorityKeys)
     ),
-    keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap])
+    keymap.of([...defaultKeymap, ...historyKeymap])
   ];
 
   view = new EditorView({
@@ -670,6 +676,7 @@ function createEditor(parent, options = {}) {
     setSuggestions(nextSuggestions) {
       suggestions = normalizeSuggestions(nextSuggestions);
     },
+    selectRange,
     find(query, options) {
       return findSearch(query, options);
     },

@@ -9,5 +9,8 @@ contextBridge.exposeInMainWorld("localleafDesktop", {
   },
   installUpdate(update) {
     return ipcRenderer.invoke("localleaf:install-update", update);
+  },
+  chooseModelFolder() {
+    return ipcRenderer.invoke("localleaf:choose-model-folder");
   }
 });
