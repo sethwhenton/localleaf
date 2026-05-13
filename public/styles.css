@@ -1166,6 +1166,14 @@ html.theme-dark .cm-activeLineGutter {
   box-shadow: 6px 12px 0 -5px currentColor, -5px 7px 0 -4px currentColor;
 }
 
+.ui-glyph-stop::before {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
 .ui-glyph-refresh::before {
   content: "";
   position: absolute;
@@ -4670,6 +4678,7 @@ html.theme-dark .cm-activeLineGutter {
 }
 
 .pdf-page {
+  position: relative;
   overflow: hidden;
   border: 1px solid rgba(20, 16, 12, 0.1);
   background: #fff;
@@ -4679,6 +4688,54 @@ html.theme-dark .cm-activeLineGutter {
 .pdf-page-canvas {
   display: block;
   background: #fff;
+}
+
+.pdf-text-layer {
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+  forced-color-adjust: none;
+  z-index: 1;
+}
+
+.pdf-text-layer :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.pdf-text-layer > :not(.markedContent),
+.pdf-text-layer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.pdf-text-layer .markedContent {
+  display: contents;
+}
+
+.pdf-text-layer span[role="img"],
+.pdf-text-layer .endOfContent {
+  user-select: none;
+  cursor: default;
+}
+
+.pdf-text-layer ::selection {
+  background: rgba(255, 103, 0, 0.28);
 }
 
 .pdf-render-status {
@@ -7126,6 +7183,212 @@ html.theme-dark .settings-switch input:checked + span::before {
   font: 12px/1.5 Consolas, "Cascadia Mono", monospace;
 }
 
+.ai-file-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-file-links button {
+  max-width: 100%;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 103, 0, 0.22);
+  border-radius: 6px;
+  background: var(--orange-soft);
+  color: var(--orange-dark);
+  font-size: 11px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-run-change {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.ai-run-head {
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-bottom: 1px solid transparent;
+}
+
+.ai-run-change.expanded .ai-run-head {
+  border-bottom-color: var(--line);
+}
+
+.ai-run-toggle {
+  min-width: 0;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+}
+
+.ai-run-toggle strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-run-actions,
+.ai-change-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.ai-run-actions button {
+  min-height: 30px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.ai-run-actions button:hover:not(:disabled) {
+  border-color: rgba(255, 103, 0, 0.24);
+  color: var(--orange-dark);
+}
+
+.ai-run-actions button:disabled,
+.ai-change-actions button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.ai-run-files {
+  display: grid;
+}
+
+.ai-run-files .ai-change-card {
+  border-width: 0 0 1px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ai-run-files .ai-change-card:last-child {
+  border-bottom: 0;
+}
+
+.ai-change-toggle {
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.ai-change-toggle span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.ai-change-toggle strong,
+.ai-change-toggle small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-change-toggle strong {
+  font-size: 13px;
+}
+
+.ai-change-toggle small,
+.ai-change-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ai-change-status {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--orange-soft);
+  color: var(--orange-dark);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.ai-change-status.reverted {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.ai-change-status.applied {
+  background: rgba(255, 103, 0, 0.14);
+  color: var(--orange-dark);
+}
+
+.ai-change-status.rejected,
+.ai-change-status.stale {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.ai-history-card.expanded {
+  gap: 9px;
+}
+
+.ai-change-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+html.theme-dark .changes-panel,
+html.theme-dark .ai-helper-panel {
+  background: #111210;
+}
+
+html.theme-dark .change-history-list,
+html.theme-dark .ai-run-change {
+  background: #1f201e;
+}
+
+html.theme-dark .ai-run-change {
+  border-color: #353630;
+}
+
+html.theme-dark .ai-run-files .ai-change-card {
+  border-color: #30312c;
+}
+
+html.theme-dark .ai-diff-preview {
+  border-color: rgba(255, 107, 25, 0.28);
+  background: #0f100f;
+  color: #e9ded1;
+}
+
 .ai-quick-actions {
   display: flex;
   flex-wrap: wrap;
@@ -9165,30 +9428,24 @@ html.theme-dark .yolo-warning strong {
 
 .ai-message-working .ai-message-body {
   color: var(--muted);
+  overflow: hidden;
 }
 
 .ai-message-working p {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-}
-
-.ai-working-spinner,
-.ai-button-spinner {
-  width: 13px;
-  height: 13px;
-  display: inline-block;
-  border: 2px solid rgba(255, 103, 0, 0.22);
-  border-top-color: var(--orange);
-  border-radius: 999px;
-  animation: ai-spin 0.72s linear infinite;
+  margin-bottom: 2px;
 }
 
 .ai-button-spinner {
   width: 14px;
   height: 14px;
-  border-color: rgba(255, 255, 255, 0.42);
+  display: inline-block;
+  border: 2px solid rgba(255, 255, 255, 0.42);
   border-top-color: #fff;
+  border-radius: 999px;
+  animation: ai-spin 0.72s linear infinite;
 }
 
 .ai-typing-dots {
@@ -9750,24 +10007,31 @@ html.theme-dark .provider-logo-custom {
 .ai-session-strip {
   min-width: 0;
   display: grid;
+  gap: 2px;
+  margin: 0 10px -2px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 18px 18px 4px 4px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(250, 247, 243, 0.94));
+}
+
+.ai-queue-row {
+  min-width: 0;
+  min-height: 30px;
+  display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  margin: 0 10px -2px;
-  padding: 5px 7px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(250, 247, 243, 0.94));
+  gap: 8px;
 }
 
 .ai-session-strip-title {
   min-width: 0;
-  height: 26px;
+  height: 28px;
   display: inline-grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 10px 13px minmax(0, 1fr);
   align-items: center;
-  gap: 7px;
-  padding: 0 8px;
+  gap: 6px;
+  padding: 0 6px 0 0;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -9781,7 +10045,7 @@ html.theme-dark .provider-logo-custom {
   color: var(--orange-dark);
 }
 
-.ai-session-strip-title span:nth-child(2) {
+.ai-session-strip-title > span:last-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -9809,10 +10073,23 @@ html.theme-dark .provider-logo-custom {
   border-radius: 0 0 0 4px;
 }
 
+.ai-strip-handle,
+.ai-strip-spacer {
+  width: 8px;
+  height: 16px;
+}
+
+.ai-strip-handle {
+  opacity: 0.55;
+  background-image: radial-gradient(currentColor 1px, transparent 1.4px);
+  background-size: 4px 4px;
+  background-position: 0 0;
+}
+
 .ai-session-strip-actions {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 5px;
 }
 
 .ai-strip-action {
@@ -9930,7 +10207,7 @@ html.theme-dark .ai-strip-menu button:hover {
   color: var(--orange);
 }
 
-html.theme-dark .ai-session-strip-title span:nth-child(2) {
+html.theme-dark .ai-session-strip-title > span:last-child {
   color: #f7f0e8;
 }
 

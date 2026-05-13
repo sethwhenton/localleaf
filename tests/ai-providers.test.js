@@ -329,3 +329,47 @@ test("falls back to deterministic proposals when no hosted provider is active", 
     fs.rmSync(projectRoot, { recursive: true, force: true });
   }
 });
+
+test("falls back to safe proposals when hosted provider generation is malformed", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-provider-malformed-agent-"));
+  const mainPath = path.join(projectRoot, "main.tex");
+  fs.writeFileSync(mainPath, "\\documentclass{article}\n\\title{ML}\n\\begin{document}\n\\maketitle\n\\end{document}\n");
+  const mock = await startOpenAiCompatibleMock(() => ({
+    status: 200,
+    body: { choices: [] }
+  }));
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    await request(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        id: "malformed-agent",
+        name: "Malformed Agent",
+        type: "openai-compatible",
+        baseUrl: mock.baseUrl,
+        apiKey: "test-provider-key",
+        modelId: "kimi-k2.6",
+        models: [{ id: "kimi-k2.6", name: "Kimi K2.6" }],
+        activate: true
+      }
+    });
+
+    const message = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        path: "main.tex",
+        message: "hello\nchange the title from ML to Machine Learning in the first page"
+      }
+    });
+
+    assert.doesNotMatch(message.reply, /Provider returned a malformed response/i);
+    assert.equal(message.proposals.length, 1);
+    assert.match(message.proposals[0].newText, /\\title\{Machine Learning\}/);
+    assert.equal(fs.readFileSync(mainPath, "utf8").includes("Machine Learning"), false);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});

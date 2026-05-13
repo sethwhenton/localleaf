@@ -312,3 +312,155 @@ test("streams deterministic fallback proposal lifecycle events from AI agent run
     fs.rmSync(projectRoot, { recursive: true, force: true });
   }
 });
+
+test("preserves run metadata and safely reverts applied AI proposals", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-revert-project-"));
+  const mainPath = path.join(projectRoot, "main.tex");
+  fs.writeFileSync(mainPath, "\\documentclass{article}\n\\begin{document}\nAlpha title.\n\\end{document}\n");
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    const runId = "run-revert-test";
+    const message = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        runId,
+        message: "change from Alpha title to Beta title",
+        path: "main.tex",
+        aiPermissions: { askBeforeEdits: true }
+      }
+    });
+    const proposal = message.proposals[0];
+    assert.equal(proposal.runId, runId);
+    assert.ok(proposal.newHash);
+    assert.ok(Number.isInteger(proposal.focus.start));
+    assert.ok(Number.isInteger(proposal.focus.end));
+
+    const applied = await request(baseUrl, "/api/agent/approval/approve", {
+      method: "POST",
+      body: { proposalId: proposal.id }
+    });
+    assert.equal(applied.proposal.status, "applied");
+    assert.equal(applied.proposal.newHash, proposal.newHash);
+    assert.match(fs.readFileSync(mainPath, "utf8"), /Beta title/);
+
+    const reverted = await request(baseUrl, "/api/agent/proposal/revert", {
+      method: "POST",
+      body: { proposalId: proposal.id }
+    });
+    assert.equal(reverted.proposal.status, "reverted");
+    assert.match(fs.readFileSync(mainPath, "utf8"), /Alpha title/);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("undoes AI runs all-or-nothing and refuses stale revert targets", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-run-undo-project-"));
+  const mainPath = path.join(projectRoot, "main.tex");
+  const sectionPath = path.join(projectRoot, "section.tex");
+  fs.writeFileSync(mainPath, "\\documentclass{article}\n\\begin{document}\nAlpha\n\\input{section}\n\\end{document}\n");
+  fs.writeFileSync(sectionPath, "Gamma\n");
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    const runId = "run-undo-test";
+    const first = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: { runId, message: "change from Alpha to Beta", path: "main.tex", aiPermissions: { askBeforeEdits: true } }
+    });
+    const second = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: { runId, message: "change from Gamma to Delta", path: "section.tex", aiPermissions: { askBeforeEdits: true } }
+    });
+    await request(baseUrl, "/api/agent/approval/approve", {
+      method: "POST",
+      body: { proposalId: first.proposals[0].id }
+    });
+    await request(baseUrl, "/api/agent/approval/approve", {
+      method: "POST",
+      body: { proposalId: second.proposals[0].id }
+    });
+
+    const undone = await request(baseUrl, "/api/agent/run/revert", {
+      method: "POST",
+      body: { runId }
+    });
+    assert.equal(undone.proposals.length, 2);
+    assert.match(fs.readFileSync(mainPath, "utf8"), /\bAlpha\b/);
+    assert.match(fs.readFileSync(sectionPath, "utf8"), /\bGamma\b/);
+
+    const staleRunId = "run-stale-undo-test";
+    const staleFirst = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: { runId: staleRunId, message: "change from Alpha to Beta", path: "main.tex", aiPermissions: { askBeforeEdits: true } }
+    });
+    const staleSecond = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: { runId: staleRunId, message: "change from Gamma to Delta", path: "section.tex", aiPermissions: { askBeforeEdits: true } }
+    });
+    await request(baseUrl, "/api/agent/approval/approve", {
+      method: "POST",
+      body: { proposalId: staleFirst.proposals[0].id }
+    });
+    await request(baseUrl, "/api/agent/approval/approve", {
+      method: "POST",
+      body: { proposalId: staleSecond.proposals[0].id }
+    });
+    fs.writeFileSync(mainPath, fs.readFileSync(mainPath, "utf8").replace("Beta", "Manual"));
+    const stale = await rawRequest(baseUrl, "/api/agent/run/revert", {
+      method: "POST",
+      body: { runId: staleRunId }
+    });
+    assert.equal(stale.response.status, 409);
+    assert.match(fs.readFileSync(mainPath, "utf8"), /\bManual\b/);
+    assert.match(fs.readFileSync(sectionPath, "utf8"), /\bDelta\b/);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("creates proposals from Cursor SDK scratch workspace diffs without mutating live files first", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-cursor-agent-project-"));
+  const mainPath = path.join(projectRoot, "main.tex");
+  const originalText = "\\documentclass{article}\n\\title{ML}\n\\begin{document}\n\\maketitle\n\\end{document}\n";
+  fs.writeFileSync(mainPath, originalText);
+  const { app, baseUrl } = await startApp(projectRoot, {
+    cursorAgentRunner: async ({ cwd }) => {
+      fs.writeFileSync(
+        path.join(cwd, "main.tex"),
+        originalText.replace("\\title{ML}", "\\title{Machine Learning}"),
+        "utf8"
+      );
+      return { reply: "Updated the title in the scratch workspace." };
+    }
+  });
+
+  try {
+    const message = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        path: "main.tex",
+        message: "hello\nchange the title from ML to Machine Learning in the first page",
+        aiProviderId: "cursor-sdk-local",
+        aiModelId: "composer-2"
+      }
+    });
+
+    assert.equal(message.provider.id, "cursor-sdk-local");
+    assert.equal(message.proposals.length, 1);
+    assert.match(message.proposals[0].newText, /\\title\{Machine Learning\}/);
+    assert.equal(fs.readFileSync(mainPath, "utf8"), originalText);
+
+    await request(baseUrl, "/api/agent/approval/approve", {
+      method: "POST",
+      body: { proposalId: message.proposals[0].id }
+    });
+    assert.match(fs.readFileSync(mainPath, "utf8"), /\\title\{Machine Learning\}/);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});

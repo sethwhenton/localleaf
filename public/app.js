@@ -228,16 +228,29 @@ const local = {
   settingsModelSearch: "",
   aiPrompt: "",
   aiBusy: false,
+  aiActivityMessage: "",
+  aiActiveRunCount: 0,
+  aiActiveRunId: "",
+  aiRunControllers: new Set(),
+  aiStopRequested: false,
   aiQuickAction: "",
   aiModelPickerOpen: false,
   aiModelSearch: "",
+  activeCursorSdkModelId: localStorage.getItem("localleaf.activeCursorSdkModelId") || "",
   aiSessionMenuOpen: false,
   aiSessionMoreMenuOpen: false,
+  aiQueuedPromptMenuOpenId: "",
   aiChatNeedsJump: false,
   aiChatPinnedToBottom: true,
   aiForceScrollBottom: true,
   aiQueueingEnabled: localStorage.getItem("localleaf.aiQueueingEnabled") !== "0",
   aiQueuedPrompts: [],
+  aiEditingQueuedPromptId: "",
+  aiExpandedRuns: new Set(),
+  aiExpandedChanges: new Set(),
+  aiExpandedDiffs: new Set(),
+  aiCompileRepairAttempts: {},
+  aiCompileVerifying: false,
   aiSessions: initialAiSessionState.sessions,
   aiCurrentSessionId: initialAiSessionState.currentSessionId,
   aiProviderEnabled: readBooleanMap(AI_PROVIDER_ENABLE_STORAGE_KEY),
@@ -283,26 +296,34 @@ async function api(path, options = {}) {
 
   const controller = options.timeoutMs ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
+  const signal = options.signal || controller?.signal;
   let response;
   try {
     response = await fetch(path, {
       method: options.method || "GET",
       headers,
-      signal: controller?.signal,
+      signal,
       body: options.rawBody || (options.body ? JSON.stringify(options.body) : undefined)
     });
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("Request timed out.");
+      throw new Error(options.signal?.aborted ? "Request stopped." : "Request timed out.");
     }
     throw error;
   } finally {
     if (timeout) clearTimeout(timeout);
   }
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { error: response.ok ? "Unexpected response from LocalLeaf." : "Unexpected response from the LocalLeaf host." };
+  }
   if (!response.ok) {
-    throw new Error(payload.error || response.statusText);
+    const error = new Error(payload.error || response.statusText);
+    Object.assign(error, payload, { status: response.status });
+    throw error;
   }
   return payload;
 }
@@ -519,6 +540,13 @@ function modelPickerItems() {
     detail: model.sizeLabel || "Local model"
   }));
   if (local.aiPermissions.localModelOnly) return localItems;
+  const cursorItems = [{
+    providerId: "cursor-sdk-local",
+    modelId: "composer-2",
+    label: "Composer 2",
+    providerName: "Cursor SDK",
+    detail: "Local SDK runtime"
+  }];
   const providerItems = connectedAiProviders().filter(isProviderEnabled).flatMap((provider) => {
     return providerModelEntries(provider).filter((model) => isModelEnabled(provider.id, model.id)).map((model) => {
       return {
@@ -530,7 +558,7 @@ function modelPickerItems() {
       };
     });
   });
-  return [...localItems, ...providerItems];
+  return [...localItems, ...cursorItems, ...providerItems];
 }
 
 function modelStatus(model) {
@@ -559,6 +587,15 @@ function activeAiProviderModel() {
         modelName: "Fallback",
         label: "Local / Fallback"
       };
+  }
+  if (local.activeCursorSdkModelId) {
+    return {
+      providerId: "cursor-sdk-local",
+      modelId: local.activeCursorSdkModelId,
+      providerName: "Cursor SDK",
+      modelName: local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId,
+      label: `Cursor SDK / ${local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId}`
+    };
   }
   if (state.activeModel && typeof state.activeModel === "object") {
     const providerId = state.activeModel.providerId || "local";
@@ -812,7 +849,9 @@ function connectCollab() {
     clearTimeout(local.collabLostTimer);
     local.collabLostTimer = null;
     clearInterval(local.collabHeartbeatTimer);
-    local.collabHeartbeatTimer = setInterval(() => sendCollab("heartbeat"), 15000);
+    clearRemoteReconnectNotice();
+    sendCollab("heartbeat");
+    local.collabHeartbeatTimer = setInterval(() => sendCollab("heartbeat"), 5000);
     if (local.selectedFile) {
       sendCollab("open_file", { filePath: local.selectedFile });
     }
@@ -833,13 +872,19 @@ function connectCollab() {
     local.collabHeartbeatTimer = null;
     if (route().view === "editor" && local.appState?.session?.status !== "ended") {
       clearTimeout(local.collabLostTimer);
-      local.collabLostTimer = setTimeout(() => {
+      local.collabLostTimer = setTimeout(async () => {
         const socketOpen = local.collabSocket?.readyState === WebSocket.OPEN;
         if (route().view === "editor" && !socketOpen) {
-          handleSessionEnded(
-            "Connection to the host was lost.",
-            "The host app may have closed, the PC may be offline, or the public tunnel may have stopped."
-          );
+          try {
+            await loadState();
+            if (local.appState?.session?.status === "ended") {
+              handleSessionEnded("The host has ended the session.");
+              return;
+            }
+          } catch {
+            // Keep the editor open while the public tunnel reconnects.
+          }
+          showRemoteReconnectNotice("The live editor connection is reconnecting.");
         }
       }, 8000);
       local.collabReconnectTimer = setTimeout(connectCollab, 1200);
@@ -901,6 +946,24 @@ function handleSessionEnded(reason, detail) {
   local.eventDisconnectTimer = null;
   closeCollab();
   setView("ended", endedViewParams());
+}
+
+function showRemoteReconnectNotice(message) {
+  if (!isGuestClient() && !local.joinRequestId) return;
+  showAppNotice(message || "Trying to reconnect to the host.", {
+    kind: "remote-reconnect",
+    title: "Reconnecting",
+    detail: "This session will stay open unless the host ends it.",
+    timeoutMs: 0
+  });
+}
+
+function clearRemoteReconnectNotice() {
+  if (local.appNotice?.kind !== "remote-reconnect") return;
+  clearTimeout(local.appNoticeTimer);
+  local.appNoticeTimer = null;
+  local.appNotice = null;
+  renderAppNotice();
 }
 
 function applyRemoteText(filePath, text) {
@@ -1706,6 +1769,7 @@ function showAppNotice(message, options = {}) {
   const id = Date.now();
   local.appNotice = {
     id,
+    kind: options.kind || "",
     type: options.type || "info",
     title: options.title || "LocalLeaf",
     message: String(message || "Something went wrong."),
@@ -2519,6 +2583,16 @@ async function saveProviderFromDialog() {
 
 async function useProviderModel(providerId, modelId) {
   try {
+    if (providerId === "cursor-sdk-local") {
+      local.activeCursorSdkModelId = modelId || "composer-2";
+      localStorage.setItem("localleaf.activeCursorSdkModelId", local.activeCursorSdkModelId);
+      local.aiModelPickerOpen = false;
+      showAppNotice("Cursor SDK selected for AI Helper.", { type: "success", title: "Models", timeoutMs: 2600 });
+      refreshRightRailUi();
+      return;
+    }
+    local.activeCursorSdkModelId = "";
+    localStorage.removeItem("localleaf.activeCursorSdkModelId");
     if (!providerId || providerId === "local" || providerId === "localleaf-local") {
       await activateModel(modelId);
       return;
@@ -4431,7 +4505,9 @@ function selectedEditorText() {
   return selection && text.includes(selection) ? selection : "";
 }
 
-function aiProposalDiffMarkup(proposal) {
+function aiProposalDiffMarkup(proposal, options = {}) {
+  const expanded = options.expanded !== false;
+  if (!expanded) return "";
   const hunks = Array.isArray(proposal.diffHunks) ? proposal.diffHunks : [];
   if (hunks.length) {
     const lines = hunks.flatMap((hunk) => hunk.lines || []).slice(0, 80);
@@ -4453,6 +4529,58 @@ function proposalProviderLabel(proposal) {
   const provider = proposal.provider?.name || proposal.providerName || "";
   const model = proposal.modelId || proposal.modelName || "";
   return [provider, model].filter(Boolean).join(" / ") || "Local fallback";
+}
+
+function proposalStatusLabel(status) {
+  const normalized = String(status || "proposed").toLowerCase();
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function aiProposalDiffStats(proposal) {
+  const stats = { added: 0, removed: 0 };
+  const hunks = Array.isArray(proposal?.diffHunks) ? proposal.diffHunks : [];
+  hunks.forEach((hunk) => {
+    (hunk.lines || []).forEach((line) => {
+      if (line.type === "added") stats.added += 1;
+      else if (line.type === "removed") stats.removed += 1;
+    });
+  });
+  return stats;
+}
+
+function aiRunIdForProposal(proposal) {
+  return proposal?.runId || proposal?.id || "run";
+}
+
+function aiChangeRuns(items) {
+  const groups = new Map();
+  items.forEach((proposal) => {
+    const runId = aiRunIdForProposal(proposal);
+    if (!groups.has(runId)) {
+      groups.set(runId, {
+        id: runId,
+        createdAt: proposal.createdAt || Date.now(),
+        updatedAt: proposal.appliedAt || proposal.rejectedAt || proposal.revertedAt || proposal.createdAt || Date.now(),
+        proposals: []
+      });
+    }
+    const group = groups.get(runId);
+    group.proposals.push(proposal);
+    group.createdAt = Math.min(group.createdAt, proposal.createdAt || group.createdAt);
+    group.updatedAt = Math.max(group.updatedAt, proposal.appliedAt || proposal.rejectedAt || proposal.revertedAt || proposal.createdAt || group.updatedAt);
+  });
+  return [...groups.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function aiRunStats(run) {
+  return run.proposals.reduce((stats, proposal) => {
+    const diff = aiProposalDiffStats(proposal);
+    stats.added += diff.added;
+    stats.removed += diff.removed;
+    if (proposal.status === "applied") stats.applied += 1;
+    if (proposal.status === "reverted") stats.reverted += 1;
+    return stats;
+  }, { added: 0, removed: 0, applied: 0, reverted: 0 });
 }
 
 function aiApprovalCardMarkup(proposal) {
@@ -4479,27 +4607,34 @@ function aiApprovalCardMarkup(proposal) {
 
 function aiHistoryCardMarkup(proposal) {
   const status = proposal.status || "proposed";
+  const expanded = local.aiExpandedChanges.has(proposal.id);
+  const diffExpanded = local.aiExpandedDiffs.has(proposal.id);
+  const canRevert = status === "applied";
   return `
-    <article class="ai-change-card ai-history-card ${escapeHtml(status)}" data-ai-proposal="${escapeHtml(proposal.id)}">
-      <div class="ai-change-head">
-        <div>
-          <strong>${escapeHtml(proposal.path || "Current file")}</strong>
-          <span>${escapeHtml(proposal.summary || "AI proposed a text edit.")}</span>
+    <article class="ai-change-card ai-history-card ${escapeHtml(status)} ${expanded ? "expanded" : ""}" data-ai-proposal="${escapeHtml(proposal.id)}">
+      <button type="button" class="ai-change-toggle" data-toggle-ai-change="${escapeHtml(proposal.id)}" aria-expanded="${expanded ? "true" : "false"}">
+        <span>
+          <strong>${escapeHtml(proposal.summary || "AI proposed a text edit.")}</strong>
+          <small>${escapeHtml(proposal.path || "Current file")}</small>
+        </span>
+        <b class="ai-change-status ${escapeHtml(status)}">${escapeHtml(proposalStatusLabel(status))}</b>
+        <i aria-hidden="true">${expanded ? "^" : "v"}</i>
+      </button>
+      ${expanded ? `
+        <div class="ai-change-meta">
+          <span>${escapeHtml(proposalProviderLabel(proposal))}</span>
+          <span>${escapeHtml(formatAiTime(proposal.appliedAt || proposal.rejectedAt || proposal.revertedAt || proposal.createdAt))}</span>
         </div>
-        <b>${escapeHtml(status)}</b>
-      </div>
-      <div class="ai-change-meta">
-        <span>${escapeHtml(proposalProviderLabel(proposal))}</span>
-        <span>${escapeHtml(formatAiTime(proposal.appliedAt || proposal.rejectedAt || proposal.createdAt))}</span>
-      </div>
-      ${proposal.userRequest ? `<p class="ai-change-request">${escapeHtml(proposal.userRequest)}</p>` : ""}
-      ${aiProposalDiffMarkup(proposal)}
-      <div class="ai-change-actions">
-        <button class="btn" data-open-ai-proposal="${escapeHtml(proposal.id)}">Open file</button>
-        <button class="btn" data-explain-ai-proposal="${escapeHtml(proposal.id)}">Explain</button>
-        <button class="btn" data-copy-ai-proposal="${escapeHtml(proposal.id)}">Copy diff</button>
-        <button class="btn" data-view-ai-proposal="${escapeHtml(proposal.id)}">View</button>
-      </div>
+        ${proposal.userRequest ? `<p class="ai-change-request">${escapeHtml(proposal.userRequest)}</p>` : ""}
+        ${aiProposalDiffMarkup(proposal, { expanded: diffExpanded })}
+        <div class="ai-change-actions">
+          <button class="btn" data-open-ai-proposal="${escapeHtml(proposal.id)}">Open file</button>
+          <button class="btn" data-explain-ai-proposal="${escapeHtml(proposal.id)}">Explain</button>
+          <button class="btn" data-copy-ai-proposal="${escapeHtml(proposal.id)}">Copy diff</button>
+          <button class="btn" data-view-ai-proposal="${escapeHtml(proposal.id)}">${diffExpanded ? "Collapse" : "View"}</button>
+          <button class="btn" data-revert-ai-proposal="${escapeHtml(proposal.id)}" ${canRevert ? "" : "disabled"}>Revert</button>
+        </div>
+      ` : ""}
     </article>
   `;
 }
@@ -4508,8 +4643,8 @@ function aiMessageApprovalCardsMarkup(message) {
   const ids = Array.isArray(message.approvalCards) ? message.approvalCards : [];
   const direct = Array.isArray(message.proposals) ? message.proposals : [];
   const cards = ids.length
-    ? ids.map(findAiProposal).filter(Boolean)
-    : direct.filter((proposal) => proposal?.status === "proposed");
+    ? ids.map(findAiProposal).filter((proposal) => proposal && ["pending", "proposed"].includes(proposal.status || "proposed") && proposal.approvalRequired !== false)
+    : direct.filter((proposal) => ["pending", "proposed"].includes(proposal?.status || "") && proposal?.approvalRequired !== false);
   return cards.length ? `<div class="ai-message-approvals">${cards.map(aiApprovalCardMarkup).join("")}</div>` : "";
 }
 
@@ -4519,47 +4654,64 @@ function aiMessageMarkup(message) {
       <div class="ai-message-body">
         <span class="ai-message-role">${message.role === "user" ? "You" : "LocalLeaf"}</span>
         <p>${escapeHtml(message.message || "")}</p>
+        ${Array.isArray(message.fileLinks) && message.fileLinks.length ? `
+          <div class="ai-file-links">
+            ${message.fileLinks.map((file) => `<button type="button" data-open-ai-file-link="${escapeHtml(file)}">${escapeHtml(file)}</button>`).join("")}
+          </div>
+        ` : ""}
         ${aiMessageApprovalCardsMarkup(message)}
       </div>
     </div>
   `;
 }
 
-function aiWorkingMarkup() {
+function aiWorkingMarkup(message = "") {
+  const status = message || local.aiActivityMessage || "LocalLeaf is thinking";
   return `
     <div class="ai-message ai-message-assistant ai-message-working" aria-live="polite">
       <div class="ai-message-body">
         <span class="ai-message-role">LocalLeaf</span>
-        <p><span class="ai-working-spinner" aria-hidden="true"></span>LocalLeaf is thinking<span class="ai-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
+        <p>${escapeHtml(status)}<span class="ai-typing-dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
       </div>
     </div>
   `;
 }
 
-function aiSessionActionStripMarkup() {
-  const session = currentAiSession();
-  const queueLabel = local.aiQueueingEnabled ? "Queueing on" : "Queueing off";
+function queuedPromptPreview(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+function aiQueuedPromptStripMarkup() {
+  if (!local.aiBusy || !local.aiQueuedPrompts.length) return "";
   return `
-    <div class="ai-session-strip">
-      <button type="button" class="ai-session-strip-title" id="aiSessionStripButton" title="AI sessions" aria-label="AI sessions">
-        <span class="ai-strip-branch" aria-hidden="true"></span>
-        <span>${escapeHtml(session.title || "New session")}</span>
-        ${local.aiQueuedPrompts.length ? `<b>${local.aiQueuedPrompts.length} queued</b>` : ""}
-      </button>
-      <div class="ai-session-strip-actions">
-        <button type="button" class="ai-strip-action" id="aiSteerButton" title="Steer this session" aria-label="Steer this session">${editorToolIcon("edit")}<span>Steer</span></button>
-        <button type="button" class="ai-strip-action ai-strip-icon" id="deleteCurrentAiSession" title="Delete current session" aria-label="Delete current session">${editorToolIcon("delete")}</button>
-        <div class="ai-strip-more-wrap ${local.aiSessionMoreMenuOpen ? "open" : ""}">
-          <button type="button" class="ai-strip-action ai-strip-icon" id="aiSessionMoreButton" title="Session actions" aria-label="Session actions" aria-expanded="${local.aiSessionMoreMenuOpen ? "true" : "false"}">...</button>
-          ${local.aiSessionMoreMenuOpen ? `
-            <div class="ai-strip-menu" role="menu">
-              <button type="button" data-edit-current-ai-session role="menuitem">${editorToolIcon("edit")} Edit session name</button>
-              <button type="button" data-toggle-ai-queueing role="menuitem"><span class="ai-strip-queue-dot ${local.aiQueueingEnabled ? "on" : ""}" aria-hidden="true"></span>${local.aiQueueingEnabled ? "Turn off queueing" : "Turn on queueing"}</button>
-              <small>${escapeHtml(queueLabel)}</small>
+    <div class="ai-session-strip" aria-label="Queued AI messages">
+      ${local.aiQueuedPrompts.map((queued, index) => {
+        const isMenuOpen = local.aiQueuedPromptMenuOpenId === queued.id;
+        return `
+        <div class="ai-queue-row">
+          <button type="button" class="ai-session-strip-title" data-edit-queued-ai-prompt="${escapeHtml(queued.id)}" title="Edit queued message" aria-label="Edit queued message">
+            ${index === 0 ? `<span class="ai-strip-handle" aria-hidden="true"></span>` : `<span class="ai-strip-spacer" aria-hidden="true"></span>`}
+            <span class="ai-strip-branch" aria-hidden="true"></span>
+            <span>${escapeHtml(queuedPromptPreview(queued.message) || "Queued message")}</span>
+          </button>
+          <div class="ai-session-strip-actions">
+            <button type="button" class="ai-strip-action" data-steer-queued-ai-prompt="${escapeHtml(queued.id)}" title="Steer the active AI run" aria-label="Steer the active AI run"><span>Steer</span></button>
+            <button type="button" class="ai-strip-action ai-strip-icon" data-delete-queued-ai-prompt="${escapeHtml(queued.id)}" title="Delete queued message" aria-label="Delete queued message">${editorToolIcon("delete")}</button>
+            <div class="ai-strip-more-wrap ${isMenuOpen ? "open" : ""}">
+              <button type="button" class="ai-strip-action ai-strip-icon" data-toggle-queued-ai-menu="${escapeHtml(queued.id)}" title="Queue actions" aria-label="Queue actions" aria-expanded="${isMenuOpen ? "true" : "false"}">...</button>
+              ${isMenuOpen ? `
+                <div class="ai-strip-menu" role="menu">
+                  <button type="button" data-edit-queued-ai-prompt="${escapeHtml(queued.id)}" role="menuitem">${editorToolIcon("edit")} Edit queued message</button>
+                  <button type="button" data-steer-queued-ai-prompt="${escapeHtml(queued.id)}" role="menuitem">${editorToolIcon("edit")} Steer now</button>
+                  <button type="button" data-delete-queued-ai-prompt="${escapeHtml(queued.id)}" role="menuitem">${editorToolIcon("delete")} Delete queued message</button>
+                  <small>${escapeHtml(index === 0 ? "Next message" : `Queued position ${index + 1}`)}</small>
+                </div>
+              ` : ""}
             </div>
-          ` : ""}
+          </div>
         </div>
-      </div>
+      `;
+      }).join("")}
     </div>
   `;
 }
@@ -4638,6 +4790,19 @@ function aiModelChipMarkup() {
   `;
 }
 
+function aiComposerShouldStop() {
+  return (local.aiBusy || local.aiActivityMessage) && !String(local.aiPrompt || "").trim() && !local.aiEditingQueuedPromptId;
+}
+
+function aiSendButtonMarkup() {
+  const stopMode = aiComposerShouldStop();
+  return `
+    <button class="btn btn-primary ai-send-button ${stopMode ? "is-stop" : ""}" type="${stopMode ? "button" : "submit"}" ${stopMode ? "data-stop-ai-run" : ""} title="${stopMode ? "Stop" : "Send"}" aria-label="${stopMode ? "Stop AI run" : "Send"}">
+      ${uiGlyph(stopMode ? "stop" : "upload")}
+    </button>
+  `;
+}
+
 function aiHelperPanelMarkup() {
   return `
     <section class="ai-helper-panel right-rail-panel ${local.rightRailTab === "ai" ? "active" : ""}" ${local.rightRailTab === "ai" ? "" : "hidden"}>
@@ -4650,11 +4815,11 @@ function aiHelperPanelMarkup() {
       <div class="ai-chat-wrap">
         <div class="ai-chat-list" id="aiChatList">
           ${local.aiMessages.map(aiMessageMarkup).join("")}
-          ${local.aiBusy ? aiWorkingMarkup() : ""}
+          ${local.aiActivityMessage ? aiWorkingMarkup() : ""}
         </div>
         <button class="ai-scroll-latest ${local.aiChatNeedsJump ? "visible" : ""}" id="aiScrollLatest" type="button" title="Jump to latest" aria-label="Jump to latest" aria-hidden="${local.aiChatNeedsJump ? "false" : "true"}">${downArrowIcon()}</button>
       </div>
-      ${aiSessionActionStripMarkup()}
+      ${aiQueuedPromptStripMarkup()}
       <form class="ai-input-form" id="aiHelperForm">
         <textarea id="aiPrompt" rows="2" placeholder="Ask AI Helper...">${escapeHtml(local.aiPrompt)}</textarea>
         <div class="ai-composer-footer">
@@ -4662,23 +4827,48 @@ function aiHelperPanelMarkup() {
             ${aiSessionMenuMarkup()}
             ${aiModelChipMarkup()}
           </div>
-          <button class="btn btn-primary ai-send-button" ${local.aiBusy ? "disabled" : ""} title="Send" aria-label="Send">${local.aiBusy ? `<span class="ai-button-spinner" aria-hidden="true"></span>` : uiGlyph("upload")}</button>
+          ${aiSendButtonMarkup()}
         </div>
       </form>
     </section>
   `;
 }
 
+function aiRunChangeMarkup(run) {
+  const expanded = local.aiExpandedRuns.has(run.id);
+  const stats = aiRunStats(run);
+  const appliedCount = stats.applied;
+  const fileCount = new Set(run.proposals.map((proposal) => proposal.path || "Current file")).size;
+  return `
+    <section class="ai-run-change ${expanded ? "expanded" : ""}" data-ai-run="${escapeHtml(run.id)}">
+      <div class="ai-run-head">
+        <button type="button" class="ai-run-toggle" data-toggle-ai-run="${escapeHtml(run.id)}" aria-expanded="${expanded ? "true" : "false"}">
+          <strong>${fileCount} file${fileCount === 1 ? "" : "s"} changed</strong>
+          <span class="diff-added">+${stats.added}</span>
+          <span class="diff-removed">-${stats.removed}</span>
+        </button>
+        <div class="ai-run-actions">
+          <button type="button" data-undo-ai-run="${escapeHtml(run.id)}" ${appliedCount ? "" : "disabled"}>Undo</button>
+          <button type="button" data-review-ai-run="${escapeHtml(run.id)}">Review</button>
+          <button type="button" data-toggle-ai-run="${escapeHtml(run.id)}" title="${expanded ? "Collapse run" : "Expand run"}" aria-label="${expanded ? "Collapse run" : "Expand run"}">${expanded ? "^" : "v"}</button>
+        </div>
+      </div>
+      ${expanded ? `<div class="ai-run-files">${run.proposals.map(aiHistoryCardMarkup).join("")}</div>` : ""}
+    </section>
+  `;
+}
+
 function changesPanelMarkup() {
   const items = aiHistoryItems();
+  const runs = aiChangeRuns(items);
   return `
     <section class="changes-panel right-rail-panel ${local.rightRailTab === "changes" ? "active" : ""}" ${local.rightRailTab === "changes" ? "" : "hidden"}>
       <div class="panel-head">
         <strong>Changes</strong>
-        <small>${items.length} AI proposal${items.length === 1 ? "" : "s"}</small>
+        <small>${runs.length} run${runs.length === 1 ? "" : "s"}</small>
       </div>
       <div class="change-history-list">
-        ${items.length ? items.map(aiHistoryCardMarkup).join("") : `<div class="chat-empty">AI change history will appear here after LocalLeaf proposes, applies, or rejects edits.</div>`}
+        ${runs.length ? runs.map(aiRunChangeMarkup).join("") : `<div class="chat-empty">AI change history will appear here after LocalLeaf proposes, applies, or rejects edits.</div>`}
       </div>
     </section>
   `;
@@ -4740,6 +4930,7 @@ function findAiProposal(proposalId) {
 function rememberAiProposal(proposal) {
   if (!proposal?.id) return;
   proposal.sessionId = proposal.sessionId || local.aiCurrentSessionId;
+  if (proposal.runId) local.aiExpandedRuns.add(proposal.runId);
   const existing = local.aiChangeHistory.findIndex((item) => item.id === proposal.id);
   if (existing >= 0) local.aiChangeHistory.splice(existing, 1, proposal);
   else local.aiChangeHistory.push(proposal);
@@ -4771,6 +4962,42 @@ function setAiChatJumpVisible(visible) {
   button.setAttribute("aria-hidden", local.aiChatNeedsJump ? "false" : "true");
 }
 
+function setAiActivity(message, options = {}) {
+  local.aiActivityMessage = String(message || "").trim();
+  local.aiForceScrollBottom = true;
+  if (options.render !== false) refreshRightRailUi();
+}
+
+function clearAiActivity(options = {}) {
+  local.aiActivityMessage = "";
+  if (options.render !== false) refreshRightRailUi();
+}
+
+function updateAiSendButtonState() {
+  const button = document.querySelector(".ai-send-button");
+  if (!button) return;
+  const stopMode = aiComposerShouldStop();
+  button.classList.toggle("is-stop", stopMode);
+  button.type = stopMode ? "button" : "submit";
+  button.toggleAttribute("data-stop-ai-run", stopMode);
+  button.title = stopMode ? "Stop" : "Send";
+  button.setAttribute("aria-label", stopMode ? "Stop AI run" : "Send");
+  button.innerHTML = uiGlyph(stopMode ? "stop" : "upload");
+}
+
+function stopAiRun() {
+  local.aiStopRequested = true;
+  local.aiRunControllers.forEach((controller) => controller.abort());
+  local.aiRunControllers.clear();
+  local.aiActiveRunCount = 0;
+  local.aiBusy = false;
+  local.aiActiveRunId = "";
+  local.aiCompileVerifying = false;
+  local.aiActivityMessage = "";
+  local.aiForceScrollBottom = true;
+  refreshRightRailUi();
+}
+
 function scrollAiChatToBottom({ smooth = false } = {}) {
   const list = document.querySelector("#aiChatList") || document.querySelector(".ai-chat-list");
   if (!list) return;
@@ -4791,23 +5018,119 @@ function bindAiChatScrollState() {
   requestAnimationFrame(update);
 }
 
-async function askAiHelper(message) {
+function createQueuedAiPrompt(prompt) {
+  const activeModel = activeAiProviderModel();
+  return {
+    id: `queued-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    message: String(prompt || "").trim(),
+    createdAt: Date.now(),
+    path: local.selectedFile,
+    selectedText: selectedEditorText(),
+    model: {
+      providerId: activeModel.providerId || "",
+      modelId: activeModel.modelId || "",
+      providerName: activeModel.providerName || "",
+      modelName: activeModel.modelName || ""
+    },
+    permissions: { ...local.aiPermissions }
+  };
+}
+
+function queueAiPrompt(prompt) {
+  const queued = createQueuedAiPrompt(prompt);
+  if (!queued.message) return null;
+  local.aiQueuedPrompts.push(queued);
+  local.aiPrompt = "";
+  local.aiEditingQueuedPromptId = "";
+  local.aiSessionMoreMenuOpen = false;
+  local.aiQueuedPromptMenuOpenId = "";
+  local.aiForceScrollBottom = true;
+  refreshRightRailUi();
+  return queued;
+}
+
+function findQueuedAiPrompt(id) {
+  return local.aiQueuedPrompts.find((item) => item.id === id) || null;
+}
+
+function editQueuedAiPrompt(id) {
+  const queued = findQueuedAiPrompt(id);
+  if (!queued) return;
+  local.aiEditingQueuedPromptId = queued.id;
+  local.aiPrompt = queued.message;
+  local.aiSessionMoreMenuOpen = false;
+  local.aiQueuedPromptMenuOpenId = "";
+  refreshRightRailUi();
+  setTimeout(() => {
+    const prompt = document.querySelector("#aiPrompt");
+    prompt?.focus();
+    prompt?.setSelectionRange?.(prompt.value.length, prompt.value.length);
+  }, 0);
+}
+
+function deleteQueuedAiPrompt(id) {
+  local.aiQueuedPrompts = local.aiQueuedPrompts.filter((item) => item.id !== id);
+  if (local.aiEditingQueuedPromptId === id) {
+    local.aiEditingQueuedPromptId = "";
+    local.aiPrompt = "";
+  }
+  local.aiSessionMoreMenuOpen = false;
+  if (local.aiQueuedPromptMenuOpenId === id) local.aiQueuedPromptMenuOpenId = "";
+  refreshRightRailUi();
+}
+
+function commitQueuedPromptEdit() {
+  const queued = findQueuedAiPrompt(local.aiEditingQueuedPromptId);
+  if (!queued) return false;
+  queued.message = String(local.aiPrompt || "").trim();
+  if (!queued.message) {
+    deleteQueuedAiPrompt(queued.id);
+    return true;
+  }
+  local.aiPrompt = "";
+  local.aiEditingQueuedPromptId = "";
+  local.aiSessionMoreMenuOpen = false;
+  local.aiQueuedPromptMenuOpenId = "";
+  refreshRightRailUi();
+  return true;
+}
+
+async function steerQueuedAiPrompt(id) {
+  const queued = findQueuedAiPrompt(id);
+  if (!queued) return;
+  local.aiQueuedPrompts = local.aiQueuedPrompts.filter((item) => item.id !== queued.id);
+  if (local.aiEditingQueuedPromptId === queued.id) {
+    local.aiEditingQueuedPromptId = "";
+    local.aiPrompt = "";
+  }
+  local.aiSessionMoreMenuOpen = false;
+  if (local.aiQueuedPromptMenuOpenId === queued.id) local.aiQueuedPromptMenuOpenId = "";
+  refreshRightRailUi();
+  await askAiHelper(queued.message, { queuedPrompt: queued, steer: true, allowWhileBusy: true });
+}
+
+async function askAiHelper(message, options = {}) {
   const prompt = String(message || local.aiPrompt || "").trim();
   if (!prompt) return;
-  if (local.aiBusy) {
-    if (local.aiQueueingEnabled) {
-      local.aiQueuedPrompts.push(prompt);
-      local.aiPrompt = "";
-      local.aiForceScrollBottom = true;
-      refreshRightRailUi();
-      return;
-    }
-    showAppNotice("AI Helper is still working. Turn queueing on from the session menu to stack follow-up prompts.", { title: "AI Helper" });
+  if (local.aiEditingQueuedPromptId && !options.steer) {
+    commitQueuedPromptEdit();
+    return;
+  }
+  if (local.aiBusy && !options.allowWhileBusy) {
+    queueAiPrompt(prompt);
     return;
   }
   const activeModel = activeAiProviderModel();
+  const queuedModel = options.queuedPrompt?.model || null;
+  const runId = `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const controller = new AbortController();
+  local.aiRunControllers.add(controller);
+  local.aiStopRequested = false;
   local.aiPrompt = "";
-  local.aiBusy = true;
+  local.aiActiveRunCount += 1;
+  local.aiBusy = local.aiActiveRunCount > 0;
+  local.aiActiveRunId = local.aiActiveRunId || runId;
+  local.aiActivityMessage = options.steer ? "Steering the active run" : "Reading the project and planning the edit";
   local.rightRailTab = "ai";
   localStorage.setItem("localleaf.rightRailTab", "ai");
   local.aiForceScrollBottom = true;
@@ -4815,26 +5138,42 @@ async function askAiHelper(message) {
   syncCurrentAiSession(prompt);
   refreshRightRailUi();
   try {
-    const response = await api("/api/agent/message", {
+    const response = await api(options.steer ? "/api/agent/steer" : "/api/agent/message", {
       method: "POST",
+      signal: controller.signal,
       body: {
+        runId: options.steer ? local.aiActiveRunId : runId,
+        queuedPromptId: options.queuedPrompt?.id || "",
         message: prompt,
-        path: local.selectedFile,
+        path: options.queuedPrompt?.path || local.selectedFile,
         currentText: currentEditorText(),
-        selectedText: selectedEditorText(),
+        selectedText: options.queuedPrompt?.selectedText || selectedEditorText(),
         compileLogs: local.appState?.compile?.logs || [],
-        aiProviderId: activeModel.providerId || "",
-        aiModelId: activeModel.modelId || "",
-        aiPermissions: local.aiPermissions
+        aiProviderId: queuedModel?.providerId || activeModel.providerId || "",
+        aiModelId: queuedModel?.modelId || activeModel.modelId || "",
+        aiPermissions: options.queuedPrompt?.permissions || local.aiPermissions
       }
     });
     const proposals = (response.proposals || []).map((proposal) => ({ ...proposal, status: proposal.status || "proposed", sessionId: local.aiCurrentSessionId }));
     proposals.forEach(rememberAiProposal);
     const visibleApprovalIds = [];
+    const autoApplied = [];
     if (proposals.some(shouldAutoApplyAiProposal)) {
+      setAiActivity("Applying approved-safe edits", { render: false });
       for (const proposal of proposals) {
         try {
-          if (shouldAutoApplyAiProposal(proposal)) await approveAiProposal(proposal.id, { fromYolo: true, renderAfter: false });
+          if (shouldAutoApplyAiProposal(proposal)) {
+            const applied = await approveAiProposal(proposal.id, {
+              fromYolo: true,
+              renderAfter: false,
+              verifyCompile: false,
+              suppressAutoApplyMessage: true
+            });
+            if (applied) {
+              Object.assign(proposal, applied);
+              autoApplied.push(proposal);
+            }
+          }
           else visibleApprovalIds.push(proposal.id);
         } catch {
           visibleApprovalIds.push(proposal.id);
@@ -4851,41 +5190,61 @@ async function askAiHelper(message) {
       approvalCards: visibleApprovalIds
     });
     syncCurrentAiSession(prompt);
+    if (autoApplied.length) await verifyAiRunAfterApply(autoApplied);
   } catch (error) {
-    local.aiMessages.push({
-      id: `assistant-error-${Date.now()}`,
-      role: "assistant",
-      message: error.message || "AI Helper could not respond."
-    });
-    syncCurrentAiSession(prompt);
+    if (!controller.signal.aborted) {
+      local.aiMessages.push({
+        id: `assistant-error-${Date.now()}`,
+        role: "assistant",
+        message: error.message || "AI Helper could not respond."
+      });
+      syncCurrentAiSession(prompt);
+    }
   } finally {
-    local.aiBusy = false;
+    local.aiRunControllers.delete(controller);
+    local.aiActiveRunCount = controller.signal.aborted ? local.aiRunControllers.size : Math.max(0, local.aiActiveRunCount - 1);
+    local.aiBusy = local.aiActiveRunCount > 0;
+    if (!local.aiBusy) local.aiActiveRunId = "";
+    if (!local.aiBusy && !local.aiCompileVerifying) local.aiActivityMessage = "";
     local.aiForceScrollBottom = true;
     refreshRightRailUi();
-    const queued = local.aiQueueingEnabled ? local.aiQueuedPrompts.shift() : "";
-    if (queued) setTimeout(() => askAiHelper(queued), 0);
+    if (!local.aiBusy && !controller.signal.aborted && !local.aiStopRequested) {
+      const queued = local.aiQueuedPrompts.shift();
+      if (queued?.message) setTimeout(() => askAiHelper(queued.message, { queuedPrompt: queued, allowWhileBusy: true }), 0);
+    }
+    if (!local.aiBusy) local.aiStopRequested = false;
   }
 }
 
 async function approveAiProposal(proposalId, options = {}) {
   const proposal = findAiProposal(proposalId);
   if (!proposal) return;
+  let appliedProposal = null;
+  let verifierOwnsActivity = false;
+  setAiActivity(options.fromYolo ? "Applying YOLO edit" : "Applying approved change", { render: options.renderAfter !== false });
   try {
     const result = await api("/api/agent/approval/approve", { method: "POST", body: { proposalId } });
-    setAiProposalStatus(proposalId, result.proposal?.status || "applied", result.proposal || {});
+    appliedProposal = result.proposal || null;
+    setAiProposalStatus(proposalId, appliedProposal?.status || "applied", appliedProposal || {});
     await loadState();
     if (!local.selectedFile || proposal.path === local.selectedFile) {
       local.selectedFile = proposal.path || local.selectedFile;
       await loadSelectedFile();
       updateEditorSourceUi();
     }
-    if (options.fromYolo) {
+    if (options.fromYolo && !options.suppressAutoApplyMessage) {
       local.aiMessages.push({
         id: `assistant-auto-apply-${Date.now()}`,
         role: "assistant",
         message: `YOLO mode applied the approved-safe edit to ${proposal.path || "the current file"}.`
       });
     }
+    if (options.verifyCompile !== false) {
+      verifierOwnsActivity = true;
+      refreshRightRailUi();
+      await verifyAiRunAfterApply([appliedProposal || proposal]);
+    }
+    return appliedProposal || proposal;
   } catch (error) {
     setAiProposalStatus(proposalId, "stale");
     local.aiMessages.push({
@@ -4893,7 +5252,9 @@ async function approveAiProposal(proposalId, options = {}) {
       role: "assistant",
       message: error.message || "Could not apply the proposal."
     });
+    return null;
   } finally {
+    if (!verifierOwnsActivity) clearAiActivity({ render: false });
     syncCurrentAiSession();
     if (options.renderAfter !== false) refreshRightRailUi();
   }
@@ -4919,10 +5280,14 @@ async function rejectAiProposal(proposalId) {
 function explainAiProposal(proposalId) {
   const proposal = findAiProposal(proposalId);
   if (!proposal) return;
+  local.rightRailTab = "ai";
+  localStorage.setItem("localleaf.rightRailTab", "ai");
+  local.aiForceScrollBottom = true;
   local.aiMessages.push({
     id: `assistant-explain-${Date.now()}`,
     role: "assistant",
-    message: `${proposal.summary || "This change updates the selected text file."} It targets ${proposal.path || "the current file"} and is listed in Changes.`
+    message: `${proposal.summary || "This change updates the selected text file."} It targets ${proposal.path || "the current file"} and is listed in Changes.`,
+    fileLinks: proposal.path ? [proposal.path] : []
   });
   syncCurrentAiSession();
   refreshRightRailUi();
@@ -4932,12 +5297,22 @@ async function openAiProposalFile(proposalId) {
   const proposal = findAiProposal(proposalId);
   if (!proposal?.path) return;
   local.selectedFile = proposal.path;
+  local.sourcePaneVisible = true;
+  localStorage.setItem("localleaf.sourcePaneVisible", "1");
+  local.editorMode = "code";
+  localStorage.setItem("localleaf.editorMode", "code");
   try {
     await loadSelectedFile();
-    updateEditorSourceUi();
     expandToFile(proposal.path);
     local.rightRailTab = "changes";
-    render();
+    await render();
+    setTimeout(() => {
+      const focus = proposal.focus || {};
+      const start = Number.isInteger(focus.start) ? focus.start : 0;
+      const end = Number.isInteger(focus.end) ? Math.max(start, focus.end) : start;
+      local.codeEditor?.selectRange?.(start, end);
+      local.codeEditor?.focus?.();
+    }, 0);
   } catch (error) {
     showAppNotice(error.message || "Could not open the proposal file.", { title: "Open file" });
   }
@@ -4961,6 +5336,228 @@ async function copyAiProposalDiff(proposalId) {
     showAppNotice("Diff copied.", { title: "Changes" });
   } catch {
     showAppNotice("Could not copy the diff from this browser.", { title: "Changes" });
+  }
+}
+
+function uniqueProposalFiles(proposals = []) {
+  return [...new Set(proposals.map((proposal) => proposal?.path).filter(Boolean))];
+}
+
+function addAiReportMessage(message, proposals = []) {
+  clearAiActivity({ render: false });
+  local.rightRailTab = "ai";
+  localStorage.setItem("localleaf.rightRailTab", "ai");
+  local.aiForceScrollBottom = true;
+  local.aiMessages.push({
+    id: `assistant-report-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    role: "assistant",
+    message,
+    fileLinks: uniqueProposalFiles(proposals)
+  });
+  syncCurrentAiSession();
+  refreshRightRailUi();
+}
+
+function compileFailureSummary() {
+  const logs = Array.isArray(local.appState?.compile?.logs) ? local.appState.compile.logs : [];
+  const interesting = logs
+    .filter((line) => /(^!|error|fatal|undefined|missing|emergency|failed)/iu.test(line))
+    .slice(-4);
+  return interesting.length ? interesting.join(" ") : "The compile did not finish successfully.";
+}
+
+async function requestCompileRepair(runId, sourceProposals, attempt) {
+  const primary = sourceProposals.find((proposal) => proposal?.path) || sourceProposals[0] || {};
+  const activeModel = activeAiProviderModel();
+  const repairMessage = [
+    `Fix the LaTeX compile errors caused by AI run ${runId}.`,
+    "Keep the intended edit, make the smallest safe repair, and return a LocalLeaf proposal.",
+    `Repair attempt ${attempt} of 3.`
+  ].join(" ");
+  const response = await api("/api/agent/message", {
+    method: "POST",
+    body: {
+      runId,
+      message: repairMessage,
+      path: primary.path || local.selectedFile,
+      currentText: currentEditorText(),
+      selectedText: "",
+      compileLogs: local.appState?.compile?.logs || [],
+      aiProviderId: activeModel.providerId || "",
+      aiModelId: activeModel.modelId || "",
+      aiPermissions: { ...local.aiPermissions }
+    }
+  });
+  const proposals = (response.proposals || []).map((proposal) => ({
+    ...proposal,
+    status: proposal.status || "proposed",
+    sessionId: local.aiCurrentSessionId,
+    runId: proposal.runId || runId
+  }));
+  proposals.forEach(rememberAiProposal);
+  return { response, proposals };
+}
+
+async function verifyAiRunAfterApply(sourceProposals, options = {}) {
+  const proposals = (sourceProposals || []).filter(Boolean);
+  if (!proposals.length || options.verifyCompile === false || local.aiStopRequested) return;
+  const runId = proposals.find((proposal) => proposal.runId)?.runId || proposals[0].id;
+  const attempt = Number(options.attempt || local.aiCompileRepairAttempts[runId] || 0);
+  local.aiCompileRepairAttempts[runId] = attempt;
+  local.aiCompileVerifying = true;
+  setAiActivity(attempt ? `Recompiling after repair ${attempt}` : "Compiling the updated project");
+  local.previewPaneVisible = true;
+  localStorage.setItem("localleaf.previewPaneVisible", "1");
+  try {
+    await compile();
+    if (local.aiStopRequested) return;
+    if (local.appState?.compile?.status === "success") {
+      delete local.aiCompileRepairAttempts[runId];
+      addAiReportMessage(
+        `Done. I applied ${proposals.length} change${proposals.length === 1 ? "" : "s"} and the project compiled without errors.`,
+        proposals
+      );
+      return;
+    }
+  } catch {
+    // The compile panel already owns the detailed failure state.
+  }
+
+  if (attempt >= 3) {
+    if (local.aiStopRequested) return;
+    delete local.aiCompileRepairAttempts[runId];
+    addAiReportMessage(
+      `I applied the changes, but the project still has compile errors after 3 repair attempts. ${compileFailureSummary()}`,
+      proposals
+    );
+    return;
+  }
+
+  const nextAttempt = attempt + 1;
+  local.aiCompileRepairAttempts[runId] = nextAttempt;
+  try {
+    if (local.aiStopRequested) return;
+    setAiActivity(`Preparing compile repair ${nextAttempt} of 3`);
+    const { response, proposals: repairProposals } = await requestCompileRepair(runId, proposals, nextAttempt);
+    if (local.aiStopRequested) return;
+    if (!repairProposals.length) {
+      addAiReportMessage(
+        `I applied the changes, but the project did not compile. ${response.reply || compileFailureSummary()}`,
+        proposals
+      );
+      return;
+    }
+
+    if (local.aiPermissions.yoloMode) {
+      const appliedRepairs = [];
+      for (const repair of repairProposals) {
+        if (local.aiStopRequested) return;
+        setAiActivity(`Applying compile repair ${nextAttempt} of 3`);
+        const applied = await approveAiProposal(repair.id, {
+          fromYolo: true,
+          renderAfter: false,
+          verifyCompile: false,
+          suppressAutoApplyMessage: true
+        });
+        if (applied) appliedRepairs.push(applied);
+      }
+      refreshRightRailUi();
+      if (local.aiStopRequested) return;
+      await verifyAiRunAfterApply(appliedRepairs.length ? appliedRepairs : repairProposals, { attempt: nextAttempt });
+      return;
+    }
+
+    setAiActivity("Waiting for approval on the compile repair");
+    local.rightRailTab = "ai";
+    localStorage.setItem("localleaf.rightRailTab", "ai");
+    local.aiForceScrollBottom = true;
+    local.aiMessages.push({
+      id: `assistant-compile-repair-${Date.now()}`,
+      role: "assistant",
+      message: `The compile failed after the applied change. I prepared a repair proposal for approval. ${response.reply || compileFailureSummary()}`,
+      proposals: repairProposals,
+      approvalCards: repairProposals.filter((proposal) => proposal.approvalRequired !== false).map((proposal) => proposal.id),
+      fileLinks: uniqueProposalFiles(repairProposals)
+    });
+    syncCurrentAiSession();
+    refreshRightRailUi();
+  } catch (error) {
+    addAiReportMessage(
+      `I applied the changes, but could not prepare an automatic compile repair. ${error.message || compileFailureSummary()}`,
+      proposals
+    );
+  } finally {
+    local.aiCompileVerifying = false;
+    clearAiActivity();
+  }
+}
+
+function toggleAiRun(runId) {
+  if (local.aiExpandedRuns.has(runId)) local.aiExpandedRuns.delete(runId);
+  else local.aiExpandedRuns.add(runId);
+  refreshRightRailUi();
+}
+
+function reviewAiRun(runId) {
+  local.aiExpandedRuns.add(runId);
+  const proposal = aiHistoryItems().find((item) => aiRunIdForProposal(item) === runId);
+  refreshRightRailUi();
+  if (proposal) openAiProposalFile(proposal.id);
+}
+
+function toggleAiChange(proposalId) {
+  if (local.aiExpandedChanges.has(proposalId)) local.aiExpandedChanges.delete(proposalId);
+  else local.aiExpandedChanges.add(proposalId);
+  refreshRightRailUi();
+}
+
+function toggleAiProposalDiff(proposalId) {
+  local.aiExpandedChanges.add(proposalId);
+  if (local.aiExpandedDiffs.has(proposalId)) local.aiExpandedDiffs.delete(proposalId);
+  else local.aiExpandedDiffs.add(proposalId);
+  refreshRightRailUi();
+}
+
+async function revertAiProposal(proposalId, options = {}) {
+  const proposal = findAiProposal(proposalId);
+  if (!proposal) return null;
+  try {
+    const result = await api("/api/agent/proposal/revert", { method: "POST", body: { proposalId } });
+    setAiProposalStatus(proposalId, result.proposal?.status || "reverted", result.proposal || {});
+    await loadState();
+    if (proposal.path === local.selectedFile) {
+      await loadSelectedFile();
+      updateEditorSourceUi();
+    }
+    if (options.report !== false) {
+      addAiReportMessage(`Reverted ${proposal.summary || "the AI change"}.`, [result.proposal || proposal]);
+    }
+    return result.proposal || proposal;
+  } catch (error) {
+    if (error.proposal) setAiProposalStatus(proposalId, error.proposal.status || "stale", error.proposal);
+    showAppNotice(error.message || "Could not revert this change.", { title: "Revert change" });
+    return null;
+  } finally {
+    syncCurrentAiSession();
+    refreshRightRailUi();
+  }
+}
+
+async function undoAiRun(runId) {
+  try {
+    const result = await api("/api/agent/run/revert", { method: "POST", body: { runId } });
+    (result.proposals || []).forEach((proposal) => setAiProposalStatus(proposal.id, proposal.status || "reverted", proposal));
+    await loadState();
+    if (result.proposals?.some((proposal) => proposal.path === local.selectedFile)) {
+      await loadSelectedFile();
+      updateEditorSourceUi();
+    }
+    addAiReportMessage(`Undid ${result.proposals?.length || 0} applied change${result.proposals?.length === 1 ? "" : "s"} from this run.`, result.proposals || []);
+  } catch (error) {
+    showAppNotice(error.message || "Could not undo this run.", { title: "Undo run" });
+  } finally {
+    syncCurrentAiSession();
+    refreshRightRailUi();
   }
 }
 
@@ -5017,24 +5614,33 @@ function bindRightRailControls() {
   document.querySelectorAll("[data-ai-quick]").forEach((button) => {
     button.addEventListener("click", () => askAiHelper(button.dataset.aiQuick));
   });
+  document.querySelector("[data-stop-ai-run]")?.addEventListener("click", stopAiRun);
   document.querySelector("#aiSessionMenuButton")?.addEventListener("click", () => {
     local.aiSessionMenuOpen = !local.aiSessionMenuOpen;
     local.aiSessionMoreMenuOpen = false;
     refreshRightRailUi();
   });
-  document.querySelector("#aiSessionStripButton")?.addEventListener("click", () => {
-    local.aiSessionMenuOpen = !local.aiSessionMenuOpen;
-    local.aiSessionMoreMenuOpen = false;
-    refreshRightRailUi();
+  document.querySelectorAll("[data-edit-queued-ai-prompt]").forEach((button) => {
+    button.addEventListener("click", () => editQueuedAiPrompt(button.dataset.editQueuedAiPrompt));
   });
-  document.querySelector("#aiSteerButton")?.addEventListener("click", () => {
-    const prompt = document.querySelector("#aiPrompt");
-    prompt?.focus();
-    prompt?.setSelectionRange?.(prompt.value.length, prompt.value.length);
+  document.querySelectorAll("[data-delete-queued-ai-prompt]").forEach((button) => {
+    button.addEventListener("click", () => deleteQueuedAiPrompt(button.dataset.deleteQueuedAiPrompt));
   });
-  document.querySelector("#deleteCurrentAiSession")?.addEventListener("click", () => deleteAiSession(local.aiCurrentSessionId, { keepMenu: false }));
+  document.querySelectorAll("[data-steer-queued-ai-prompt]").forEach((button) => {
+    button.addEventListener("click", () => steerQueuedAiPrompt(button.dataset.steerQueuedAiPrompt));
+  });
+  document.querySelectorAll("[data-toggle-queued-ai-menu]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.toggleQueuedAiMenu || "";
+      local.aiQueuedPromptMenuOpenId = local.aiQueuedPromptMenuOpenId === id ? "" : id;
+      local.aiSessionMoreMenuOpen = false;
+      local.aiSessionMenuOpen = false;
+      refreshRightRailUi();
+    });
+  });
   document.querySelector("#aiSessionMoreButton")?.addEventListener("click", () => {
     local.aiSessionMoreMenuOpen = !local.aiSessionMoreMenuOpen;
+    local.aiQueuedPromptMenuOpenId = "";
     local.aiSessionMenuOpen = false;
     refreshRightRailUi();
   });
@@ -5056,6 +5662,9 @@ function bindRightRailControls() {
   });
   document.querySelector("#aiPrompt")?.addEventListener("input", (event) => {
     local.aiPrompt = event.currentTarget.value;
+    const queued = findQueuedAiPrompt(local.aiEditingQueuedPromptId);
+    if (queued) queued.message = local.aiPrompt;
+    updateAiSendButtonState();
   });
   document.querySelector("#aiPrompt")?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -5090,10 +5699,32 @@ function bindRightRailControls() {
     button.addEventListener("click", () => copyAiProposalDiff(button.dataset.copyAiProposal));
   });
   document.querySelectorAll("[data-view-ai-proposal]").forEach((button) => {
-    button.addEventListener("click", () => {
-      local.rightRailTab = "changes";
-      localStorage.setItem("localleaf.rightRailTab", "changes");
-      refreshRightRailUi();
+    button.addEventListener("click", () => toggleAiProposalDiff(button.dataset.viewAiProposal));
+  });
+  document.querySelectorAll("[data-revert-ai-proposal]").forEach((button) => {
+    button.addEventListener("click", () => revertAiProposal(button.dataset.revertAiProposal));
+  });
+  document.querySelectorAll("[data-toggle-ai-run]").forEach((button) => {
+    button.addEventListener("click", () => toggleAiRun(button.dataset.toggleAiRun));
+  });
+  document.querySelectorAll("[data-review-ai-run]").forEach((button) => {
+    button.addEventListener("click", () => reviewAiRun(button.dataset.reviewAiRun));
+  });
+  document.querySelectorAll("[data-undo-ai-run]").forEach((button) => {
+    button.addEventListener("click", () => undoAiRun(button.dataset.undoAiRun));
+  });
+  document.querySelectorAll("[data-toggle-ai-change]").forEach((button) => {
+    button.addEventListener("click", () => toggleAiChange(button.dataset.toggleAiChange));
+  });
+  document.querySelectorAll("[data-open-ai-file-link]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const proposal = aiHistoryItems().find((item) => item.path === button.dataset.openAiFileLink);
+      if (proposal) await openAiProposalFile(proposal.id);
+      else {
+        local.selectedFile = button.dataset.openAiFileLink;
+        await loadSelectedFile();
+        await render();
+      }
     });
   });
 }
@@ -7323,13 +7954,19 @@ async function pollJoinStatus() {
   let status;
   try {
     status = await api(`/api/join-status?id=${encodeURIComponent(local.joinRequestId)}`);
-  } catch {
-    handleSessionEnded(
-      "The host is no longer reachable.",
-      "Your join request could not be completed because the session ended or the host connection dropped."
-    );
+  } catch (exception) {
+    if (exception.status === 404 || exception.status === 410) {
+      handleSessionEnded(
+        "The host is no longer reachable.",
+        "Your join request could not be completed because the session ended or the host connection dropped."
+      );
+      return;
+    }
+    showRemoteReconnectNotice("Still waiting for the host connection.");
+    setTimeout(pollJoinStatus, 1800);
     return;
   }
+  clearRemoteReconnectNotice();
   if (status.status === "approved") {
     local.guestToken = status.token;
     await loadState();
@@ -8487,11 +9124,17 @@ function connectEvents() {
   events.addEventListener("open", () => {
     clearTimeout(local.eventDisconnectTimer);
     local.eventDisconnectTimer = null;
+    clearRemoteReconnectNotice();
   });
   events.addEventListener("state", (event) => {
     clearTimeout(local.eventDisconnectTimer);
     local.eventDisconnectTimer = null;
+    clearRemoteReconnectNotice();
     local.appState = JSON.parse(event.data);
+    if (isGuestClient() && local.appState?.session?.status === "ended") {
+      handleSessionEnded("The host has ended the session.");
+      return;
+    }
     syncAiProposalsFromAppState();
     const current = route();
     if (current.view === "editor") {
@@ -8560,10 +9203,10 @@ function connectEvents() {
     if (!isRemoteSessionView) return;
     local.eventDisconnectTimer = setTimeout(() => {
       if (local.events?.readyState !== EventSource.OPEN) {
-        handleSessionEnded(
-          "Connection to the host was lost.",
-          "The host app may have closed, the PC may be offline, or the public tunnel may have stopped."
-        );
+        showRemoteReconnectNotice("The host event stream is reconnecting.");
+      }
+      if (local.events?.readyState === EventSource.CLOSED) {
+        connectEvents();
       }
     }, 8000);
   });
@@ -8607,6 +9250,10 @@ window.addEventListener("pointerdown", (event) => {
   }
   if (local.aiSessionMoreMenuOpen && !event.target.closest?.(".ai-strip-more-wrap")) {
     local.aiSessionMoreMenuOpen = false;
+    shouldRender = true;
+  }
+  if (local.aiQueuedPromptMenuOpenId && !event.target.closest?.(".ai-strip-more-wrap")) {
+    local.aiQueuedPromptMenuOpenId = "";
     shouldRender = true;
   }
   if (local.aiModelPickerOpen && !event.target.closest?.(".ai-model-picker")) {

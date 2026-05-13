@@ -502,6 +502,15 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
     const joinStatus = await request(baseUrl, `/api/join-status?id=${encodeURIComponent(join.requestId)}`);
     assert.ok(joinStatus.token);
 
+    const guestStopAttempt = await publicTunnelRequest(
+      baseUrl,
+      `/api/session/stop?token=${encodeURIComponent(joinStatus.token)}`,
+      { method: "POST" }
+    );
+    assert.equal(guestStopAttempt.response.statusCode, 403);
+    state = await request(baseUrl, "/api/state");
+    assert.equal(state.session.status, "live");
+
     const suggestions = await request(baseUrl, `/api/editor/suggestions?token=${encodeURIComponent(joinStatus.token)}`);
     assert.ok(Array.isArray(suggestions.labels));
     assert.ok(Array.isArray(suggestions.citations));

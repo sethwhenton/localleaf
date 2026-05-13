@@ -22,6 +22,14 @@ const {
 const { compileProject, commandExists, detectCompiler } = require("./compiler");
 const { collectProjectEditorSuggestions } = require("./editor-suggestions");
 const { createAiModelManager } = require("./ai-models");
+const {
+  DEFAULT_CURSOR_MODEL_ID,
+  changedTextFiles,
+  copyProjectToScratch,
+  cursorLatexPrompt,
+  runCursorSdkAgent,
+  snapshotTextFiles
+} = require("./cursor-agent");
 
 let localtunnelClient = null;
 try {
@@ -952,7 +960,8 @@ function createInitialState(options = {}) {
         secretStore: options.aiSecretStore,
         fetchImpl: options.aiFetch || options.fetchImpl
       }),
-      proposals: new Map()
+      proposals: new Map(),
+      cursorRunner: options.cursorAgentRunner || runCursorSdkAgent
     },
     clients: new Map(),
     collabClients: new Map(),
@@ -1050,12 +1059,17 @@ function sendSse(response, event, payload) {
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function deleteSseClient(state, id, client = state.clients.get(id)) {
+  if (client?.heartbeat) clearInterval(client.heartbeat);
+  state.clients.delete(id);
+}
+
 function broadcast(state, event, payload) {
   for (const [id, client] of state.clients) {
     try {
       sendSse(client.response, event, payload);
     } catch {
-      state.clients.delete(id);
+      deleteSseClient(state, id, client);
     }
   }
 }
@@ -1118,7 +1132,7 @@ function broadcastProject(state, event, payload) {
     try {
       sendSse(client.response, event, payload);
     } catch {
-      state.clients.delete(id);
+      deleteSseClient(state, id, client);
     }
   }
 }
@@ -1129,7 +1143,7 @@ function broadcastHosts(state, event, payload) {
     try {
       sendSse(client.response, event, payload);
     } catch {
-      state.clients.delete(id);
+      deleteSseClient(state, id, client);
     }
   }
 }
@@ -1350,7 +1364,7 @@ function broadcastState(state) {
         })
       );
     } catch {
-      state.clients.delete(id);
+      deleteSseClient(state, id, client);
     }
   }
 }
@@ -1365,6 +1379,27 @@ function refreshProject(state) {
 
 function textHash(text) {
   return crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
+}
+
+function firstChangedRange(before, after) {
+  const oldText = String(before || "");
+  const newText = String(after || "");
+  let start = 0;
+  while (start < oldText.length && start < newText.length && oldText.charCodeAt(start) === newText.charCodeAt(start)) {
+    start += 1;
+  }
+  let oldEnd = oldText.length;
+  let newEnd = newText.length;
+  while (oldEnd > start && newEnd > start && oldText.charCodeAt(oldEnd - 1) === newText.charCodeAt(newEnd - 1)) {
+    oldEnd -= 1;
+    newEnd -= 1;
+  }
+  return {
+    start,
+    oldEnd,
+    newEnd,
+    line: newText.slice(0, start).split(/\r?\n/u).length
+  };
 }
 
 function inferAgentPath(state, requestedPath) {
@@ -1436,7 +1471,8 @@ function createDeterministicAgentProposal(state, body) {
     summary,
     userRequest: message,
     provider: null,
-    modelId: "deterministic-fallback"
+    modelId: "deterministic-fallback",
+    runId: body.runId || ""
   });
   state.ai.proposals.set(proposal.id, proposal);
   return proposal;
@@ -1456,19 +1492,23 @@ function createAgentProposalFromText(state, body, newText, summary, metadata = {
     summary: String(summary || "AI provider proposed a text edit.").slice(0, 220),
     userRequest: String(body.message || "").trim().slice(0, 2000),
     provider: metadata.provider || null,
-    modelId: metadata.modelId || ""
+    modelId: metadata.modelId || "",
+    runId: metadata.runId || body.runId || ""
   });
   state.ai.proposals.set(proposal.id, proposal);
   return proposal;
 }
 
-function createAiProposalRecord({ path: relativePath, originalText, newText, summary, userRequest, provider, modelId }) {
+function createAiProposalRecord({ path: relativePath, originalText, newText, summary, userRequest, provider, modelId, runId }) {
   const cleanOriginal = String(originalText || "");
   const cleanText = String(newText || "");
+  const focus = firstChangedRange(cleanOriginal, cleanText);
   return {
     id: randomId(8),
+    runId: String(runId || ""),
     path: relativePath,
     baseHash: textHash(cleanOriginal),
+    newHash: textHash(cleanText),
     originalText: cleanOriginal,
     replacements: [
       {
@@ -1487,6 +1527,11 @@ function createAiProposalRecord({ path: relativePath, originalText, newText, sum
       name: provider.name || provider.id || "Provider"
     } : null,
     modelId: String(modelId || ""),
+    focus: {
+      start: focus.start,
+      end: Math.max(focus.start, focus.newEnd),
+      line: focus.line
+    },
     createdAt: Date.now()
   };
 }
@@ -1690,6 +1735,79 @@ function applyExactReplacementInstructions(originalText, replacements = []) {
   return next === source ? "" : next;
 }
 
+function cursorProviderRequested(body = {}) {
+  const providerId = String(body.aiProviderId || body.providerId || "").trim().toLowerCase();
+  return providerId === "cursor-sdk" || providerId === "cursor-sdk-local";
+}
+
+function cursorModelId(body = {}) {
+  const requested = String(body.aiModelId || body.modelId || "").trim();
+  return requested && requested !== "cursor-sdk-local" ? requested : DEFAULT_CURSOR_MODEL_ID;
+}
+
+function cursorProviderPublic(modelId) {
+  return {
+    id: "cursor-sdk-local",
+    name: "Cursor SDK",
+    modelId: modelId || DEFAULT_CURSOR_MODEL_ID
+  };
+}
+
+async function createCursorAgentResponse(state, body) {
+  const message = String(body.message || "").trim().slice(0, 2000);
+  if (!message) throw new Error("Message is required.");
+
+  const permissions = agentPermissions(body.aiPermissions || body.permissions);
+  const { relativePath } = inferAgentPath(state, body.path);
+  const before = snapshotTextFiles(state.project.root);
+  const scratchRoot = copyProjectToScratch(state.project.root);
+  const modelId = cursorModelId(body);
+
+  try {
+    const result = await state.ai.cursorRunner({
+      cwd: scratchRoot,
+      modelId,
+      prompt: cursorLatexPrompt(body, { currentPath: relativePath }),
+      body,
+      state
+    });
+    const changed = changedTextFiles(before, scratchRoot);
+    const allowedChanges = permissions.multiFileEdits
+      ? changed
+      : changed.filter((item) => item.path === relativePath).slice(0, 1);
+    const proposals = allowedChanges.map((change) => {
+      return setProposalApprovalFromPermissions(createAgentProposalFromText(
+        state,
+        { ...body, path: change.path },
+        change.newText,
+        change.path === relativePath
+          ? "Cursor SDK proposed an edit to the current LaTeX file."
+          : `Cursor SDK proposed an edit to ${change.path}.`,
+        { provider: cursorProviderPublic(modelId), modelId }
+      ), permissions);
+    });
+
+    if (!proposals.length && wantsFileEdit(message)) {
+      const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+      return {
+        reply: `${result?.reply || "Cursor SDK completed the run, but did not change the editable file."} I prepared a safe local fallback proposal instead.`,
+        runtime: "cursor-sdk-local",
+        provider: cursorProviderPublic(modelId),
+        proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
+      };
+    }
+
+    return {
+      reply: result?.reply || (proposals.length ? "Cursor SDK prepared a file-change proposal." : "Cursor SDK finished without file changes."),
+      runtime: "cursor-sdk-local",
+      provider: cursorProviderPublic(modelId),
+      proposals: proposals.map((proposal) => setProposalApprovalFromPermissions(publicProposal(proposal), permissions))
+    };
+  } finally {
+    fs.rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
 async function createProviderAgentResponse(state, body) {
   const message = String(body.message || "").trim().slice(0, 2000);
   if (!message) throw new Error("Message is required.");
@@ -1777,14 +1895,20 @@ async function createAgentMessageResponse(state, body) {
   if (permissions.localModelOnly && providerRequested) {
     throw new Error("Local model only is on. Disable it in Settings > AI Permissions or choose a local model in the AI chat.");
   }
+  if (cursorProviderRequested(body)) {
+    return applyPermissionsToAgentResult(await createCursorAgentResponse(state, body), permissions);
+  }
   if ((providerRequested || (!hasExplicitChoice && activeAi)) && !permissions.localModelOnly) {
     try {
       return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body), permissions);
     } catch (error) {
-      if (/timed out/i.test(error.message || "") && wantsFileEdit(message)) {
+      if (wantsFileEdit(message) && /timed out|malformed|json|unreadable|invalid|original file|without changes|replacement text/i.test(error.message || "")) {
         const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+        const reason = /malformed|json|unreadable|invalid/i.test(error.message || "")
+          ? "The provider response was not usable."
+          : error.message;
         return {
-          reply: `${error.message} I prepared a safe local fallback proposal so you can still review the change.`,
+          reply: `${reason} I prepared a safe local fallback proposal so you can still review the change.`,
           runtime: state.ai.models.publicState().runtime,
           provider: null,
           proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
@@ -1824,8 +1948,10 @@ async function createAgentMessageResponse(state, body) {
 function publicProposal(proposal) {
   return {
     id: proposal.id,
+    runId: proposal.runId || "",
     path: proposal.path,
     baseHash: proposal.baseHash,
+    newHash: proposal.newHash || textHash(proposal.newText || ""),
     replacements: proposal.replacements,
     newText: proposal.newText,
     status: proposal.status,
@@ -1835,9 +1961,11 @@ function publicProposal(proposal) {
     modelId: proposal.modelId || "",
     approvalRequired: proposal.approvalRequired !== false,
     diffHunks: compactLineDiff(proposal.originalText || "", proposal.newText || ""),
+    focus: proposal.focus || firstChangedRange(proposal.originalText || "", proposal.newText || ""),
     createdAt: proposal.createdAt,
     appliedAt: proposal.appliedAt || null,
-    rejectedAt: proposal.rejectedAt || null
+    rejectedAt: proposal.rejectedAt || null,
+    revertedAt: proposal.revertedAt || null
   };
 }
 
@@ -1884,11 +2012,68 @@ function applyAiProposalToFile(state, proposal) {
   fs.writeFileSync(fullPath, proposal.newText, "utf8");
   proposal.status = "applied";
   proposal.appliedAt = Date.now();
+  proposal.newHash = textHash(proposal.newText || "");
   refreshProject(state);
   return {
     version: Date.now(),
     proposal: publicProposal(proposal)
   };
+}
+
+function validateProposalRevertTarget(state, proposal) {
+  const fullPath = resolveProjectPath(state.project.root, proposal.path);
+  if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+    const error = new Error("Proposal target file was not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!isTextFile(fullPath)) {
+    const error = new Error("LocalLeaf AI proposals can only revert text files.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const currentText = fs.readFileSync(fullPath, "utf8");
+  const expectedHash = proposal.newHash || textHash(proposal.newText || "");
+  if (textHash(currentText) !== expectedHash) {
+    proposal.status = "stale";
+    const error = new Error("File changed since this AI proposal was applied.");
+    error.statusCode = 409;
+    error.proposal = publicProposal(proposal);
+    throw error;
+  }
+  return { fullPath };
+}
+
+function revertAiProposalToFile(state, proposal) {
+  const { fullPath } = validateProposalRevertTarget(state, proposal);
+  fs.writeFileSync(fullPath, proposal.originalText || "", "utf8");
+  proposal.status = "reverted";
+  proposal.revertedAt = Date.now();
+  refreshProject(state);
+  return {
+    version: Date.now(),
+    proposal: publicProposal(proposal)
+  };
+}
+
+function revertAgentProposalAndBroadcast(state, proposal) {
+  const reverted = revertAiProposalToFile(state, proposal);
+  broadcastCollab(state, {
+    type: "file_updated",
+    filePath: proposal.path,
+    newText: proposal.originalText || "",
+    userId: "host",
+    name: "LocalLeaf AI",
+    version: reverted.version
+  });
+  broadcastProject(state, "file-update", {
+    path: proposal.path,
+    content: proposal.originalText || "",
+    user: "LocalLeaf AI",
+    version: reverted.version
+  });
+  broadcastState(state);
+  return reverted;
 }
 
 function rejectAiProposal(state, proposal) {
@@ -2658,6 +2843,27 @@ function createLocalLeafServer(options = {}) {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/agent/steer") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can steer LocalLeaf AI runs.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const result = await createAgentMessageResponse(state, { ...body, steer: true });
+        broadcastState(state);
+        jsonResponse(response, 200, {
+          ...result,
+          steered: true,
+          runId: body.runId || null,
+          queuedPromptId: body.queuedPromptId || null
+        });
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/agent/run") {
       if (!isHostRequest(state, request, url)) {
         deny(response, "Only the host app can run LocalLeaf AI.");
@@ -2666,7 +2872,7 @@ function createLocalLeafServer(options = {}) {
       const body = await readBody(request);
       beginNdjsonResponse(response);
       try {
-        const runId = randomId(8);
+        const runId = body.runId || randomId(8);
         const files = agentListProjectFiles(state);
         const currentFile = agentReadProjectFile(state, body.path);
         const logs = agentCompileLogs(state);
@@ -2694,7 +2900,7 @@ function createLocalLeafServer(options = {}) {
             result: { lines: logs.length }
           });
         }
-        const result = await createAgentMessageResponse(state, body);
+        const result = await createAgentMessageResponse(state, { ...body, runId });
         sendNdjson(response, { type: "assistant_delta", runId, delta: result.reply || "" });
         for (const proposal of result.proposals || []) {
           sendNdjson(response, { type: "proposal_created", runId, proposal });
@@ -2735,6 +2941,66 @@ function createLocalLeafServer(options = {}) {
       try {
         const applied = applyAgentProposalAndBroadcast(state, proposal);
         jsonResponse(response, 200, { ok: true, proposal: applied.proposal });
+      } catch (error) {
+        jsonResponse(response, error.statusCode || 400, {
+          error: error.message,
+          ...(error.proposal ? { proposal: error.proposal } : {})
+        });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/agent/proposal/revert") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can revert LocalLeaf AI proposals.");
+        return;
+      }
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before reverting LocalLeaf AI proposals.");
+        return;
+      }
+      const body = await readBody(request);
+      const proposal = state.ai.proposals.get(String(body.proposalId || body.id || ""));
+      if (!proposal) {
+        jsonResponse(response, 404, { error: "AI proposal was not found." });
+        return;
+      }
+      if (proposal.status !== "applied") {
+        jsonResponse(response, 409, { error: `AI proposal is ${proposal.status || "not applied"} and cannot be reverted.` });
+        return;
+      }
+      try {
+        const reverted = revertAgentProposalAndBroadcast(state, proposal);
+        jsonResponse(response, 200, { ok: true, proposal: reverted.proposal });
+      } catch (error) {
+        jsonResponse(response, error.statusCode || 400, {
+          error: error.message,
+          ...(error.proposal ? { proposal: error.proposal } : {})
+        });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/agent/run/revert") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can undo LocalLeaf AI runs.");
+        return;
+      }
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before undoing LocalLeaf AI runs.");
+        return;
+      }
+      const body = await readBody(request);
+      const runId = String(body.runId || "").trim();
+      const proposals = Array.from(state.ai.proposals.values()).filter((proposal) => proposal.runId === runId && proposal.status === "applied");
+      if (!runId || !proposals.length) {
+        jsonResponse(response, 404, { error: "No applied AI proposals were found for that run." });
+        return;
+      }
+      try {
+        for (const proposal of proposals) validateProposalRevertTarget(state, proposal);
+        const reverted = proposals.map((proposal) => revertAgentProposalAndBroadcast(state, proposal).proposal);
+        jsonResponse(response, 200, { ok: true, runId, proposals: reverted });
       } catch (error) {
         jsonResponse(response, error.statusCode || 400, {
           error: error.message,
@@ -3516,10 +3782,18 @@ function createLocalLeafServer(options = {}) {
         response.write(": connected\n\n");
         const token = String(getAuthToken(request, url));
         const isHost = isHostRequest(state, request, url);
+        const heartbeat = setInterval(() => {
+          try {
+            response.write(": keepalive\n\n");
+          } catch {
+            deleteSseClient(state, clientId);
+          }
+        }, 5000);
         state.clients.set(clientId, {
           response,
           isHost,
-          token
+          token,
+          heartbeat
         });
         sendSse(
           response,
@@ -3530,7 +3804,7 @@ function createLocalLeafServer(options = {}) {
           })
         );
         request.on("close", () => {
-          state.clients.delete(clientId);
+          deleteSseClient(state, clientId);
         });
         return;
       }
@@ -3579,6 +3853,11 @@ function createLocalLeafServer(options = {}) {
       notifySessionEnded(state, "Host stopped the session.");
       await new Promise((resolve) => setTimeout(resolve, SERVER_CLOSE_NOTICE_GRACE_MS));
     }
+    for (const client of state.clients.values()) {
+      if (client.heartbeat) clearInterval(client.heartbeat);
+      client.response.end();
+    }
+    state.clients.clear();
     stopPublicTunnel(state);
     closeCollabClients(state, "Host stopped the session.");
     wss.close();

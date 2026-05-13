@@ -69,6 +69,7 @@ function resizeExistingPages(container, nextScale, previousScale) {
   if (!Number.isFinite(ratio) || ratio <= 0 || ratio === 1) return;
   container.querySelectorAll(".pdf-page").forEach((pageShell) => {
     const canvas = pageShell.querySelector(".pdf-page-canvas");
+    const textLayer = pageShell.querySelector(".textLayer");
     const pageWidth = Number.parseFloat(pageShell.style.width || pageShell.offsetWidth);
     const canvasWidth = Number.parseFloat(canvas?.style.width || canvas?.offsetWidth || pageWidth);
     const canvasHeight = Number.parseFloat(canvas?.style.height || canvas?.offsetHeight || 0);
@@ -76,6 +77,10 @@ function resizeExistingPages(container, nextScale, previousScale) {
     if (canvas) {
       if (canvasWidth) canvas.style.width = `${canvasWidth * ratio}px`;
       if (canvasHeight) canvas.style.height = `${canvasHeight * ratio}px`;
+    }
+    if (textLayer) {
+      if (canvasWidth) textLayer.style.width = `${canvasWidth * ratio}px`;
+      if (canvasHeight) textLayer.style.height = `${canvasHeight * ratio}px`;
     }
   });
 }
@@ -98,6 +103,25 @@ async function renderPage(page, scale) {
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   pageShell.append(canvas);
   await page.render({ canvasContext: context, viewport }).promise;
+
+  if (pdfjsLib.TextLayer) {
+    const textLayer = document.createElement("div");
+    textLayer.className = "textLayer pdf-text-layer";
+    textLayer.style.width = `${viewport.width}px`;
+    textLayer.style.height = `${viewport.height}px`;
+    pageShell.append(textLayer);
+    const textContent = await page.getTextContent({
+      includeMarkedContent: true,
+      disableNormalization: true
+    });
+    const layer = new pdfjsLib.TextLayer({
+      textContentSource: textContent,
+      container: textLayer,
+      viewport
+    });
+    await layer.render();
+  }
+
   return pageShell;
 }
 
