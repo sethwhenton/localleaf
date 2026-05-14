@@ -67,7 +67,16 @@ async function runCursorSdkAgent(options = {}) {
   if (!apiKey) {
     throw new Error("Cursor SDK API key is not configured.");
   }
-  const { Agent } = await import("@cursor/sdk");
+  let Agent;
+  try {
+    ({ Agent } = await import("@cursor/sdk"));
+  } catch (error) {
+    const missingPackage = error && (error.code === "ERR_MODULE_NOT_FOUND" || /@cursor\/sdk/u.test(String(error.message || "")));
+    if (missingPackage) {
+      throw new Error("Cursor SDK is not bundled in this LocalLeaf build because its current npm package has vulnerable transitive dependencies. Use an OpenAI-compatible provider or LocalLeaf Local model for now.");
+    }
+    throw error;
+  }
   const agent = await Agent.create({
     apiKey,
     model: { id: options.modelId || DEFAULT_CURSOR_MODEL_ID },

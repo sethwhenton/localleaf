@@ -887,7 +887,7 @@ function createInitialState(options = {}) {
   const tunnelReady = tunnelProviders.length > 0;
   const autoStartTunnel = options.autoStartTunnel !== false;
 
-  return {
+  const state = {
     hostToken: options.hostToken || randomId(24),
     port: options.port || DEFAULT_PORT,
     project: {
@@ -955,11 +955,7 @@ function createInitialState(options = {}) {
     },
     chat: [],
     ai: {
-      models: createAiModelManager({
-        modelRoot: options.modelRoot,
-        secretStore: options.aiSecretStore,
-        fetchImpl: options.aiFetch || options.fetchImpl
-      }),
+      models: null,
       proposals: new Map(),
       cursorRunner: options.cursorAgentRunner || runCursorSdkAgent
     },
@@ -967,6 +963,14 @@ function createInitialState(options = {}) {
     collabClients: new Map(),
     tunnelCheck: options.checkPublicTunnel || checkPublicTunnel
   };
+  state.ai.models = createAiModelManager({
+    modelRoot: options.modelRoot,
+    secretStore: options.aiSecretStore,
+    fetchImpl: options.aiFetch || options.fetchImpl,
+    downloadImpl: options.aiDownloadImpl,
+    onChange: () => broadcastState(state)
+  });
+  return state;
 }
 
 function publicState(state, options = {}) {
@@ -1418,12 +1422,21 @@ function createDeterministicAgentProposal(state, body) {
   const message = String(body.message || "").trim().slice(0, 2000);
   if (!message) throw new Error("Message is required.");
 
-  const { relativePath, fullPath } = inferAgentPath(state, body.path);
-  const originalText = fs.readFileSync(fullPath, "utf8");
+  let { relativePath, fullPath } = inferAgentPath(state, body.path);
+  let originalText = fs.readFileSync(fullPath, "utf8");
   const lowerMessage = message.toLowerCase();
   let newText = originalText;
   let summary = "Prepared a safe text edit proposal.";
   const replacementInstruction = exactReplacementInstruction(message);
+  if (replacementInstruction && !originalText.includes(replacementInstruction.find)) {
+    const found = findTextFileContaining(state, replacementInstruction.find, message);
+    if (found) {
+      relativePath = found.path;
+      fullPath = found.fullPath;
+      originalText = found.content;
+      newText = originalText;
+    }
+  }
 
   if (replacementInstruction && originalText.includes(replacementInstruction.find)) {
     newText = originalText.replace(replacementInstruction.find, replacementInstruction.replace);
@@ -1675,6 +1688,66 @@ function agentReadProjectFile(state, requestedPath) {
   };
 }
 
+function agentTextFiles(state, limit = 80) {
+  return (state.project.files || [])
+    .filter((item) => item.type === "text" && /\.(tex|bib|sty|cls|txt|md)$/iu.test(item.path || ""))
+    .filter((item) => Number(item.size || 0) <= 240000)
+    .sort((left, right) => {
+      const leftScore = left.path === state.project.mainFile ? -2 : /abstract/i.test(left.path) ? -1 : 0;
+      const rightScore = right.path === state.project.mainFile ? -2 : /abstract/i.test(right.path) ? -1 : 0;
+      return leftScore - rightScore || left.path.localeCompare(right.path);
+    })
+    .slice(0, limit);
+}
+
+function findTextFileContaining(state, needle, hint = "") {
+  const target = String(needle || "");
+  if (!target) return null;
+  const hintText = String(hint || "").toLowerCase();
+  const candidates = agentTextFiles(state).sort((left, right) => {
+    const leftHint = hintText && left.path.toLowerCase().includes("abstract") ? -1 : 0;
+    const rightHint = hintText && right.path.toLowerCase().includes("abstract") ? -1 : 0;
+    return leftHint - rightHint || left.path.localeCompare(right.path);
+  });
+  for (const item of candidates) {
+    const fullPath = resolveProjectPath(state.project.root, item.path);
+    try {
+      const content = fs.readFileSync(fullPath, "utf8");
+      if (content.includes(target)) return { path: item.path, fullPath, content };
+    } catch {
+      // Ignore unreadable project files while building AI context.
+    }
+  }
+  return null;
+}
+
+function agentProjectContext(state, currentPath, budget = 70000) {
+  const selected = normalizeRelativePath(currentPath || state.project.mainFile || "");
+  const files = agentTextFiles(state);
+  const ordered = files.sort((left, right) => {
+    const leftRank = left.path === selected ? -3 : left.path === state.project.mainFile ? -2 : /abstract/i.test(left.path) ? -1 : 0;
+    const rightRank = right.path === selected ? -3 : right.path === state.project.mainFile ? -2 : /abstract/i.test(right.path) ? -1 : 0;
+    return leftRank - rightRank || left.path.localeCompare(right.path);
+  });
+  let remaining = budget;
+  const chunks = [];
+  for (const item of ordered) {
+    if (remaining <= 1200) break;
+    const fullPath = resolveProjectPath(state.project.root, item.path);
+    let content = "";
+    try {
+      content = fs.readFileSync(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+    const header = `--- FILE: ${item.path}${item.path === selected ? " (currently open)" : ""} ---\n`;
+    const slice = content.slice(0, Math.max(0, remaining - header.length));
+    chunks.push(`${header}${slice}${slice.length < content.length ? "\n% ... LocalLeaf truncated this file for context ..." : ""}`);
+    remaining -= header.length + slice.length;
+  }
+  return chunks.join("\n\n");
+}
+
 function agentCompileLogs(state) {
   return (Array.isArray(state.compile.logs) ? state.compile.logs : [])
     .map((line) => String(line || ""))
@@ -1735,9 +1808,53 @@ function applyExactReplacementInstructions(originalText, replacements = []) {
   return next === source ? "" : next;
 }
 
+function createServerSearchRegex(query, options = {}) {
+  const raw = String(query || "");
+  if (!raw) return null;
+  const source = options.regex
+    ? raw
+    : raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = options.wholeWord ? `\\b(?:${source})\\b` : source;
+  try {
+    return new RegExp(pattern, options.matchCase ? "g" : "gi");
+  } catch {
+    return null;
+  }
+}
+
+function replaceProjectText(state, input = {}) {
+  const query = String(input.query || "");
+  if (!query) throw new Error("Search text is required.");
+  const regex = createServerSearchRegex(query, input.options || {});
+  if (!regex) throw new Error("Search pattern is invalid.");
+  const replacement = String(input.replace ?? input.replacement ?? "");
+  const files = agentTextFiles(state, 400);
+  const changed = [];
+  let total = 0;
+  for (const file of files) {
+    const fullPath = resolveProjectPath(state.project.root, file.path);
+    let content = "";
+    try {
+      content = fs.readFileSync(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+    const nextText = content.replace(regex, () => {
+      total += 1;
+      return replacement;
+    });
+    if (nextText !== content) {
+      fs.writeFileSync(fullPath, nextText, "utf8");
+      changed.push(file.path);
+    }
+  }
+  if (changed.length) refreshProject(state);
+  return { count: total, files: changed };
+}
+
 function cursorProviderRequested(body = {}) {
   const providerId = String(body.aiProviderId || body.providerId || "").trim().toLowerCase();
-  return providerId === "cursor-sdk" || providerId === "cursor-sdk-local";
+  return providerId === "cursor" || providerId === "cursor-sdk" || providerId === "cursor-sdk-local";
 }
 
 function cursorModelId(body = {}) {
@@ -1747,8 +1864,8 @@ function cursorModelId(body = {}) {
 
 function cursorProviderPublic(modelId) {
   return {
-    id: "cursor-sdk-local",
-    name: "Cursor SDK",
+    id: "cursor",
+    name: "Cursor",
     modelId: modelId || DEFAULT_CURSOR_MODEL_ID
   };
 }
@@ -1762,11 +1879,16 @@ async function createCursorAgentResponse(state, body) {
   const before = snapshotTextFiles(state.project.root);
   const scratchRoot = copyProjectToScratch(state.project.root);
   const modelId = cursorModelId(body);
+  const cursorConfig = await state.ai.models.cursorProviderConfig({
+    providerId: body.aiProviderId || body.providerId || "cursor",
+    modelId
+  });
 
   try {
     const result = await state.ai.cursorRunner({
       cwd: scratchRoot,
       modelId,
+      apiKey: cursorConfig.apiKey,
       prompt: cursorLatexPrompt(body, { currentPath: relativePath }),
       body,
       state
@@ -1783,7 +1905,7 @@ async function createCursorAgentResponse(state, body) {
         change.path === relativePath
           ? "Cursor SDK proposed an edit to the current LaTeX file."
           : `Cursor SDK proposed an edit to ${change.path}.`,
-        { provider: cursorProviderPublic(modelId), modelId }
+        { provider: cursorProviderPublic(cursorConfig.modelId || modelId), modelId: cursorConfig.modelId || modelId }
       ), permissions);
     });
 
@@ -1791,16 +1913,16 @@ async function createCursorAgentResponse(state, body) {
       const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
       return {
         reply: `${result?.reply || "Cursor SDK completed the run, but did not change the editable file."} I prepared a safe local fallback proposal instead.`,
-        runtime: "cursor-sdk-local",
-        provider: cursorProviderPublic(modelId),
+        runtime: "cursor-sdk",
+        provider: cursorProviderPublic(cursorConfig.modelId || modelId),
         proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
       };
     }
 
     return {
       reply: result?.reply || (proposals.length ? "Cursor SDK prepared a file-change proposal." : "Cursor SDK finished without file changes."),
-      runtime: "cursor-sdk-local",
-      provider: cursorProviderPublic(modelId),
+      runtime: "cursor-sdk",
+      provider: cursorProviderPublic(cursorConfig.modelId || modelId),
       proposals: proposals.map((proposal) => setProposalApprovalFromPermissions(publicProposal(proposal), permissions))
     };
   } finally {
@@ -1808,7 +1930,47 @@ async function createCursorAgentResponse(state, body) {
   }
 }
 
-async function createProviderAgentResponse(state, body) {
+function createProviderProposalsFromParsed(state, body, parsed, metadata, permissions) {
+  const exactInstruction = exactReplacementInstruction(body.message || "");
+  if (exactInstruction) {
+    const found = findTextFileContaining(state, exactInstruction.find, body.message || "");
+    if (found) {
+      const nextText = found.content.replace(exactInstruction.find, exactInstruction.replace);
+      return [setProposalApprovalFromPermissions(createAgentProposalFromText(
+        state,
+        { ...body, path: found.path },
+        nextText,
+        `Replace "${exactInstruction.find}" with "${exactInstruction.replace}".`,
+        metadata
+      ), permissions)];
+    }
+  }
+  const edits = Array.isArray(parsed.edits) && parsed.edits.length
+    ? parsed.edits
+    : [{
+      path: parsed.path || body.path,
+      replacements: parsed.replacements,
+      newText: parsed.newText
+    }];
+  const proposals = [];
+  for (const edit of edits.slice(0, permissions.multiFileEdits ? 8 : 1)) {
+    const targetPath = edit.path || body.path;
+    const targetFile = agentReadProjectFile(state, targetPath);
+    const replacementText = applyExactReplacementInstructions(targetFile.content, edit.replacements);
+    const proposedText = replacementText || (typeof edit.newText === "string" && edit.newText.trim() ? edit.newText : "");
+    if (!proposedText) continue;
+    proposals.push(setProposalApprovalFromPermissions(createAgentProposalFromText(
+      state,
+      { ...body, path: targetFile.path },
+      proposedText,
+      edit.summary || parsed.summary || parsed.reply,
+      metadata
+    ), permissions));
+  }
+  return proposals;
+}
+
+async function createProviderAgentResponse(state, body, options = {}) {
   const message = String(body.message || "").trim().slice(0, 2000);
   if (!message) throw new Error("Message is required.");
   const permissions = agentPermissions(body.aiPermissions || body.permissions);
@@ -1819,18 +1981,26 @@ async function createProviderAgentResponse(state, body) {
     ? body.compileLogs.map((item) => String(item || "")).join("\n").slice(-8000)
     : "";
   const selectedText = String(body.selectedText || "").slice(0, 8000);
+  const conversation = Array.isArray(body.conversation)
+    ? body.conversation.slice(-10).map((item) => `${String(item.role || "user").toUpperCase()}: ${String(item.message || "").slice(0, 1200)}`).join("\n")
+    : "";
+  const projectContext = agentProjectContext(state, relativePath);
   const prompt = [
     "You are LocalLeaf AI, a careful LaTeX project assistant.",
     "Return JSON only with this shape:",
-    '{"reply":"short explanation","summary":"short change summary","replacements":[{"find":"exact text from the file","replace":"replacement text"}],"newText":"full replacement file text or empty string"}',
+    '{"reply":"short explanation","summary":"short change summary","edits":[{"path":"relative/project/file.tex","replacements":[{"find":"exact text from that file","replace":"replacement text","all":false}],"newText":"full replacement file text or empty string"}]}',
     "Prefer replacements for small edits. Only set newText for larger structural edits. Keep LaTeX valid. Do not delete unrelated content.",
-    "Each replacement find value must exactly match text shown from the file.",
+    "Each replacement find value must exactly match text shown from the relevant project file.",
+    "You may edit another text file if the user asks about content that lives outside the currently open file.",
     "Current AI Helper permissions:",
     agentPermissionSummary(permissions),
     "If an advanced action is allowed, explain the intended action clearly. For this MVP, file writes still happen through LocalLeaf proposals and approval cards.",
     `File path: ${relativePath}`,
     "Current file:",
     compactAgentFileContext(originalText),
+    "Project context:",
+    compactAgentFileContext(projectContext),
+    conversation ? `Recent chat context:\n${conversation}` : "",
     selectedText ? `Selected text:\n${selectedText}` : "",
     compileLogs ? `Compile logs:\n${compileLogs}` : "",
     `User request: ${message}`
@@ -1838,7 +2008,8 @@ async function createProviderAgentResponse(state, body) {
 
   const requestedProviderId = String(body.aiProviderId || body.providerId || "").trim();
   const requestedModelId = String(body.aiModelId || body.modelId || "").trim();
-  const result = await state.ai.models.askActiveProvider([
+  const askModel = options.askModel || state.ai.models.askActiveProvider;
+  const result = await askModel([
     { role: "system", content: "You are a precise LaTeX editor. Respond with JSON only." },
     { role: "user", content: prompt }
   ], {
@@ -1853,13 +2024,13 @@ async function createProviderAgentResponse(state, body) {
   let reply = result?.content || "The provider responded.";
   if (parsed && typeof parsed === "object") {
     reply = String(parsed.reply || "I prepared a response.");
-    const replacementText = applyExactReplacementInstructions(originalText, parsed.replacements);
-    const proposedText = replacementText || (typeof parsed.newText === "string" && parsed.newText.trim() ? parsed.newText : "");
-    if (proposedText) {
-      proposals.push(setProposalApprovalFromPermissions(createAgentProposalFromText(state, body, proposedText, parsed.summary || parsed.reply, {
-        provider: result.provider,
-        modelId: result.modelId
-      }), permissions));
+    proposals.push(...createProviderProposalsFromParsed(state, body, parsed, {
+      provider: result.provider,
+      modelId: result.modelId
+    }, permissions));
+    if (!proposals.length && wantsFileEdit(message)) {
+      proposals.push(setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions));
+      reply = `${reply} I added a safe LocalLeaf fallback proposal because the model did not return an editable patch.`;
     }
   } else if (wantsFileEdit(message)) {
     proposals.push(setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions));
@@ -1868,7 +2039,7 @@ async function createProviderAgentResponse(state, body) {
 
   return {
     reply,
-    runtime: state.ai.models.publicState().runtime,
+    runtime: options.runtime || state.ai.models.publicState().runtime,
     provider: result?.provider ? {
       id: result.provider.id,
       name: result.provider.name,
@@ -1897,6 +2068,31 @@ async function createAgentMessageResponse(state, body) {
   }
   if (cursorProviderRequested(body)) {
     return applyPermissionsToAgentResult(await createCursorAgentResponse(state, body), permissions);
+  }
+  if ((!providerRequested || providerChoice === "local" || providerChoice === "localleaf-local") && state.ai.models.hasActiveLocalModel()) {
+    try {
+      return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body, {
+        runtime: "local-llama-cpp",
+        askModel: (messages, requestOptions) => state.ai.models.askLocalModel(messages, {
+          ...requestOptions,
+          modelId: body.aiModelId || body.modelId || requestOptions?.modelId
+        })
+      }), permissions);
+    } catch (error) {
+      if (!permissions.localModelOnly && !hasExplicitChoice && activeAi) {
+        return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body), permissions);
+      }
+      if (wantsFileEdit(message) && /local model|runtime|malformed|json|empty|failed/i.test(error.message || "")) {
+        const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+        return {
+          reply: `${error.message || "The local model could not respond."} I prepared a safe local fallback proposal so you can still review the change.`,
+          runtime: state.ai.models.publicState().runtime,
+          provider: null,
+          proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
+        };
+      }
+      throw error;
+    }
   }
   if ((providerRequested || (!hasExplicitChoice && activeAi)) && !permissions.localModelOnly) {
     try {
@@ -2636,9 +2832,41 @@ function createLocalLeafServer(options = {}) {
       }
       const body = await readBody(request);
       try {
-        const aiState = state.ai.models.simulateDownload(String(body.modelId || ""));
+        const aiState = state.ai.models.downloadModel(String(body.modelId || ""));
         broadcastState(state);
         jsonResponse(response, 202, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/models/pause") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can pause LocalLeaf AI model downloads.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = state.ai.models.pauseDownload(String(body.modelId || ""));
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/models/cancel") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can stop LocalLeaf AI model downloads.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const aiState = state.ai.models.cancelDownload(String(body.modelId || ""));
+        broadcastState(state);
+        jsonResponse(response, 200, aiState);
       } catch (error) {
         jsonResponse(response, 400, { error: error.message });
       }
@@ -3037,6 +3265,22 @@ function createLocalLeafServer(options = {}) {
         return;
       }
       jsonResponse(response, 200, collectProjectEditorSuggestions(state.project.root, state.project.files));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/search/replace") {
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before replacing project text.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const result = replaceProjectText(state, body);
+        broadcastState(state);
+        jsonResponse(response, 200, result);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
       return;
     }
 

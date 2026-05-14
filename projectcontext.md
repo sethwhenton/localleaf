@@ -1,6 +1,6 @@
 # LocalLeaf Project Context
 
-Last updated: 2026-05-13.
+Last updated: 2026-05-15.
 
 ## Project Summary
 
@@ -8,7 +8,7 @@ LocalLeaf is a host-powered Overleaf-style collaboration app. The host installs 
 
 The repository is a single npm project:
 
-- App name and version: `localleaf` `0.1.17`
+- App name and version: `localleaf` `0.1.18`
 - Entry point: `src/desktop/main.js`
 - Local server: `src/server/index.js`
 - Client editor sources: `src/client/editor.js` and `src/client/pdf-preview.js`
@@ -23,9 +23,9 @@ There are no npm workspaces, pnpm lockfiles, yarn lockfiles, or Bun lockfiles at
 
 The editor has a right-rail AI Helper with three tabs: `Chat`, `AI Helper`, and `Changes`.
 
-- Provider/runtime support currently uses the host-side OpenAI-compatible provider manager in `src/server/ai-models.js`.
-- The planned AI SDK Core dependency (`ai` and `@ai-sdk/openai-compatible`) has not been installed yet because package installs/build scripts require explicit approval.
-- `/api/agent/message` remains the non-stream fallback. It routes to an active OpenAI-compatible provider when configured, otherwise uses the deterministic local fallback.
+- Provider/runtime support currently uses the host-side provider/model manager in `src/server/ai-models.js`.
+- LocalLeaf Local models are real GGUF downloads stored under the host's LocalLeaf model directory and served through the bundled llama.cpp `llama-server` runtime.
+- `/api/agent/message` remains the non-stream fallback. It routes to an active OpenAI-compatible provider when configured, then LocalLeaf Local when a downloaded model is active, otherwise the deterministic local fallback.
 - Hosted provider edits ask for compact exact replacement instructions first instead of requiring a full rewritten file, with a longer generation timeout for real edit requests than connection tests.
 - If a hosted provider times out during an edit request, the route can create a safe deterministic fallback proposal for common LaTeX edits and exact `from ... to ...` replacement requests.
 - `/api/agent/run` returns newline-delimited JSON events for the agent lifecycle: `run_started`, `tool_call`, `assistant_delta`, `proposal_created`, `approval_required`, `run_done`, and `run_error`.
@@ -37,6 +37,10 @@ The editor has a right-rail AI Helper with three tabs: `Chat`, `AI Helper`, and 
 - AI Helper permission settings are stored client-side and sent with each AI request. They currently control hosted-provider routing, rewrite requests, ask-before-edit approval cards, YOLO/no-confirm auto-apply for safe text proposals, multi-file intent, and advanced request gates for file management, uploads/imports, shell commands, and binary files.
 - The AI Helper timeline auto-scrolls to the latest message for active sessions and shows a floating jump-to-latest arrow when the user scrolls up. The composer has a compact session strip for steering, deleting/renaming sessions, queueing follow-up prompts, and toggling between Default permissions and YOLO mode.
 - Advanced actions are still host-gated. When enabled, those requests can reach the active model; the deterministic local fallback only automates safe text proposals and otherwise returns an acknowledgement rather than executing shell/file-management operations directly.
+- Cursor remains a provider template, but `@cursor/sdk` is intentionally not bundled in `0.1.18` because the current npm package pulls vulnerable transitive dependencies. Use LocalLeaf Local or an OpenAI-compatible provider for the release build.
+- The AI Helper now sends recent conversation context and project-wide LaTeX context, so include files such as `includes/abstract.tex` can be edited even when another file is open.
+- Search/replace supports current-file and all-file search, and project-wide Replace All is host-side through `/api/search/replace`.
+- Settings and About surfaces were polished with the Ollama GetDesign reference as a layout/style guide while keeping LocalLeaf's orange, white, and dark palettes.
 
 Current focused verification after the AI Helper harness work:
 

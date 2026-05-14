@@ -633,6 +633,17 @@ function createEditor(parent, options = {}) {
     EditorView.lineWrapping,
     EditorState.tabSize.of(2),
     EditorState.readOnly.of(Boolean(options.readOnly)),
+    Prec.highest(EditorView.domEventHandlers({
+      keydown(event) {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+          event.preventDefault();
+          event.stopPropagation();
+          options.onSearch?.();
+          return true;
+        }
+        return false;
+      }
+    })),
     autocompletion({
       override: [createLatexCompletionSource(() => suggestions)],
       activateOnTyping: true,

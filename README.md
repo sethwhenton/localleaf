@@ -13,7 +13,7 @@ When the host stops the session or closes the app, the room ends.
 
 ## Current Release
 
-Version `0.1.17` improves the host workflow with a fixed ZIP import picker and a soft join-request notification sound that can be toggled in Settings.
+Version `0.1.18` adds real LocalLeaf Local model downloads through the bundled llama.cpp runtime, improves AI Helper project-wide context and edit proposals, polishes the About/Settings/model surfaces, enables project-wide replace-all, and keeps the production dependency audit clear of high-severity findings.
 
 ## Features
 
@@ -36,6 +36,7 @@ Version `0.1.17` improves the host workflow with a fixed ZIP import picker and a
 - PDF compilation through bundled Tectonic, system LaTeX tools, or fallback preview guidance.
 - PDF preview powered by PDF.js, with smooth zoom buttons, Ctrl+mouse-wheel zoom, and page/scroll preservation after recompiles.
 - Compile logs with pinned red error groups, clearable orange warning groups, and gray informational output.
+- AI Helper with provider setup, project-wide LaTeX context, safe reviewable edit proposals, local model selection, and LocalLeaf Local GGUF model downloads.
 - Session management screen with invite copy feedback, user list, health status, and stop-session handling.
 - Host-only update prompt and manual update checks when a newer LocalLeaf release is available.
 - Desktop update flow that downloads the correct Windows/macOS installer and opens it so users can reinstall to the latest build.

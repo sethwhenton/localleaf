@@ -540,13 +540,6 @@ function modelPickerItems() {
     detail: model.sizeLabel || "Local model"
   }));
   if (local.aiPermissions.localModelOnly) return localItems;
-  const cursorItems = [{
-    providerId: "cursor-sdk-local",
-    modelId: "composer-2",
-    label: "Composer 2",
-    providerName: "Cursor SDK",
-    detail: "Local SDK runtime"
-  }];
   const providerItems = connectedAiProviders().filter(isProviderEnabled).flatMap((provider) => {
     return providerModelEntries(provider).filter((model) => isModelEnabled(provider.id, model.id)).map((model) => {
       return {
@@ -558,12 +551,13 @@ function modelPickerItems() {
       };
     });
   });
-  return [...localItems, ...cursorItems, ...providerItems];
+  return [...localItems, ...providerItems];
 }
 
 function modelStatus(model) {
   if (model.installed || model.status === "installed" || model.status === "active") return "installed";
   if (model.status === "downloading") return "downloading";
+  if (model.status === "paused") return "paused";
   if (model.status === "failed") return "failed";
   return "available";
 }
@@ -588,13 +582,13 @@ function activeAiProviderModel() {
         label: "Local / Fallback"
       };
   }
-  if (local.activeCursorSdkModelId) {
+  if (local.activeCursorSdkModelId && aiProviders().some((provider) => provider.id === "cursor" && isProviderConnected(provider))) {
     return {
-      providerId: "cursor-sdk-local",
+      providerId: "cursor",
       modelId: local.activeCursorSdkModelId,
-      providerName: "Cursor SDK",
+      providerName: "Cursor",
       modelName: local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId,
-      label: `Cursor SDK / ${local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId}`
+      label: `Cursor / ${local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId}`
     };
   }
   if (state.activeModel && typeof state.activeModel === "object") {
@@ -1137,7 +1131,8 @@ const PROVIDER_LOGO_PATHS = {
 
 const PROVIDER_LOGO_SVG_MARKUP = {
   lmstudio: `<path d="M2.84 2a1.273 1.273 0 100 2.547h14.107a1.273 1.273 0 100-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H22.04a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h14.106a1.274 1.274 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H15.38a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h14.106a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h9.698a1.273 1.273 0 100-2.547h-9.698z" fill-opacity=".3"></path><path d="M2.84 2a1.273 1.273 0 100 2.547h10.287a1.274 1.274 0 000-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H18.22a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H11.56a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h5.78a1.273 1.273 0 100-2.547h-5.78z"></path>`,
-  opencode: `<path d="M16 6H8v12h8V6zm4 16H4V2h16v20z"></path>`
+  opencode: `<path d="M16 6H8v12h8V6zm4 16H4V2h16v20z"></path>`,
+  cursor: `<path d="M4 4.6 20 12 4 19.4l3.6-7.4L4 4.6Z"></path><path d="m7.6 12 6.7-.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>`
 };
 
 function providerLogoKey(provider = {}) {
@@ -1147,6 +1142,7 @@ function providerLogoKey(provider = {}) {
   if (value.includes("ollama")) return "ollama";
   if (value.includes("lmstudio") || value.includes("lm studio")) return "lmstudio";
   if (value.includes("opencode")) return "opencode";
+  if (value.includes("cursor")) return "cursor";
   return "custom";
 }
 
@@ -2039,6 +2035,15 @@ function settingsGeneralMarkup() {
           </div>
           ${miniSwitchMarkup({ checked: local.joinRequestSoundEnabled, attrs: `id="joinRequestSound"` })}
         </section>
+        <section class="settings-list-row">
+          <div class="settings-list-main">
+            <div>
+              <strong>Auto-check updates</strong>
+              <span>Quietly check the LocalLeaf release page when the app opens.</span>
+            </div>
+          </div>
+          ${miniSwitchMarkup({ checked: local.autoUpdateChecks, attrs: `id="autoUpdateChecks"` })}
+        </section>
       </div>
     </section>
   `;
@@ -2046,8 +2051,12 @@ function settingsGeneralMarkup() {
 
 function localModelCardMarkup(model, activeId) {
   const status = modelStatus(model);
-  const isActive = activeId === model.id && activeAiProviderModel().providerId === "local";
+  const isActive = activeId === model.id && activeAiProviderModel().providerId === "localleaf-local";
   const busy = local.modelActionBusy === model.id;
+  const progress = Math.round(Number(model.progress || 0));
+  const bytesLabel = model.bytesReceived || model.totalBytes
+    ? `${formatFileSize(model.bytesReceived || 0)} / ${formatFileSize(model.totalBytes || model.expectedBytes || 0)}`
+    : model.sizeLabel || "";
   return `
     <article class="settings-model-card settings-model-row ${isActive ? "active" : ""}">
       <div class="model-card-main">
@@ -2062,16 +2071,24 @@ function localModelCardMarkup(model, activeId) {
         <span class="model-status-pill ${escapeHtml(status)}">${escapeHtml(isActive ? "Active" : status.replace(/_/g, " "))}</span>
         <div class="model-card-actions">
           ${status === "installed"
-            ? `<button class="btn btn-primary" data-activate-model="${escapeHtml(model.id)}" ${isActive || busy ? "disabled" : ""}>${busy ? "Working..." : "Use"}</button>`
-            : `<button class="btn btn-primary" data-download-model="${escapeHtml(model.id)}" ${busy || status === "downloading" ? "disabled" : ""}>${status === "downloading" ? "Downloading..." : "Download"}</button>`}
-          <button class="btn" data-test-provider="local" data-test-model="${escapeHtml(model.id)}">Test</button>
-          ${status === "installed" ? `<button class="btn" data-delete-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""}>Delete</button>` : ""}
+            ? `<button class="icon-button danger" data-delete-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""} title="Delete model" aria-label="Delete model">${uiGlyph("delete")}</button>`
+            : status === "downloading"
+              ? `
+                <button class="icon-button" data-pause-model="${escapeHtml(model.id)}" title="Pause download" aria-label="Pause download">${uiGlyph("pause")}</button>
+                <button class="icon-button danger" data-cancel-model="${escapeHtml(model.id)}" title="Stop and remove partial download" aria-label="Stop and remove partial download">${uiGlyph("stop")}</button>
+              `
+              : status === "paused"
+                ? `
+                  <button class="icon-button" data-download-model="${escapeHtml(model.id)}" title="Resume download" aria-label="Resume download">${uiGlyph("play")}</button>
+                  <button class="icon-button danger" data-cancel-model="${escapeHtml(model.id)}" title="Delete partial download" aria-label="Delete partial download">${uiGlyph("delete")}</button>
+                `
+                : `<button class="btn btn-primary" data-download-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""}>Download</button>`}
         </div>
       </div>
-      ${status === "downloading" ? `
+      ${status === "downloading" || status === "paused" ? `
         <div class="model-progress">
-          <div><strong>Downloading</strong><span>${Math.round(Number(model.progress || 0))}%</span></div>
-          <progress value="${Number(model.progress || 0)}" max="100"></progress>
+          <div><strong>${status === "paused" ? "Paused" : "Downloading"}</strong><span>${progress}% ${escapeHtml(bytesLabel)}</span></div>
+          <progress value="${progress}" max="100"></progress>
         </div>
       ` : ""}
     </article>
@@ -2184,9 +2201,15 @@ function providerModelGroupMarkup(provider) {
 function localModelListMarkup(activeId) {
   const models = aiModels();
   if (!models.length) return "";
+  const state = aiState();
   return `
     <section class="settings-model-group">
-      <h3>${uiGlyph("ai")} Local models</h3>
+      <div class="settings-model-group-head local-model-head">
+        <h3>${uiGlyph("ai")} Local models</h3>
+        <button class="settings-storage-chip" id="chooseModelFolder" type="button" title="${escapeHtml(state.storagePathLabel || state.storagePath || "Default LocalLeafModel folder")}">
+          ${uiGlyph("folder")} <span>${escapeHtml(state.storagePathLabel || state.storagePath || "Default storage")}</span>
+        </button>
+      </div>
       <div class="settings-model-card-list">
         ${models.map((model) => localModelCardMarkup(model, activeId)).join("")}
       </div>
@@ -2202,15 +2225,7 @@ function settingsModelsMarkup() {
   return `
     <section class="settings-models settings-compact-page">
       <input class="settings-model-search" id="settingsModelSearch" value="${escapeHtml(local.settingsModelSearch)}" placeholder="Search models" autocomplete="off" />
-      <div class="settings-path-row">
-        <div>
-          <h3>Model storage</h3>
-          <p>${escapeHtml(state.storagePathLabel || state.storagePath || "Default LocalLeafModel folder")}</p>
-        </div>
-        <button class="btn" id="chooseModelFolder" type="button">Choose Folder</button>
-      </div>
       <div class="settings-model-toolbar">
-        <button class="btn btn-primary" id="downloadLocalModel" type="button">${uiGlyph("download")} Download local</button>
         <button class="btn" id="bringYourOwnKey" type="button">${uiGlyph("plus")} Connect provider</button>
         <button class="btn" id="configureCustomModel" type="button">${uiGlyph("settings")} Custom</button>
       </div>
@@ -2321,10 +2336,6 @@ function showSettingsModal(section = "general") {
     setJoinRequestSoundEnabled(event.currentTarget.checked);
   });
   modal?.querySelector("#chooseModelFolder")?.addEventListener("click", chooseModelFolder);
-  modal?.querySelector("#downloadLocalModel")?.addEventListener("click", () => {
-    const next = aiModels().find((model) => modelStatus(model) !== "installed") || aiModels()[0];
-    if (next?.id) downloadModel(next.id);
-  });
   modal?.querySelector("#bringYourOwnKey")?.addEventListener("click", () => showProviderDialog({ mode: "key" }));
   modal?.querySelector("#configureCustomModel")?.addEventListener("click", () => showProviderDialog({ mode: "custom" }));
   modal?.querySelector("#settingsModelSearch")?.addEventListener("input", (event) => {
@@ -2366,6 +2377,8 @@ function showSettingsModal(section = "general") {
     });
   });
   modal?.querySelectorAll("[data-download-model]").forEach((button) => button.addEventListener("click", () => downloadModel(button.dataset.downloadModel)));
+  modal?.querySelectorAll("[data-pause-model]").forEach((button) => button.addEventListener("click", () => pauseModelDownload(button.dataset.pauseModel)));
+  modal?.querySelectorAll("[data-cancel-model]").forEach((button) => button.addEventListener("click", () => cancelModelDownload(button.dataset.cancelModel)));
   modal?.querySelectorAll("[data-delete-model]").forEach((button) => button.addEventListener("click", () => deleteModel(button.dataset.deleteModel)));
   modal?.querySelectorAll("[data-activate-model]").forEach((button) => button.addEventListener("click", () => activateModel(button.dataset.activateModel)));
   modal?.querySelectorAll("[data-use-provider]").forEach((button) => {
@@ -2583,21 +2596,23 @@ async function saveProviderFromDialog() {
 
 async function useProviderModel(providerId, modelId) {
   try {
-    if (providerId === "cursor-sdk-local") {
+    if (providerId === "cursor") {
       local.activeCursorSdkModelId = modelId || "composer-2";
       localStorage.setItem("localleaf.activeCursorSdkModelId", local.activeCursorSdkModelId);
       local.aiModelPickerOpen = false;
-      showAppNotice("Cursor SDK selected for AI Helper.", { type: "success", title: "Models", timeoutMs: 2600 });
-      refreshRightRailUi();
-      return;
+      showAppNotice("Cursor selected for AI Helper.", { type: "success", title: "Models", timeoutMs: 2600 });
     }
-    local.activeCursorSdkModelId = "";
-    localStorage.removeItem("localleaf.activeCursorSdkModelId");
     if (!providerId || providerId === "local" || providerId === "localleaf-local") {
+      local.activeCursorSdkModelId = "";
+      localStorage.removeItem("localleaf.activeCursorSdkModelId");
       await activateModel(modelId);
       return;
     }
     const next = await api("/api/ai/providers/activate", { method: "POST", body: { providerId, modelId } });
+    if (providerId !== "cursor") {
+      local.activeCursorSdkModelId = "";
+      localStorage.removeItem("localleaf.activeCursorSdkModelId");
+    }
     local.appState.ai = { ...(local.appState.ai || {}), ...next };
     showAppNotice("Active AI model updated.", { type: "success", title: "Models", timeoutMs: 2600 });
     if (document.querySelector(".settings-modal-backdrop")) showSettingsModal("models");
@@ -2698,6 +2713,30 @@ async function downloadModel(modelId) {
   }
 }
 
+async function pauseModelDownload(modelId) {
+  if (!modelId) return;
+  try {
+    const next = await api("/api/ai/models/pause", { method: "POST", body: { modelId } });
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Pause model" });
+  } finally {
+    showSettingsModal("models");
+  }
+}
+
+async function cancelModelDownload(modelId) {
+  if (!modelId) return;
+  try {
+    const next = await api("/api/ai/models/cancel", { method: "POST", body: { modelId } });
+    local.appState.ai = { ...(local.appState.ai || {}), ...next };
+  } catch (error) {
+    showAppNotice(error.message, { type: "error", title: "Stop model" });
+  } finally {
+    showSettingsModal("models");
+  }
+}
+
 async function deleteModel(modelId) {
   if (!modelId || !confirm("Delete this local model from LocalLeafModel?")) return;
   local.modelActionBusy = modelId;
@@ -2760,21 +2799,30 @@ function showInfoModal(kind) {
           </div>
         ` : `
           <div class="info-modal-body about-copy">
-            <div class="about-brand-card">
-              ${logoMark("about-brand-mark")}
+            <div class="about-hero-card">
+              <div class="about-brand-card">
+                ${logoMark("about-brand-mark")}
+                <div>
+                  <strong>LocalLeaf Host</strong>
+                  <span>Overleaf-style editing, owned by the host computer.</span>
+                </div>
+              </div>
               <div>
-                <strong>LocalLeaf Host</strong>
-                <span>Overleaf-style editing, owned by the host computer.</span>
+                <span class="about-version-pill">Private by design</span>
+                <span class="about-version-pill">Host powered</span>
               </div>
             </div>
             <p>LocalLeaf keeps LaTeX projects on the host machine while guests join from a browser to edit, chat, compile, and preview PDFs together.</p>
             <div class="about-feature-grid">
-              <span>${uiGlyph("file")} Local project files</span>
-              <span>${uiGlyph("users")} Browser collaboration</span>
-              <span>${uiGlyph("compile")} PDF compilation</span>
-              <span>${uiGlyph("chat")} Project chat</span>
+              <span><b>${uiGlyph("file")}</b><strong>Local files</strong><small>Projects stay on this computer.</small></span>
+              <span><b>${uiGlyph("users")}</b><strong>Browser guests</strong><small>Friends join from one invite link.</small></span>
+              <span><b>${uiGlyph("compile")}</b><strong>PDF compile</strong><small>Bundled compiler plus fallback engines.</small></span>
+              <span><b>${uiGlyph("chat")}</b><strong>Project chat</strong><small>Talk while editing the same LaTeX files.</small></span>
             </div>
-            <a class="btn btn-primary about-website-link" href="${LOCALLEAF_SITE_URL}" target="_blank" rel="noopener">Open LocalLeaf website ${uiGlyph("external")}</a>
+            <div class="about-footer-row">
+              <a class="btn btn-primary about-website-link" href="${LOCALLEAF_SITE_URL}" target="_blank" rel="noopener">Open LocalLeaf website ${uiGlyph("external")}</a>
+              <span>Built for student groups and quick self-hosted sessions.</span>
+            </div>
           </div>
         `}
       </section>
@@ -4003,18 +4051,17 @@ function editorSearchPanelMarkup() {
           <button class="search-toggle ${local.searchRegex ? "active" : ""}" id="searchRegex" title="Use regular expression" aria-label="Use regular expression">.*</button>
           <button class="search-toggle ${local.searchWholeWord ? "active" : ""}" id="searchWholeWord" title="Whole word" aria-label="Whole word">W</button>
         </div>
-        ${projectScope
-          ? `<div class="project-search-note">All-files search opens matches across the project. Switch to Current file to replace text.</div>`
-          : `<input id="editorReplaceInput" value="${escapeHtml(local.searchReplace)}" placeholder="Replace with" autocomplete="off" />`}
+        <input id="editorReplaceInput" value="${escapeHtml(local.searchReplace)}" placeholder="Replace with" autocomplete="off" />
       </div>
       <div class="editor-search-actions">
         <button class="editor-tool-button" id="searchPrevious" title="Previous match" aria-label="Previous match">&uarr;</button>
         <button class="editor-tool-button" id="searchNext" title="Next match" aria-label="Next match">&darr;</button>
         <button class="btn" id="replaceOne" ${projectScope ? "disabled" : ""}>Replace</button>
-        <button class="btn" id="replaceAll" ${projectScope ? "disabled" : ""}>Replace All</button>
+        <button class="btn" id="replaceAll">${projectScope ? "Replace All Files" : "Replace All"}</button>
         <span class="search-status" id="searchStatus">${searchStatusMarkup()}</span>
         <button class="editor-tool-button" id="closeSearchPanel" title="Close search" aria-label="Close search">x</button>
       </div>
+      ${projectScope ? `<div class="project-search-note">All-files search opens matches across the project. Replace All asks before changing every text file.</div>` : ""}
       ${projectSearchResultsMarkup()}
     </section>
   `;
@@ -4930,7 +4977,6 @@ function findAiProposal(proposalId) {
 function rememberAiProposal(proposal) {
   if (!proposal?.id) return;
   proposal.sessionId = proposal.sessionId || local.aiCurrentSessionId;
-  if (proposal.runId) local.aiExpandedRuns.add(proposal.runId);
   const existing = local.aiChangeHistory.findIndex((item) => item.id === proposal.id);
   if (existing >= 0) local.aiChangeHistory.splice(existing, 1, proposal);
   else local.aiChangeHistory.push(proposal);
@@ -4983,6 +5029,12 @@ function updateAiSendButtonState() {
   button.title = stopMode ? "Stop" : "Send";
   button.setAttribute("aria-label", stopMode ? "Stop AI run" : "Send");
   button.innerHTML = uiGlyph(stopMode ? "stop" : "upload");
+}
+
+function autoGrowAiPrompt(input = document.querySelector("#aiPrompt")) {
+  if (!input) return;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 148)}px`;
 }
 
 function stopAiRun() {
@@ -5149,6 +5201,10 @@ async function askAiHelper(message, options = {}) {
         currentText: currentEditorText(),
         selectedText: options.queuedPrompt?.selectedText || selectedEditorText(),
         compileLogs: local.appState?.compile?.logs || [],
+        conversation: local.aiMessages.slice(-12).map((item) => ({
+          role: item.role,
+          message: item.message || ""
+        })),
         aiProviderId: queuedModel?.providerId || activeModel.providerId || "",
         aiModelId: queuedModel?.modelId || activeModel.modelId || "",
         aiPermissions: options.queuedPrompt?.permissions || local.aiPermissions
@@ -5302,10 +5358,12 @@ async function openAiProposalFile(proposalId) {
   local.editorMode = "code";
   localStorage.setItem("localleaf.editorMode", "code");
   try {
+    const previewScroll = capturePreviewScroll();
     await loadSelectedFile();
     expandToFile(proposal.path);
     local.rightRailTab = "changes";
     await render();
+    restorePreviewScroll(previewScroll);
     setTimeout(() => {
       const focus = proposal.focus || {};
       const start = Number.isInteger(focus.start) ? focus.start : 0;
@@ -5664,6 +5722,7 @@ function bindRightRailControls() {
     local.aiPrompt = event.currentTarget.value;
     const queued = findQueuedAiPrompt(local.aiEditingQueuedPromptId);
     if (queued) queued.message = local.aiPrompt;
+    autoGrowAiPrompt(event.currentTarget);
     updateAiSendButtonState();
   });
   document.querySelector("#aiPrompt")?.addEventListener("keydown", (event) => {
@@ -5721,12 +5780,15 @@ function bindRightRailControls() {
       const proposal = aiHistoryItems().find((item) => item.path === button.dataset.openAiFileLink);
       if (proposal) await openAiProposalFile(proposal.id);
       else {
+        const previewScroll = capturePreviewScroll();
         local.selectedFile = button.dataset.openAiFileLink;
         await loadSelectedFile();
         await render();
+        restorePreviewScroll(previewScroll);
       }
     });
   });
+  autoGrowAiPrompt();
 }
 
 function bindChatForm() {
@@ -7699,8 +7761,12 @@ function runEditorSearch(direction = "next") {
 function runEditorReplace(all = false) {
   if (!local.searchQuery) return;
   if (local.searchScope === "project") {
-    local.searchStatus = "Switch to File to replace";
-    updateSearchPanelDynamicState();
+    if (!all) {
+      local.searchStatus = "Use Replace All for all files";
+      updateSearchPanelDynamicState();
+      return;
+    }
+    replaceAllProjectMatches();
     return;
   }
   const options = activeSearchOptions();
@@ -7724,6 +7790,42 @@ function runEditorReplace(all = false) {
   const didReplace = visualReplaceSelection(local.searchReplace);
   if (!didReplace) runEditorSearch("next");
   updateSearchStatus({ count: didReplace ? 1 : 0 }, "replace");
+}
+
+async function replaceAllProjectMatches() {
+  const query = local.searchQuery.trim();
+  if (!query) return;
+  const estimated = local.searchResults.length;
+  const message = estimated
+    ? `Replace ${estimated}${local.searchTruncated ? "+" : ""} visible project match${estimated === 1 ? "" : "es"} across all text files?`
+    : "Replace all matches across every text file in this project?";
+  if (!confirm(message)) return;
+  local.searchLoading = true;
+  local.searchStatus = "Replacing...";
+  updateSearchPanelDynamicState();
+  try {
+    const result = await api("/api/search/replace", {
+      method: "POST",
+      body: {
+        query,
+        replace: local.searchReplace,
+        options: activeSearchOptions()
+      }
+    });
+    local.searchStatus = `${result.count || 0} replaced in ${(result.files || []).length} files`;
+    if ((result.files || []).includes(local.selectedFile)) {
+      await loadSelectedFile();
+      updateEditorSourceUi();
+    }
+    await loadState();
+    scheduleProjectSearch(0);
+  } catch (error) {
+    local.searchStatus = error.message || "Replace failed";
+    updateSearchPanelDynamicState();
+  } finally {
+    local.searchLoading = false;
+    updateSearchPanelDynamicState();
+  }
 }
 
 function closeEditorSearchPanel() {

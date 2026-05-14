@@ -79,7 +79,15 @@ test("exposes host-only AI model state and model storage plumbing", async () => 
   const modelParent = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-models-"));
   let nextParent = "";
   fs.writeFileSync(path.join(projectRoot, "main.tex"), "\\documentclass{article}\n\\begin{document}\nHi\n\\end{document}\n");
-  const { app, baseUrl } = await startApp(projectRoot, { modelRoot: modelParent });
+  const { app, baseUrl } = await startApp(projectRoot, {
+    modelRoot: modelParent,
+    aiDownloadImpl: async ({ targetPath, model, onProgress }) => {
+      onProgress({ progress: 50, bytesReceived: 5, totalBytes: 10 });
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, "fake-gguf", "utf8");
+      return { bytes: 9, filePath: targetPath, modelId: model.id };
+    }
+  });
 
   try {
     const state = await request(baseUrl, "/api/state");
@@ -103,7 +111,7 @@ test("exposes host-only AI model state and model storage plumbing", async () => 
       method: "POST",
       body: { modelId: "qwen35-08b-light" }
     });
-    assert.equal(downloading.models.find((model) => model.id === "qwen35-08b-light").status, "downloading");
+    assert.match(downloading.models.find((model) => model.id === "qwen35-08b-light").status, /downloading|installed/);
   } finally {
     await app.stop();
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -439,17 +447,30 @@ test("creates proposals from Cursor SDK scratch workspace diffs without mutating
   });
 
   try {
+    await request(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        id: "cursor",
+        templateId: "cursor",
+        name: "Cursor",
+        type: "cursor-sdk",
+        baseUrl: "cursor-sdk://local",
+        apiKey: "cursor-test-key",
+        models: [{ id: "composer-2", name: "Composer 2" }],
+        activate: true
+      }
+    });
     const message = await request(baseUrl, "/api/agent/message", {
       method: "POST",
       body: {
         path: "main.tex",
         message: "hello\nchange the title from ML to Machine Learning in the first page",
-        aiProviderId: "cursor-sdk-local",
+        aiProviderId: "cursor",
         aiModelId: "composer-2"
       }
     });
 
-    assert.equal(message.provider.id, "cursor-sdk-local");
+    assert.equal(message.provider.id, "cursor");
     assert.equal(message.proposals.length, 1);
     assert.match(message.proposals[0].newText, /\\title\{Machine Learning\}/);
     assert.equal(fs.readFileSync(mainPath, "utf8"), originalText);

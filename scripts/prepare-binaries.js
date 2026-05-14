@@ -20,6 +20,10 @@ const RELEASES = {
   cloudflared: {
     repo: "cloudflare/cloudflared",
     tag: "2026.3.0"
+  },
+  llamaCpp: {
+    repo: "ggml-org/llama.cpp",
+    tag: "b9060"
   }
 };
 
@@ -36,6 +40,13 @@ const TARGETS = {
       sha256: "2aae4f69b0fc1c671b8353b4f594cbd902cd1e360c8eed2b8cad4602cb1546fb",
       outputName: "cloudflared",
       executableName: "cloudflared"
+    },
+    llamaCpp: {
+      assetName: "llama-b9060-bin-macos-arm64.tar.gz",
+      sha256: "dd89c0428d99fbcdbe39406cbfce56e2d5fb1b46d93047055ba576ea6d12fbaa",
+      outputName: "llama-cpp",
+      executableName: "llama-server",
+      copyAll: true
     }
   },
   "darwin:x64": {
@@ -50,6 +61,13 @@ const TARGETS = {
       sha256: "0f30140c4a5e213d22f951ef4c964cac5fb6a5f061ba6eba5ea932999f7c0394",
       outputName: "cloudflared",
       executableName: "cloudflared"
+    },
+    llamaCpp: {
+      assetName: "llama-b9060-bin-macos-x64.tar.gz",
+      sha256: "79c7ca2465cbebd1ef22fdaceea14108beb8943555fc2eccfd7f741a64bb8e30",
+      outputName: "llama-cpp",
+      executableName: "llama-server",
+      copyAll: true
     }
   },
   "win32:x64": {
@@ -64,6 +82,13 @@ const TARGETS = {
       sha256: "59b12880b24af581cf5b1013db601c7d843b9b097e9c78aa5957c7f39f741885",
       outputName: "cloudflared.exe",
       executableName: "cloudflared.exe"
+    },
+    llamaCpp: {
+      assetName: "llama-b9060-bin-win-cpu-x64.zip",
+      sha256: "60271ff421d1ae471bf00566a9bda0f51d509aecc4f58ad07e22074fc7620cd6",
+      outputName: "llama-cpp",
+      executableName: "llama-server.exe",
+      copyAll: true
     }
   }
 };
@@ -154,6 +179,16 @@ function findFile(root, name) {
   return null;
 }
 
+function copyDirectoryContents(source, target) {
+  fs.mkdirSync(target, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) copyDirectoryContents(from, to);
+    else fs.copyFileSync(from, to);
+  }
+}
+
 function extractArchive(archivePath, extractRoot) {
   fs.mkdirSync(extractRoot, { recursive: true });
   if (archivePath.endsWith(".zip")) {
@@ -174,7 +209,7 @@ function verifySha256(filePath, expected) {
   }
 }
 
-async function installAsset({ releaseRepo, releaseTag, assetName, sha256, outputName, executableName }) {
+async function installAsset({ releaseRepo, releaseTag, assetName, sha256, outputName, executableName, copyAll = false }) {
   const release = await requestJson(`https://api.github.com/repos/${releaseRepo}/releases/tags/${encodeURIComponent(releaseTag)}`);
   const asset = findAsset(release, assetName);
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-bin-"));
@@ -190,6 +225,21 @@ async function installAsset({ releaseRepo, releaseTag, assetName, sha256, output
   } else {
     const extractRoot = path.join(tempRoot, "extract");
     extractArchive(downloadPath, extractRoot);
+    if (copyAll) {
+      const binary = findFile(extractRoot, executableName);
+      if (!binary) {
+        throw new Error(`${asset.name} did not contain ${executableName}`);
+      }
+      fs.rmSync(outputPath, { recursive: true, force: true });
+      copyDirectoryContents(path.dirname(binary), outputPath);
+      if (platform !== "win32") {
+        const installedBinary = path.join(outputPath, executableName);
+        if (fs.existsSync(installedBinary)) fs.chmodSync(installedBinary, 0o755);
+      }
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      console.log(`Installed ${outputPath}`);
+      return;
+    }
     const binary = findFile(extractRoot, executableName);
     if (!binary) {
       throw new Error(`${asset.name} did not contain ${executableName}`);
@@ -220,6 +270,11 @@ async function main() {
     releaseRepo: RELEASES.cloudflared.repo,
     releaseTag: RELEASES.cloudflared.tag,
     ...target.cloudflared
+  });
+  await installAsset({
+    releaseRepo: RELEASES.llamaCpp.repo,
+    releaseTag: RELEASES.llamaCpp.tag,
+    ...target.llamaCpp
   });
 }
 

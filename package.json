@@ -1,6 +1,6 @@
 {
   "name": "localleaf",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "description": "LocalLeaf host-powered Overleaf-style collaboration app.",
   "main": "src/desktop/main.js",
@@ -48,6 +48,7 @@
         "filter": [
           "cloudflared*",
           "tectonic*",
+          "llama-cpp/**/*",
           "licenses/**/*"
         ]
       }
@@ -95,7 +96,6 @@
     "@codemirror/language": "^6.12.3",
     "@codemirror/legacy-modes": "^6.5.2",
     "@codemirror/search": "^6.7.0",
-    "@cursor/sdk": "^1.0.13",
     "@lezer/highlight": "^1.2.3",
     "adm-zip": "^0.5.17",
     "codemirror": "^6.0.2",

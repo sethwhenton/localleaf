@@ -3,6 +3,7 @@ node_modules/
 release/
 artifacts-*.png
 bin/*.exe
+bin/llama-cpp/
 *.log
 *.aux
 *.fls

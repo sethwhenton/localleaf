@@ -1,25 +1,39 @@
 const fs = require("node:fs");
+const http = require("node:http");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
+const net = require("node:net");
 
 const MODEL_FOLDER_NAME = "LocalLeafModel";
 const PROVIDERS_FILE = "providers.json";
 const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-_]*$/;
 const DEFAULT_TEST_TIMEOUT_MS = 25000;
 const DEFAULT_GENERATION_TIMEOUT_MS = 120000;
+const ROOT_DIR = path.resolve(__dirname, "../..");
+const LLAMA_SERVER_NAME = process.platform === "win32" ? "llama-server.exe" : "llama-server";
 
 const MODEL_CATALOG = [
   {
     id: "qwen35-08b-light",
-    name: "Qwen 3.5 0.8B Light",
-    sizeLabel: "0.8B",
-    description: "Small local model profile for lightweight edits and quick suggestions."
+    name: "Qwen2.5 0.5B Light",
+    sizeLabel: "333 MB",
+    parameterLabel: "0.5B",
+    filename: "Qwen2.5-0.5B-Instruct-IQ4_XS.gguf",
+    downloadUrl: "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-IQ4_XS.gguf?download=true",
+    expectedBytes: 349402688,
+    description: "Small local GGUF model for quick LaTeX edits on modest laptops."
   },
   {
     id: "qwen35-2b-recommended",
-    name: "Qwen 3.5 2B Recommended",
-    sizeLabel: "2B",
-    description: "Recommended local model profile for safer rewrites and structured edits."
+    name: "Qwen2.5 Coder 0.5B Recommended",
+    sizeLabel: "379 MB",
+    parameterLabel: "0.5B",
+    filename: "Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf",
+    downloadUrl: "https://huggingface.co/bartowski/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf?download=true",
+    expectedBytes: 397808288,
+    description: "Coder-tuned local GGUF model for LaTeX edits and structured code blocks."
   }
 ];
 
@@ -89,6 +103,18 @@ const PROVIDER_TEMPLATES = [
     requiresApiKey: false,
     models: [
       { id: "local-model", name: "Loaded LM Studio Model" }
+    ],
+    headers: {}
+  },
+  {
+    id: "cursor",
+    name: "Cursor",
+    type: "cursor-sdk",
+    baseUrl: "cursor-sdk://local",
+    description: "Use Cursor's Composer model from a configured Cursor provider.",
+    requiresApiKey: true,
+    models: [
+      { id: "composer-2", name: "Composer 2" }
     ],
     headers: {}
   },
@@ -277,6 +303,97 @@ function writeJson(filePath, payload) {
   fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
 }
 
+function modelManifestPath(storageRoot, modelId) {
+  return path.join(modelDirectory(storageRoot, modelId), "model.json");
+}
+
+function modelFilePath(storageRoot, model) {
+  return path.join(modelDirectory(storageRoot, model.id), model.filename || `${model.id}.gguf`);
+}
+
+function partialModelPath(storageRoot, model) {
+  return `${modelFilePath(storageRoot, model)}.part`;
+}
+
+function installedModelManifest(storageRoot, modelId) {
+  const manifest = safeReadJson(modelManifestPath(storageRoot, modelId), null);
+  const model = MODEL_CATALOG.find((item) => item.id === modelId);
+  if (!manifest || !model) return null;
+  const filePath = modelFilePath(storageRoot, model);
+  if (!fs.existsSync(filePath)) return null;
+  return { ...manifest, filePath };
+}
+
+function notifyAsync(callback) {
+  if (typeof callback !== "function") return;
+  setTimeout(() => {
+    try {
+      callback();
+    } catch {
+      // State broadcasts are best-effort; model work should continue.
+    }
+  }, 0);
+}
+
+function downloadWithNode(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const client = String(url || "").startsWith("https:") ? https : http;
+    const request = client.get(url, {
+      headers: {
+        "user-agent": "LocalLeaf/1.0",
+        ...(options.headers || {})
+      },
+      signal: options.signal
+    }, (response) => {
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+        response.resume();
+        resolve(downloadWithNode(new URL(response.headers.location, url).toString(), options));
+        return;
+      }
+      resolve(response);
+    });
+    request.on("error", reject);
+  });
+}
+
+function findBundledLlamaServer() {
+  const candidates = [
+    process.env.LOCALLEAF_LLAMA_SERVER_PATH,
+    path.join(ROOT_DIR, "bin", "llama-cpp", LLAMA_SERVER_NAME),
+    process.resourcesPath ? path.join(process.resourcesPath, "bin", "llama-cpp", LLAMA_SERVER_NAME) : "",
+    path.join(process.cwd(), "bin", "llama-cpp", LLAMA_SERVER_NAME)
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
+}
+
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close(() => resolve(address.port));
+    });
+  });
+}
+
+async function waitForLlamaServer(baseUrl, fetchImpl, timeoutMs = 60000) {
+  const started = Date.now();
+  let lastError = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const response = await fetchImpl(`${baseUrl}/v1/models`, { method: "GET" });
+      if (response.ok) return true;
+      lastError = new Error(`llama-server returned HTTP ${response.status}.`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+  throw new Error(lastError?.message || "Local model runtime did not become ready.");
+}
+
 function chatCompletionsUrl(baseUrl) {
   if (/\/chat\/completions$/u.test(baseUrl)) return baseUrl;
   return `${baseUrl}/chat/completions`;
@@ -285,12 +402,16 @@ function chatCompletionsUrl(baseUrl) {
 function responseContent(payload) {
   const message = payload?.choices?.[0]?.message;
   if (typeof message?.content === "string") return message.content;
+  if (typeof message?.reasoning_content === "string") return message.reasoning_content;
+  if (typeof message?.reasoning === "string") return message.reasoning;
   if (Array.isArray(message?.content)) {
     return message.content
       .map((part) => typeof part === "string" ? part : part?.text || "")
       .join("");
   }
   if (typeof payload?.choices?.[0]?.text === "string") return payload.choices[0].text;
+  if (typeof payload?.content === "string") return payload.content;
+  if (typeof payload?.response === "string") return payload.response;
   return "";
 }
 
@@ -299,10 +420,17 @@ function createAiModelManager(options = {}) {
   let activeModelId = null;
   let activeProviderId = null;
   const downloads = new Map();
+  let localRuntime = null;
   const secretStore = options.secretStore || createMemorySecretStore();
   const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const downloadImpl = options.downloadImpl || null;
+  const onChange = options.onChange;
   const providers = new Map();
   if (typeof secretStore.setRoot === "function") secretStore.setRoot(storageRoot);
+
+  function emitChange() {
+    notifyAsync(onChange);
+  }
 
   function loadProviders() {
     providers.clear();
@@ -363,12 +491,13 @@ function createAiModelManager(options = {}) {
 
   function installedModelIds() {
     return new Set(MODEL_CATALOG
-      .filter((model) => fs.existsSync(path.join(modelDirectory(storageRoot, model.id), "model.json")))
+      .filter((model) => installedModelManifest(storageRoot, model.id))
       .map((model) => model.id));
   }
 
   function allModelChoices() {
-    const local = MODEL_CATALOG.map((model) => ({
+    const installed = installedModelIds();
+    const local = MODEL_CATALOG.filter((model) => installed.has(model.id)).map((model) => ({
       providerId: "localleaf-local",
       providerName: "LocalLeaf Local",
       modelId: model.id,
@@ -428,7 +557,11 @@ function createAiModelManager(options = {}) {
       activeModelId,
       activeProviderId,
       activeModel: activeModelChoice(),
-      runtime: activeProviderId ? "openai-compatible" : "deterministic-fallback",
+      runtime: activeProviderId
+        ? (providers.get(activeProviderId)?.type || "openai-compatible")
+        : activeModelId && installed.has(activeModelId)
+          ? "local-llama-cpp"
+          : "deterministic-fallback",
       permissions: {
         canReadTextFiles: true,
         canProposeTextEdits: true,
@@ -444,6 +577,8 @@ function createAiModelManager(options = {}) {
           installed: isInstalled,
           status: progress?.status || (isInstalled ? "installed" : "not_downloaded"),
           progress: progress?.progress || (isInstalled ? 100 : 0),
+          bytesReceived: progress?.bytesReceived || (isInstalled ? (installedModelManifest(storageRoot, model.id)?.bytes || model.expectedBytes || 0) : 0),
+          totalBytes: progress?.totalBytes || model.expectedBytes || 0,
           error: progress?.error || null
         };
       }),
@@ -454,6 +589,7 @@ function createAiModelManager(options = {}) {
   }
 
   function setStoragePath(parentPath) {
+    stopLocalRuntime();
     storageRoot = safeStorageRoot(parentPath);
     if (typeof secretStore.setRoot === "function") secretStore.setRoot(storageRoot);
     const installed = installedModelIds();
@@ -462,45 +598,173 @@ function createAiModelManager(options = {}) {
     return publicState();
   }
 
-  function simulateDownload(modelId) {
+  function setDownloadState(modelId, patch) {
+    const previous = downloads.get(modelId) || {};
+    downloads.set(modelId, { ...previous, ...patch });
+    emitChange();
+  }
+
+  function activeInstalledModel() {
+    const installed = installedModelIds();
+    const model = MODEL_CATALOG.find((item) => item.id === activeModelId && installed.has(item.id))
+      || MODEL_CATALOG.find((item) => installed.has(item.id));
+    if (model && (!activeModelId || !installed.has(activeModelId))) {
+      activeModelId = model.id;
+      activeProviderId = null;
+      saveProviders();
+    }
+    return model || null;
+  }
+
+  async function defaultDownloadModel(model, controller, onProgress) {
+    const target = modelFilePath(storageRoot, model);
+    const partial = partialModelPath(storageRoot, model);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    let existingBytes = 0;
+    try {
+      existingBytes = fs.existsSync(partial) ? fs.statSync(partial).size : 0;
+    } catch {
+      existingBytes = 0;
+    }
+    const headers = existingBytes > 0 ? { range: `bytes=${existingBytes}-` } : {};
+    const response = await downloadWithNode(model.downloadUrl, { headers, signal: controller.signal });
+    if (response.statusCode === 200 && existingBytes > 0) {
+      fs.rmSync(partial, { force: true });
+      existingBytes = 0;
+    }
+    if (![200, 206].includes(response.statusCode)) {
+      response.resume();
+      throw new Error(`Model download failed with HTTP ${response.statusCode}.`);
+    }
+    const totalHeader = Number(response.headers["content-length"] || 0);
+    const totalBytes = response.statusCode === 206
+      ? existingBytes + totalHeader
+      : totalHeader || model.expectedBytes || 0;
+    let bytesReceived = existingBytes;
+    onProgress({
+      bytesReceived,
+      totalBytes,
+      progress: totalBytes ? Math.min(99, Math.round((bytesReceived / totalBytes) * 100)) : 1
+    });
+    await new Promise((resolve, reject) => {
+      const file = fs.createWriteStream(partial, { flags: existingBytes ? "a" : "w" });
+      response.on("data", (chunk) => {
+        bytesReceived += chunk.length;
+        onProgress({
+          bytesReceived,
+          totalBytes,
+          progress: totalBytes ? Math.min(99, Math.round((bytesReceived / totalBytes) * 100)) : 1
+        });
+      });
+      response.on("error", reject);
+      file.on("error", reject);
+      file.on("finish", resolve);
+      response.pipe(file);
+    });
+    fs.renameSync(partial, target);
+    return { bytes: bytesReceived, filePath: target };
+  }
+
+  async function finishDownload(model, result = {}) {
+    const target = modelFilePath(storageRoot, model);
+    const bytes = Number(result.bytes || (fs.existsSync(target) ? fs.statSync(target).size : 0) || model.expectedBytes || 0);
+    writeJson(modelManifestPath(storageRoot, model.id), {
+      id: model.id,
+      name: model.name,
+      filename: model.filename,
+      bytes,
+      source: model.downloadUrl,
+      installedAt: new Date().toISOString()
+    });
+    downloads.set(model.id, { status: "installed", progress: 100, bytesReceived: bytes, totalBytes: bytes, error: null });
+    activeModelId = model.id;
+    activeProviderId = null;
+    saveProviders();
+    emitChange();
+  }
+
+  function startDownload(modelId) {
     const model = MODEL_CATALOG.find((item) => item.id === modelId);
     if (!model) throw new Error("Unknown LocalLeaf model.");
     const existing = downloads.get(modelId);
     if (existing?.status === "downloading") return publicState();
-
-    downloads.set(modelId, { status: "downloading", progress: 1, error: null });
-    const target = modelDirectory(storageRoot, modelId);
-    fs.mkdirSync(target, { recursive: true });
-
-    const steps = [20, 45, 70, 92, 100];
-    steps.forEach((progress, index) => {
-      setTimeout(() => {
+    if (installedModelManifest(storageRoot, modelId)) {
+      if (!activeProviderId) activeModelId = modelId;
+      saveProviders();
+      return publicState();
+    }
+    const controller = new AbortController();
+    downloads.set(modelId, {
+      status: "downloading",
+      progress: Math.max(1, existing?.progress || 1),
+      bytesReceived: existing?.bytesReceived || 0,
+      totalBytes: existing?.totalBytes || model.expectedBytes || 0,
+      error: null,
+      controller
+    });
+    emitChange();
+    Promise.resolve()
+      .then(async () => {
+        const onProgress = (progress) => {
+          const current = downloads.get(modelId);
+          if (!current || current.controller !== controller || current.status !== "downloading") return;
+          downloads.set(modelId, { ...current, ...progress, error: null });
+          emitChange();
+        };
+        const result = downloadImpl
+          ? await downloadImpl({ model, storageRoot, targetPath: modelFilePath(storageRoot, model), partialPath: partialModelPath(storageRoot, model), signal: controller.signal, onProgress })
+          : await defaultDownloadModel(model, controller, onProgress);
+        if (controller.signal.aborted) return;
+        await finishDownload(model, result);
+      })
+      .catch((error) => {
         const current = downloads.get(modelId);
-        if (!current || current.status !== "downloading") return;
-        if (progress < 100) {
-          downloads.set(modelId, { status: "downloading", progress, error: null });
+        if (!current || current.controller !== controller) return;
+        if (controller.signal.aborted && current.status === "paused") {
+          emitChange();
           return;
         }
-        fs.writeFileSync(
-          path.join(target, "model.json"),
-          JSON.stringify({ id: model.id, name: model.name, installedAt: new Date().toISOString() }, null, 2),
-          "utf8"
-        );
-        downloads.set(modelId, { status: "installed", progress: 100, error: null });
-        if (!activeModelId && !activeProviderId) activeModelId = modelId;
-        saveProviders();
-      }, 50 * (index + 1));
-    });
+        downloads.set(modelId, {
+          status: "failed",
+          progress: current.progress || 0,
+          bytesReceived: current.bytesReceived || 0,
+          totalBytes: current.totalBytes || model.expectedBytes || 0,
+          error: error.message || "Model download failed."
+        });
+        emitChange();
+      });
+    return publicState();
+  }
 
+  function pauseDownload(modelId) {
+    const current = downloads.get(modelId);
+    if (!current || current.status !== "downloading") return publicState();
+    downloads.set(modelId, { ...current, status: "paused", error: null });
+    current.controller?.abort?.();
+    emitChange();
+    return publicState();
+  }
+
+  function cancelDownload(modelId) {
+    const model = MODEL_CATALOG.find((item) => item.id === modelId);
+    const current = downloads.get(modelId);
+    current?.controller?.abort?.();
+    if (model) fs.rmSync(partialModelPath(storageRoot, model), { force: true });
+    downloads.set(modelId, { status: "not_downloaded", progress: 0, bytesReceived: 0, totalBytes: model?.expectedBytes || 0, error: null });
+    emitChange();
     return publicState();
   }
 
   function deleteModel(modelId) {
+    const current = downloads.get(modelId);
+    current?.controller?.abort?.();
     const target = modelDirectory(storageRoot, modelId);
     fs.rmSync(target, { recursive: true, force: true });
     downloads.set(modelId, { status: "not_downloaded", progress: 0, error: null });
-    if (activeModelId === modelId && !activeProviderId) activeModelId = null;
+    if (localRuntime?.modelId === modelId) stopLocalRuntime();
+    if (activeModelId === modelId && !activeProviderId) activeModelId = activeInstalledModel()?.id || null;
     saveProviders();
+    emitChange();
     return publicState();
   }
 
@@ -520,14 +784,17 @@ function createAiModelManager(options = {}) {
     const id = normalizeProviderId(input.id || input.providerId || template?.id);
     const name = String(input.name || input.displayName || template?.name || "").trim();
     if (!name) throw new Error("Display name is required.");
-    const baseUrl = normalizeUrl(input.baseUrl ?? input.baseURL ?? template?.baseUrl);
-    if (!baseUrl) throw new Error("Base URL is required.");
+    const type = input.type || template?.type || "openai-compatible";
+    const baseUrl = type === "cursor-sdk"
+      ? String(input.baseUrl ?? input.baseURL ?? template?.baseUrl ?? "cursor-sdk://local").trim()
+      : normalizeUrl(input.baseUrl ?? input.baseURL ?? template?.baseUrl);
+    if (!baseUrl) throw new Error(type === "cursor-sdk" ? "Cursor provider URL is required." : "Base URL is required.");
     const models = normalizeModels(input.models || template?.models || []);
     const headers = normalizeHeaders(input.headers || template?.headers || {});
     return {
       id,
       name,
-      type: input.type || template?.type || "openai-compatible",
+      type,
       baseUrl,
       description: input.description || template?.description || "",
       models,
@@ -597,6 +864,9 @@ function createAiModelManager(options = {}) {
     const temporary = input.provider || input.baseUrl || input.baseURL;
     const provider = temporary ? buildProvider(input.provider || input) : providers.get(normalizeProviderId(input.providerId || activeProviderId));
     if (!provider) throw new Error("Provider was not found.");
+    if (provider.type && provider.type !== "openai-compatible") {
+      throw new Error(`${provider.name} is not an OpenAI-compatible provider.`);
+    }
     const inputKey = String(input.apiKey || "").trim();
     const apiKey = inputKey || await secretStore.getSecret(provider.id);
     const modelId = String(input.modelId || activeModelId || provider.models?.[0]?.id || "").trim();
@@ -663,6 +933,33 @@ function createAiModelManager(options = {}) {
     let providerId = input.providerId || input.provider?.id || input.id || activeProviderId || "";
     let modelId = input.modelId || activeModelId || "";
     try {
+      const lookupProviderId = providerId || activeProviderId || "";
+      const providerForTest = input.provider
+        ? buildProvider(input.provider)
+        : lookupProviderId
+          ? providers.get(normalizeProviderId(lookupProviderId))
+          : null;
+      if (providerForTest?.type === "cursor-sdk") {
+        const apiKey = String(input.apiKey || await secretStore.getSecret(providerForTest.id) || "").trim();
+        if (providerForTest.requiresApiKey && !apiKey) throw new Error("API key is required for Cursor.");
+        const test = {
+          ok: true,
+          status: "ready",
+          color: "green",
+          message: "Cursor provider saved.",
+          providerId: providerForTest.id,
+          modelId: modelId || providerForTest.models?.[0]?.id || "composer-2",
+          responseMs: Date.now() - startedAt,
+          checkedAt: new Date().toISOString()
+        };
+        const provider = providers.get(providerForTest.id);
+        if (provider && !input.provider && !input.baseUrl && !input.baseURL) {
+          provider.status = "ready";
+          provider.test = test;
+          saveProviders();
+        }
+        return test;
+      }
       const result = await sendOpenAiCompatible({ ...input, maxTokens: input.maxTokens || 128 });
       providerId = result.provider.id;
       modelId = result.modelId;
@@ -708,6 +1005,17 @@ function createAiModelManager(options = {}) {
     const payload = input.provider ? { ...input.provider, modelId: input.modelId || input.provider.model || input.provider.modelId } : input;
     const provider = buildProvider(payload);
     const modelId = String(payload.modelId || payload.model || provider.models[0]?.id || "").trim();
+    if (provider.type === "cursor-sdk") {
+      provider.hasApiKey = Boolean(payload.apiKey || await secretStore.getSecret(provider.id));
+      if (provider.requiresApiKey && !provider.hasApiKey) throw new Error("API key is required for Cursor.");
+      provider.status = "configured";
+      providers.set(provider.id, provider);
+      if (Object.prototype.hasOwnProperty.call(payload, "apiKey") && String(payload.apiKey || "").trim()) {
+        await secretStore.setSecret(provider.id, String(payload.apiKey || "").trim());
+      }
+      saveProviders();
+      return { ok: true, provider: redactProvider(provider), test: { ok: true, status: "ready", color: "green", message: "Cursor provider saved.", providerId: provider.id, modelId } };
+    }
     const result = await sendOpenAiCompatible({
       provider,
       apiKey: payload.apiKey,
@@ -733,6 +1041,108 @@ function createAiModelManager(options = {}) {
     }
     saveProviders();
     return { ok: true, provider: redactProvider(provider), test: provider.test };
+  }
+
+  function stopLocalRuntime() {
+    if (!localRuntime) return;
+    try {
+      localRuntime.process?.kill?.();
+    } catch {
+      // Runtime cleanup is best-effort.
+    }
+    localRuntime = null;
+  }
+
+  async function ensureLocalRuntime(modelId) {
+    if (typeof fetchImpl !== "function") throw new Error("This runtime cannot run local model requests.");
+    const model = modelId
+      ? MODEL_CATALOG.find((item) => item.id === modelId)
+      : activeInstalledModel();
+    if (!model || !installedModelManifest(storageRoot, model.id)) {
+      throw new Error("Download a LocalLeaf model before using local AI.");
+    }
+    if (localRuntime?.modelId === model.id && localRuntime.baseUrl && localRuntime.process && !localRuntime.process.killed) {
+      return { model, baseUrl: localRuntime.baseUrl };
+    }
+    stopLocalRuntime();
+    const serverPath = findBundledLlamaServer();
+    if (!serverPath) {
+      throw new Error("Local model runtime is missing from this build. Reinstall LocalLeaf or use a hosted provider.");
+    }
+    const port = await findFreePort();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const modelPath = modelFilePath(storageRoot, model);
+    const child = spawn(serverPath, [
+      "-m", modelPath,
+      "--host", "127.0.0.1",
+      "--port", String(port),
+      "-c", "4096",
+      "--jinja",
+      "--no-webui",
+      "--log-disable"
+    ], {
+      cwd: path.dirname(serverPath),
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "ignore"]
+    });
+    localRuntime = { modelId: model.id, baseUrl, process: child };
+    child.once("exit", () => {
+      if (localRuntime?.process === child) localRuntime = null;
+    });
+    await waitForLlamaServer(baseUrl, fetchImpl);
+    return { model, baseUrl };
+  }
+
+  async function askLocalModel(messages, options = {}) {
+    const requestedModel = String(options.modelId || activeModelId || "").trim();
+    const { model, baseUrl } = await ensureLocalRuntime(requestedModel);
+    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: model.filename || model.id,
+        messages,
+        temperature: Number(options.temperature ?? 0.1),
+        max_tokens: Number(options.maxTokens || 1200),
+        stream: false
+      })
+    });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error("Local model returned a malformed JSON response.");
+    }
+    if (!response.ok) {
+      throw new Error(payload?.error?.message || `Local model request failed with HTTP ${response.status}.`);
+    }
+    const content = responseContent(payload).trim();
+    if (!content) throw new Error("Local model returned an empty response.");
+    return {
+      provider: {
+        id: "localleaf-local",
+        name: "LocalLeaf Local",
+        type: "local-llama-cpp"
+      },
+      modelId: model.id,
+      content,
+      raw: payload
+    };
+  }
+
+  async function cursorProviderConfig(input = {}) {
+    const id = normalizeProviderId(input.providerId || activeProviderId || "cursor");
+    const provider = providers.get(id);
+    if (!provider || provider.type !== "cursor-sdk") throw new Error("Connect Cursor in Settings before using Composer.");
+    const apiKey = String(input.apiKey || await secretStore.getSecret(provider.id) || "").trim();
+    if (provider.requiresApiKey && !apiKey) throw new Error("Add a Cursor API key before using Composer.");
+    const modelId = String(input.modelId || activeModelId || provider.models?.[0]?.id || "composer-2").trim();
+    return { provider, apiKey, modelId };
+  }
+
+  function hasActiveLocalModel() {
+    return Boolean(activeInstalledModel());
   }
 
   async function askActiveProvider(messages, options = {}) {
@@ -787,7 +1197,10 @@ function createAiModelManager(options = {}) {
     providerTemplates: PROVIDER_TEMPLATES,
     publicState,
     setStoragePath,
-    simulateDownload,
+    simulateDownload: startDownload,
+    downloadModel: startDownload,
+    pauseDownload,
+    cancelDownload,
     deleteModel,
     activateModel,
     saveProvider,
@@ -795,7 +1208,11 @@ function createAiModelManager(options = {}) {
     activateProvider,
     testProvider,
     validateProvider,
+    hasActiveLocalModel,
+    askLocalModel,
     askActiveProvider,
+    cursorProviderConfig,
+    stopLocalRuntime,
     runSmokeTest
   };
 }
