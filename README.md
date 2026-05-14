@@ -13,7 +13,7 @@ When the host stops the session or closes the app, the room ends.
 
 ## Current Release
 
-Version `0.1.19` fixes LocalLeaf Local AI context handling by starting llama.cpp with a larger context window and trimming project context for local models so large LaTeX projects no longer overflow the model request.
+Version `0.1.20` fixes LocalLeaf Local AI context handling by starting llama.cpp with a larger context window and trimming project context for local models so large LaTeX projects no longer overflow the model request. It also makes release binary downloads use pinned direct asset URLs with SHA-256 checks instead of the GitHub Releases API.
 
 ## Features
 

@@ -158,12 +158,8 @@ function download(url, target) {
   });
 }
 
-function findAsset(release, assetName) {
-  const asset = release.assets.find((item) => item.name === assetName);
-  if (!asset) {
-    throw new Error(`Could not find release asset ${assetName}`);
-  }
-  return asset;
+function releaseAssetUrl(repo, tag, assetName) {
+  return `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(assetName)}`;
 }
 
 function findFile(root, name) {
@@ -210,17 +206,15 @@ function verifySha256(filePath, expected) {
 }
 
 async function installAsset({ releaseRepo, releaseTag, assetName, sha256, outputName, executableName, copyAll = false }) {
-  const release = await requestJson(`https://api.github.com/repos/${releaseRepo}/releases/tags/${encodeURIComponent(releaseTag)}`);
-  const asset = findAsset(release, assetName);
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-bin-"));
-  const downloadPath = path.join(tempRoot, asset.name);
+  const downloadPath = path.join(tempRoot, assetName);
   const outputPath = path.join(BIN_DIR, outputName);
 
-  console.log(`Downloading ${asset.name}`);
-  await download(asset.browser_download_url, downloadPath);
+  console.log(`Downloading ${assetName}`);
+  await download(releaseAssetUrl(releaseRepo, releaseTag, assetName), downloadPath);
   verifySha256(downloadPath, sha256);
 
-  if (asset.name.endsWith(".exe")) {
+  if (assetName.endsWith(".exe")) {
     fs.copyFileSync(downloadPath, outputPath);
   } else {
     const extractRoot = path.join(tempRoot, "extract");
@@ -228,7 +222,7 @@ async function installAsset({ releaseRepo, releaseTag, assetName, sha256, output
     if (copyAll) {
       const binary = findFile(extractRoot, executableName);
       if (!binary) {
-        throw new Error(`${asset.name} did not contain ${executableName}`);
+        throw new Error(`${assetName} did not contain ${executableName}`);
       }
       fs.rmSync(outputPath, { recursive: true, force: true });
       copyDirectoryContents(path.dirname(binary), outputPath);
@@ -242,7 +236,7 @@ async function installAsset({ releaseRepo, releaseTag, assetName, sha256, output
     }
     const binary = findFile(extractRoot, executableName);
     if (!binary) {
-      throw new Error(`${asset.name} did not contain ${executableName}`);
+      throw new Error(`${assetName} did not contain ${executableName}`);
     }
     fs.copyFileSync(binary, outputPath);
   }
