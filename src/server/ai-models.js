@@ -11,6 +11,7 @@ const PROVIDERS_FILE = "providers.json";
 const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-_]*$/;
 const DEFAULT_TEST_TIMEOUT_MS = 25000;
 const DEFAULT_GENERATION_TIMEOUT_MS = 120000;
+const DEFAULT_LOCAL_CONTEXT_SIZE = 16384;
 const ROOT_DIR = path.resolve(__dirname, "../..");
 const LLAMA_SERVER_NAME = process.platform === "win32" ? "llama-server.exe" : "llama-server";
 
@@ -313,6 +314,12 @@ function modelFilePath(storageRoot, model) {
 
 function partialModelPath(storageRoot, model) {
   return `${modelFilePath(storageRoot, model)}.part`;
+}
+
+function localContextSize() {
+  const requested = Number(process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE || DEFAULT_LOCAL_CONTEXT_SIZE);
+  if (!Number.isFinite(requested)) return DEFAULT_LOCAL_CONTEXT_SIZE;
+  return Math.max(4096, Math.min(32768, Math.round(requested)));
 }
 
 function installedModelManifest(storageRoot, modelId) {
@@ -1076,7 +1083,7 @@ function createAiModelManager(options = {}) {
       "-m", modelPath,
       "--host", "127.0.0.1",
       "--port", String(port),
-      "-c", "4096",
+      "-c", String(localContextSize()),
       "--jinja",
       "--no-webui",
       "--log-disable"

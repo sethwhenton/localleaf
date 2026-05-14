@@ -8,7 +8,7 @@ LocalLeaf is a host-powered Overleaf-style collaboration app. The host installs 
 
 The repository is a single npm project:
 
-- App name and version: `localleaf` `0.1.18`
+- App name and version: `localleaf` `0.1.19`
 - Entry point: `src/desktop/main.js`
 - Local server: `src/server/index.js`
 - Client editor sources: `src/client/editor.js` and `src/client/pdf-preview.js`
@@ -41,6 +41,7 @@ The editor has a right-rail AI Helper with three tabs: `Chat`, `AI Helper`, and 
 - The AI Helper now sends recent conversation context and project-wide LaTeX context, so include files such as `includes/abstract.tex` can be edited even when another file is open.
 - Search/replace supports current-file and all-file search, and project-wide Replace All is host-side through `/api/search/replace`.
 - Settings and About surfaces were polished with the Ollama GetDesign reference as a layout/style guide while keeping LocalLeaf's orange, white, and dark palettes.
+- LocalLeaf Local starts bundled llama.cpp with a 16k context by default and uses a smaller local-only AI prompt budget, so large projects do not exceed the default 4k model context. `LOCALLEAF_LOCAL_CONTEXT_SIZE` can override the runtime context size between 4096 and 32768.
 
 Current focused verification after the AI Helper harness work:
 

@@ -74,6 +74,15 @@ async function startApp(projectRoot, options = {}) {
   return { app, baseUrl: hostBaseUrl(app, port) };
 }
 
+async function waitUntil(predicate, timeoutMs = 2500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for condition.");
+}
+
 test("exposes host-only AI model state and model storage plumbing", async () => {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-model-project-"));
   const modelParent = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-models-"));
@@ -118,6 +127,71 @@ test("exposes host-only AI model state and model storage plumbing", async () => 
     fs.rmSync(projectRoot, { recursive: true, force: true });
     fs.rmSync(modelParent, { recursive: true, force: true });
     if (nextParent) fs.rmSync(nextParent, { recursive: true, force: true });
+  }
+});
+
+test("keeps local model prompts within a bounded context budget", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-local-context-project-"));
+  const modelParent = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-local-context-models-"));
+  fs.writeFileSync(
+    path.join(projectRoot, "main.tex"),
+    `\\documentclass{article}\n\\begin{document}\n${"Current file context. ".repeat(2500)}\n\\end{document}\n`,
+    "utf8"
+  );
+  for (let index = 0; index < 12; index += 1) {
+    fs.writeFileSync(
+      path.join(projectRoot, `chapter-${index}.tex`),
+      `\\section{Chapter ${index}}\n${`Project context ${index}. `.repeat(1800)}\n`,
+      "utf8"
+    );
+  }
+  const { app, baseUrl } = await startApp(projectRoot, {
+    modelRoot: modelParent,
+    aiDownloadImpl: async ({ targetPath, model }) => {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, "fake-gguf", "utf8");
+      return { bytes: 9, filePath: targetPath, modelId: model.id };
+    }
+  });
+
+  try {
+    await request(baseUrl, "/api/ai/models/download", {
+      method: "POST",
+      body: { modelId: "qwen35-08b-light" }
+    });
+    await waitUntil(() => app.state.ai.models.publicState().models.find((model) => model.id === "qwen35-08b-light")?.installed);
+    await request(baseUrl, "/api/ai/models/activate", {
+      method: "POST",
+      body: { modelId: "qwen35-08b-light" }
+    });
+
+    let capturedPrompt = "";
+    app.state.ai.models.askLocalModel = async (messages, options = {}) => {
+      capturedPrompt = messages.map((message) => String(message.content || "")).join("\n\n");
+      assert.equal(options.maxTokens, 1000);
+      return {
+        provider: { id: "localleaf-local", name: "LocalLeaf Local", type: "local-llama-cpp" },
+        modelId: "qwen35-08b-light",
+        content: JSON.stringify({ reply: "I can see the bounded LocalLeaf project context.", edits: [] })
+      };
+    };
+
+    const result = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        path: "main.tex",
+        message: "what is this project about?",
+        aiProviderId: "localleaf-local"
+      }
+    });
+
+    assert.match(result.reply, /bounded LocalLeaf project context/);
+    assert.ok(capturedPrompt.length < 42000, `prompt was too large: ${capturedPrompt.length}`);
+    assert.match(capturedPrompt, /LocalLeaf truncated this file for context|LocalLeaf omitted the middle/u);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+    fs.rmSync(modelParent, { recursive: true, force: true });
   }
 });
 

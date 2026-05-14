@@ -55,6 +55,26 @@ const PUBLIC_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"];
 const MAX_IMPORT_ENTRIES = 5000;
 const MAX_IMPORT_UNCOMPRESSED_BYTES = 250 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES = 75 * 1024 * 1024;
+const HOSTED_AGENT_PROMPT_LIMITS = {
+  currentFileBudget: 42000,
+  projectContextBudget: 70000,
+  projectContextPerFileBudget: 18000,
+  selectedTextBudget: 8000,
+  compileLogBudget: 8000,
+  conversationTurns: 10,
+  conversationItemBudget: 1200,
+  maxTokens: 1800
+};
+const LOCAL_AGENT_PROMPT_LIMITS = {
+  currentFileBudget: 14000,
+  projectContextBudget: 18000,
+  projectContextPerFileBudget: 5000,
+  selectedTextBudget: 3000,
+  compileLogBudget: 3000,
+  conversationTurns: 6,
+  conversationItemBudget: 600,
+  maxTokens: 1000
+};
 const publicDnsResolver = new dns.Resolver();
 publicDnsResolver.setServers(PUBLIC_DNS_SERVERS);
 let latestReleaseCache = null;
@@ -1721,7 +1741,7 @@ function findTextFileContaining(state, needle, hint = "") {
   return null;
 }
 
-function agentProjectContext(state, currentPath, budget = 70000) {
+function agentProjectContext(state, currentPath, budget = 70000, options = {}) {
   const selected = normalizeRelativePath(currentPath || state.project.mainFile || "");
   const files = agentTextFiles(state);
   const ordered = files.sort((left, right) => {
@@ -1732,6 +1752,7 @@ function agentProjectContext(state, currentPath, budget = 70000) {
   let remaining = budget;
   const chunks = [];
   for (const item of ordered) {
+    if (options.skipSelected && item.path === selected) continue;
     if (remaining <= 1200) break;
     const fullPath = resolveProjectPath(state.project.root, item.path);
     let content = "";
@@ -1741,7 +1762,9 @@ function agentProjectContext(state, currentPath, budget = 70000) {
       continue;
     }
     const header = `--- FILE: ${item.path}${item.path === selected ? " (currently open)" : ""} ---\n`;
-    const slice = content.slice(0, Math.max(0, remaining - header.length));
+    const available = Math.max(0, remaining - header.length);
+    const limit = options.perFileBudget ? Math.min(available, options.perFileBudget) : available;
+    const slice = content.slice(0, limit);
     chunks.push(`${header}${slice}${slice.length < content.length ? "\n% ... LocalLeaf truncated this file for context ..." : ""}`);
     remaining -= header.length + slice.length;
   }
@@ -1754,11 +1777,14 @@ function agentCompileLogs(state) {
     .slice(-200);
 }
 
-function compactAgentFileContext(text) {
+function compactAgentFileContext(text, budget = 42000) {
   const source = String(text || "");
-  if (source.length <= 42000) return source;
-  const head = source.slice(0, 28000);
-  const tail = source.slice(-10000);
+  const limit = Math.max(2000, Number(budget) || 42000);
+  if (source.length <= limit) return source;
+  const headLength = Math.max(1200, Math.round(limit * 0.68));
+  const tailLength = Math.max(600, limit - headLength - 1200);
+  const head = source.slice(0, headLength);
+  const tail = source.slice(-tailLength);
   return `${head}\n\n% ... LocalLeaf omitted the middle of this large file for model context ...\n\n${tail}`;
 }
 
@@ -1974,17 +2000,24 @@ async function createProviderAgentResponse(state, body, options = {}) {
   const message = String(body.message || "").trim().slice(0, 2000);
   if (!message) throw new Error("Message is required.");
   const permissions = agentPermissions(body.aiPermissions || body.permissions);
+  const limits = {
+    ...HOSTED_AGENT_PROMPT_LIMITS,
+    ...(options.promptLimits || {})
+  };
   const currentFile = agentReadProjectFile(state, body.path);
   const relativePath = currentFile.path;
   const originalText = currentFile.content;
   const compileLogs = Array.isArray(body.compileLogs)
-    ? body.compileLogs.map((item) => String(item || "")).join("\n").slice(-8000)
+    ? body.compileLogs.map((item) => String(item || "")).join("\n").slice(-limits.compileLogBudget)
     : "";
-  const selectedText = String(body.selectedText || "").slice(0, 8000);
+  const selectedText = String(body.selectedText || "").slice(0, limits.selectedTextBudget);
   const conversation = Array.isArray(body.conversation)
-    ? body.conversation.slice(-10).map((item) => `${String(item.role || "user").toUpperCase()}: ${String(item.message || "").slice(0, 1200)}`).join("\n")
+    ? body.conversation.slice(-limits.conversationTurns).map((item) => `${String(item.role || "user").toUpperCase()}: ${String(item.message || "").slice(0, limits.conversationItemBudget)}`).join("\n")
     : "";
-  const projectContext = agentProjectContext(state, relativePath);
+  const projectContext = agentProjectContext(state, relativePath, limits.projectContextBudget, {
+    skipSelected: true,
+    perFileBudget: limits.projectContextPerFileBudget
+  });
   const prompt = [
     "You are LocalLeaf AI, a careful LaTeX project assistant.",
     "Return JSON only with this shape:",
@@ -1997,9 +2030,9 @@ async function createProviderAgentResponse(state, body, options = {}) {
     "If an advanced action is allowed, explain the intended action clearly. For this MVP, file writes still happen through LocalLeaf proposals and approval cards.",
     `File path: ${relativePath}`,
     "Current file:",
-    compactAgentFileContext(originalText),
+    compactAgentFileContext(originalText, limits.currentFileBudget),
     "Project context:",
-    compactAgentFileContext(projectContext),
+    compactAgentFileContext(projectContext, limits.projectContextBudget),
     conversation ? `Recent chat context:\n${conversation}` : "",
     selectedText ? `Selected text:\n${selectedText}` : "",
     compileLogs ? `Compile logs:\n${compileLogs}` : "",
@@ -2015,7 +2048,7 @@ async function createProviderAgentResponse(state, body, options = {}) {
   ], {
     providerId: requestedProviderId || undefined,
     modelId: requestedModelId || undefined,
-    maxTokens: 1800,
+    maxTokens: limits.maxTokens,
     temperature: 0.1
   });
 
@@ -2073,6 +2106,7 @@ async function createAgentMessageResponse(state, body) {
     try {
       return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body, {
         runtime: "local-llama-cpp",
+        promptLimits: LOCAL_AGENT_PROMPT_LIMITS,
         askModel: (messages, requestOptions) => state.ai.models.askLocalModel(messages, {
           ...requestOptions,
           modelId: body.aiModelId || body.modelId || requestOptions?.modelId
@@ -2082,7 +2116,7 @@ async function createAgentMessageResponse(state, body) {
       if (!permissions.localModelOnly && !hasExplicitChoice && activeAi) {
         return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body), permissions);
       }
-      if (wantsFileEdit(message) && /local model|runtime|malformed|json|empty|failed/i.test(error.message || "")) {
+      if (wantsFileEdit(message) && /local model|runtime|malformed|json|empty|failed|context size|exceeds the available context/i.test(error.message || "")) {
         const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
         return {
           reply: `${error.message || "The local model could not respond."} I prepared a safe local fallback proposal so you can still review the change.`,
