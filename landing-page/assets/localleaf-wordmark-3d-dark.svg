@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 116" role="img" aria-labelledby="title desc">
+  <title id="title">LocalLeaf wordmark for dark mode</title>
+  <desc id="desc">A dimensional LocalLeaf wordmark with Local in warm white and Leaf in orange.</desc>
+  <defs>
+    <linearGradient id="inkDark" x1="0" y1="16" x2="0" y2="84" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".5" stop-color="#f5efe7"/>
+      <stop offset="1" stop-color="#d8d0c6"/>
+    </linearGradient>
+    <linearGradient id="leafFill" x1="232" y1="16" x2="232" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff9a3d"/>
+      <stop offset=".52" stop-color="#ff6700"/>
+      <stop offset="1" stop-color="#df5700"/>
+    </linearGradient>
+    <filter id="softLiftDark" x="-8%" y="-24%" width="116%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="8" flood-color="#ff6700" flood-opacity=".24"/>
+      <feDropShadow dx="0" dy="5" stdDeviation="3" flood-color="#000000" flood-opacity=".42"/>
+    </filter>
+  </defs>
+  <rect width="430" height="116" fill="none"/>
+  <g font-family="Arial Rounded MT Bold, Nunito, Inter, Arial, sans-serif" font-size="60" font-weight="900" letter-spacing="0" text-anchor="middle">
+    <text x="216" y="72" fill="#3b342d" opacity=".82">LocalLeaf</text>
+    <text x="213" y="69" fill="#6e6258" opacity=".72">LocalLeaf</text>
+    <text x="212" y="66" filter="url(#softLiftDark)">
+      <tspan fill="url(#inkDark)">Local</tspan><tspan fill="url(#leafFill)">Leaf</tspan>
+    </text>
+    <text x="212" y="36" fill="#ffffff" opacity=".22" font-size="18" transform="scale(1 1.1)">LocalLeaf</text>
+  </g>
+</svg>
