@@ -2054,39 +2054,54 @@ function localModelCardMarkup(model, activeId) {
   const isActive = activeId === model.id && activeAiProviderModel().providerId === "localleaf-local";
   const busy = local.modelActionBusy === model.id;
   const progress = Math.round(Number(model.progress || 0));
+  const statusLabel = isActive
+    ? "Active"
+    : status === "available"
+      ? "Available"
+      : status === "downloading"
+        ? "Downloading"
+        : status === "paused"
+          ? "Paused"
+          : status === "failed"
+            ? "Failed"
+            : "Installed";
+  const statusTone = isActive ? "active" : status;
   const bytesLabel = model.bytesReceived || model.totalBytes
     ? `${formatFileSize(model.bytesReceived || 0)} / ${formatFileSize(model.totalBytes || model.expectedBytes || 0)}`
     : model.sizeLabel || "";
   return `
-    <article class="settings-model-card settings-model-row ${isActive ? "active" : ""}">
-      <div class="model-card-main">
-        <div class="home-model-icon">${uiGlyph("ai")}</div>
-        <div>
-          <h3>${escapeHtml(model.name)}</h3>
+    <article class="local-model-card local-model-${escapeHtml(status)} ${isActive ? "is-active" : ""}">
+      <div class="local-model-identity">
+        <span class="local-model-icon" aria-hidden="true"><span></span></span>
+        <div class="local-model-copy">
+          <div class="local-model-title-row">
+            <h3>${escapeHtml(model.name)}</h3>
+            <span class="local-model-state local-model-state-${escapeHtml(statusTone)}"><i></i>${escapeHtml(statusLabel)}</span>
+          </div>
           <p>${escapeHtml(model.description || "")}</p>
-          <span>${escapeHtml(model.sizeLabel || "")}</span>
+          <div class="local-model-meta">
+            <span>${escapeHtml(model.sizeLabel || "")}</span>
+            ${status === "failed" ? `<span class="local-model-problem">Download did not finish</span>` : ""}
+          </div>
         </div>
       </div>
-      <div class="model-row-side">
-        <span class="model-status-pill ${escapeHtml(status)}">${escapeHtml(isActive ? "Active" : status.replace(/_/g, " "))}</span>
-        <div class="model-card-actions">
-          ${status === "installed"
-            ? `<button class="icon-button danger" data-delete-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""} title="Delete model" aria-label="Delete model">${uiGlyph("delete")}</button>`
-            : status === "downloading"
+      <div class="local-model-actions">
+        ${status === "installed"
+          ? `<button class="icon-button local-model-delete" data-delete-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""} title="Delete model" aria-label="Delete model">${editorToolIcon("delete")}</button>`
+          : status === "downloading"
+            ? `
+              <button class="icon-button" data-pause-model="${escapeHtml(model.id)}" title="Pause download" aria-label="Pause download">${uiGlyph("pause")}</button>
+              <button class="icon-button local-model-delete" data-cancel-model="${escapeHtml(model.id)}" title="Stop and remove partial download" aria-label="Stop and remove partial download">${uiGlyph("stop")}</button>
+            `
+            : status === "paused"
               ? `
-                <button class="icon-button" data-pause-model="${escapeHtml(model.id)}" title="Pause download" aria-label="Pause download">${uiGlyph("pause")}</button>
-                <button class="icon-button danger" data-cancel-model="${escapeHtml(model.id)}" title="Stop and remove partial download" aria-label="Stop and remove partial download">${uiGlyph("stop")}</button>
+                <button class="icon-button" data-download-model="${escapeHtml(model.id)}" title="Resume download" aria-label="Resume download">${uiGlyph("play")}</button>
+                <button class="icon-button local-model-delete" data-cancel-model="${escapeHtml(model.id)}" title="Delete partial download" aria-label="Delete partial download">${editorToolIcon("delete")}</button>
               `
-              : status === "paused"
-                ? `
-                  <button class="icon-button" data-download-model="${escapeHtml(model.id)}" title="Resume download" aria-label="Resume download">${uiGlyph("play")}</button>
-                  <button class="icon-button danger" data-cancel-model="${escapeHtml(model.id)}" title="Delete partial download" aria-label="Delete partial download">${uiGlyph("delete")}</button>
-                `
-                : `<button class="btn btn-primary" data-download-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""}>Download</button>`}
-        </div>
+              : `<button class="btn btn-primary local-model-download" data-download-model="${escapeHtml(model.id)}" ${busy ? "disabled" : ""}>${uiGlyph("download")} Download</button>`}
       </div>
       ${status === "downloading" || status === "paused" ? `
-        <div class="model-progress">
+        <div class="local-model-progress" style="--local-model-progress: ${Math.max(0, Math.min(100, progress))}%;">
           <div><strong>${status === "paused" ? "Paused" : "Downloading"}</strong><span>${progress}% ${escapeHtml(bytesLabel)}</span></div>
           <progress value="${progress}" max="100"></progress>
         </div>
@@ -2203,9 +2218,12 @@ function localModelListMarkup(activeId) {
   if (!models.length) return "";
   const state = aiState();
   return `
-    <section class="settings-model-group">
+    <section class="settings-model-group local-model-section">
       <div class="settings-model-group-head local-model-head">
-        <h3>${uiGlyph("ai")} Local models</h3>
+        <div class="local-model-heading">
+          <h3>Local models</h3>
+          <p>Download once. Run privately on this computer.</p>
+        </div>
         <button class="settings-storage-chip" id="chooseModelFolder" type="button" title="${escapeHtml(state.storagePathLabel || state.storagePath || "Default LocalLeafModel folder")}">
           ${uiGlyph("folder")} <span>${escapeHtml(state.storagePathLabel || state.storagePath || "Default storage")}</span>
         </button>

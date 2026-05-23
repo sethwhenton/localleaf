@@ -130,9 +130,9 @@ The built-in Cursor-style harness powers AI edit proposals inside LocalLeaf: mod
 | macOS Apple Silicon | [LocalLeaf-Host-mac-arm64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg) |
 | macOS Intel | [LocalLeaf-Host-mac-x64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg) |
 
-Current release: `0.1.20`
+Current release: `0.1.21`
 
-Version `0.1.20` improves LocalLeaf Local AI context handling by starting llama.cpp with a larger context window and trimming project context for local models so larger LaTeX projects no longer overflow the model request. It also makes release binary downloads use pinned direct asset URLs with SHA-256 checks instead of the GitHub Releases API.
+Version `0.1.21` polishes the LocalLeaf Local model cards, settings/theme iconography, and editor menu tray so the AI model picker and workspace actions feel cleaner and more consistent. It also keeps the larger local AI context handling and pinned release binary downloads from the previous release.
 
 ## macOS First Launch
 
