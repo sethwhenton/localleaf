@@ -2285,34 +2285,49 @@ details p {
   }
 
   .ai-section {
-    height: auto;
-    min-height: 0;
-    padding: 70px 0;
-  }
-
-  .ai-sticky {
-    position: static;
-    min-height: 0;
+    height: 225svh;
+    min-height: 1380px;
     padding: 0;
   }
 
+  .ai-sticky {
+    position: sticky;
+    min-height: calc(100svh - var(--sticky-top));
+    padding: 28px 0 58px;
+  }
+
   .ai-layout {
-    gap: 28px;
+    gap: 18px;
+    align-content: center;
   }
 
   .ai-image-frame {
-    aspect-ratio: 4 / 3;
+    aspect-ratio: 16 / 10;
+  }
+
+  .ai-copy p[data-ai-copy] {
+    margin-top: 14px;
+  }
+
+  .ai-points {
+    gap: 8px;
+    margin-top: 18px;
+  }
+
+  .ai-points span {
+    min-height: 36px;
+    padding: 8px 12px;
+    font-size: 0.83rem;
+    line-height: 1.2;
   }
 
   .ai-image-frame figcaption {
-    position: static;
-    border-width: 1px 0 0;
-    border-radius: 0;
-    background: var(--surface);
+    display: none;
   }
 
   .slide-progress {
-    display: none;
+    bottom: 24px;
+    display: flex;
   }
 
   .statement-section,
@@ -2457,6 +2472,28 @@ details p {
   .ai-copy h2,
   .section-heading h2 {
     font-size: 2rem;
+  }
+
+  .ai-section {
+    height: 215svh;
+    min-height: 1180px;
+  }
+
+  .ai-sticky {
+    padding-bottom: 54px;
+  }
+
+  .ai-copy p[data-ai-copy] {
+    font-size: 0.94rem;
+    line-height: 1.45;
+  }
+
+  .ai-points span {
+    font-size: 0.78rem;
+  }
+
+  .ai-image-frame {
+    aspect-ratio: 1 / 0.88;
   }
 }
 

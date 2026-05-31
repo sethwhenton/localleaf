@@ -199,7 +199,7 @@ function updateAiFromScroll() {
   const rect = aiSection.getBoundingClientRect();
   const distance = Math.max(1, rect.height - window.innerHeight);
   const progress = clamp(-rect.top / distance);
-  const index = Math.min(aiSlides.length - 1, Math.floor(progress * aiSlides.length + 0.08));
+  const index = Math.min(aiSlides.length - 1, Math.floor(progress * aiSlides.length + 0.12));
   if (index !== activeAiIndex) setAiSlide(index);
 }
 
