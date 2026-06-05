@@ -2145,23 +2145,6 @@ html.theme-dark .cm-activeLineGutter {
   box-shadow: 0 6px 16px rgba(255, 103, 0, 0.18);
 }
 
-.editor-mode-pill.coming-soon {
-  gap: 5px;
-  color: #81756d;
-  cursor: not-allowed;
-  opacity: 0.78;
-}
-
-.editor-mode-pill.coming-soon span {
-  padding: 1px 5px;
-  border: 1px solid rgba(255, 103, 0, 0.22);
-  border-radius: 999px;
-  color: var(--orange-dark);
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
 .toolbar-divider {
   flex: 0 0 auto;
   width: 1px;
@@ -6610,10 +6593,6 @@ html.theme-dark .editor-mode-toggle,
 html.theme-dark .settings-segment {
   border-color: #343733;
   background: #0e0f0d;
-}
-
-html.theme-dark .editor-mode-pill.coming-soon {
-  color: #81796f;
 }
 
 html.theme-dark .preview-panel {
