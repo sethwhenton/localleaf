@@ -24,7 +24,6 @@ const { collectProjectEditorSuggestions } = require("./editor-suggestions");
 const { createAiModelManager } = require("./ai-models");
 const { createAiChangeStore } = require("./ai-changes");
 const { createAiSessionStore, createMemoryAiSessionStore } = require("./ai-sessions");
-const { createReviewThreadStore } = require("./review-threads");
 const {
   DEFAULT_CURSOR_MODEL_ID,
   changedTextFiles,
@@ -1027,7 +1026,6 @@ function createInitialState(options = {}) {
     },
     clients: new Map(),
     collabClients: new Map(),
-    review: null,
     tunnelCheck: options.checkPublicTunnel || checkPublicTunnel
   };
   state.ai.models = createAiModelManager({
@@ -1039,7 +1037,6 @@ function createInitialState(options = {}) {
   });
   state.ai.sessions = options.aiSessionStore || createAiSessionStore({ root: options.aiSessionRoot });
   state.ai.changes = options.aiChangeStore || createAiChangeStore({ root: options.aiChangeRoot });
-  state.review = options.reviewThreadStore || createReviewThreadStore({ root: options.reviewRoot });
   state.synctexResolver = options.synctexResolver || null;
   return state;
 }
@@ -1208,9 +1205,6 @@ function publicState(state, options = {}) {
           version: state.compile.version
         },
     ai: publicAiState(state, identity),
-    review: {
-      threads: canRead ? state.review.list(state.project) : []
-    },
     chat: canRead ? state.chat : []
   };
 }
@@ -4608,65 +4602,6 @@ function createLocalLeafServer(options = {}) {
       }
       const body = await readBody(request);
       jsonResponse(response, 200, resolvePdfSourcePosition(state, body));
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/api/review/threads") {
-      if (!canReadProject(state, request, url)) {
-        deny(response, "Join approval is required before reading review comments.");
-        return;
-      }
-      jsonResponse(response, 200, { threads: state.review.list(state.project) });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/review/threads") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before creating review comments.");
-        return;
-      }
-      const identity = requestIdentity(state, request, url);
-      const body = await readBody(request);
-      const thread = state.review.create(state.project, {
-        title: body.title,
-        anchor: body.anchor,
-        body: body.body || body.message,
-        author: requesterFromIdentity(identity)
-      });
-      broadcastProject(state, "review", { threads: state.review.list(state.project), thread });
-      broadcastState(state);
-      jsonResponse(response, 200, { thread, threads: state.review.list(state.project) });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/review/threads/reply") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before replying to review comments.");
-        return;
-      }
-      const identity = requestIdentity(state, request, url);
-      const body = await readBody(request);
-      const thread = state.review.reply(state.project, String(body.threadId || body.id || ""), {
-        body: body.body || body.message,
-        author: requesterFromIdentity(identity)
-      });
-      broadcastProject(state, "review", { threads: state.review.list(state.project), thread });
-      broadcastState(state);
-      jsonResponse(response, 200, { thread, threads: state.review.list(state.project) });
-      return;
-    }
-
-    if (request.method === "POST" && (url.pathname === "/api/review/threads/resolve" || url.pathname === "/api/review/threads/reopen")) {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before changing review status.");
-        return;
-      }
-      const body = await readBody(request);
-      const status = url.pathname.endsWith("/resolve") ? "resolved" : "open";
-      const thread = state.review.setStatus(state.project, String(body.threadId || body.id || ""), status);
-      broadcastProject(state, "review", { threads: state.review.list(state.project), thread });
-      broadcastState(state);
-      jsonResponse(response, 200, { thread, threads: state.review.list(state.project) });
       return;
     }
 

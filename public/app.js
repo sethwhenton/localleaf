@@ -220,7 +220,7 @@ const local = {
   sourcePaneVisible: localStorage.getItem("localleaf.sourcePaneVisible") !== "0",
   previewPaneVisible: localStorage.getItem("localleaf.previewPaneVisible") !== "0",
   rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0" && !startsNarrow,
-  rightRailTab: ["chat", "ai", "review", "changes"].includes(localStorage.getItem("localleaf.rightRailTab"))
+  rightRailTab: ["chat", "ai", "changes"].includes(localStorage.getItem("localleaf.rightRailTab"))
     ? localStorage.getItem("localleaf.rightRailTab")
     : "chat",
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
@@ -4483,12 +4483,11 @@ function mountPdfPreview(scrollState = null) {
   const marker = previewPane?.querySelector(".pdf-preview-mount");
   if (!previewPane || !marker || !window.LocalLeafPdfPreview?.mount) return false;
   if (local.appState?.compile?.status === "running") return false;
-  const mounted = window.LocalLeafPdfPreview.mount(previewPane, {
+  window.LocalLeafPdfPreview.mount(previewPane, {
     url: marker.dataset.pdfUrl,
     scale: local.pdfScale,
     scrollState
   });
-  Promise.resolve(mounted).then(() => renderPdfReviewMarkers());
   updatePdfZoomUi();
   bindPdfPreviewInteractions();
   return true;
@@ -4501,15 +4500,15 @@ function setPdfScale(nextScale) {
   localStorage.setItem("localleaf.pdfScale", String(local.pdfScale));
   updatePdfZoomUi();
   if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.zoom) {
-    Promise.resolve(window.LocalLeafPdfPreview.zoom(previewPane, {
+    window.LocalLeafPdfPreview.zoom(previewPane, {
       scale: local.pdfScale,
       scrollState
-    })).then(() => renderPdfReviewMarkers());
+    });
   } else if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.remount) {
-    Promise.resolve(window.LocalLeafPdfPreview.remount(previewPane, {
+    window.LocalLeafPdfPreview.remount(previewPane, {
       scale: local.pdfScale,
       scrollState
-    })).then(() => renderPdfReviewMarkers());
+    });
   }
 }
 
@@ -4926,46 +4925,6 @@ function renderPdfAnnotationOutline(target, options = {}) {
   page.append(marker);
 }
 
-function removePdfReviewMarkers() {
-  document.querySelectorAll(".pdf-review-marker").forEach((element) => element.remove());
-}
-
-function renderPdfReviewMarkers() {
-  removePdfReviewMarkers();
-  if (local.appState?.compile?.mode !== "pdf") return;
-  const threads = reviewThreads().filter((thread) => thread.status !== "resolved" && thread.anchor?.kind === "pdf");
-  for (const thread of threads) {
-    const anchor = thread.anchor || {};
-    const page = document.querySelector(`.pdf-page[data-page-number="${anchor.page || ""}"]`);
-    if (!page) continue;
-    const rect = anchor.targetRect || null;
-    const marker = document.createElement("button");
-    marker.type = "button";
-    marker.className = `pdf-review-marker ${rect ? "has-rect" : "pin"}`;
-    marker.title = thread.messages?.[0]?.body || "Review comment";
-    marker.dataset.reviewThread = thread.id;
-    if (rect) {
-      marker.style.left = `${Math.round(rect.left)}px`;
-      marker.style.top = `${Math.round(rect.top)}px`;
-      marker.style.width = `${Math.max(18, Math.round(rect.width))}px`;
-      marker.style.height = `${Math.max(18, Math.round(rect.height))}px`;
-    } else {
-      marker.style.left = `${Math.max(8, Math.round((anchor.x || 0) * local.pdfScale) - 8)}px`;
-      marker.style.top = `${Math.max(8, Math.round((anchor.y || 0) * local.pdfScale) - 8)}px`;
-      marker.style.width = "18px";
-      marker.style.height = "18px";
-    }
-    marker.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      local.rightRailTab = "review";
-      localStorage.setItem("localleaf.rightRailTab", "review");
-      refreshRightRailUi();
-    });
-    page.append(marker);
-  }
-}
-
 function handlePdfAnnotationPointerMove(event) {
   if (!local.pdfAnnotateMode || local.pdfAnnotationPopover || event.target.closest?.(".pdf-annotation-popover")) return;
   const target = pdfClickTarget(event);
@@ -5099,7 +5058,6 @@ function openPdfAnnotationPopover(target, source) {
     <textarea id="pdfAnnotationText" rows="3" placeholder="What should LocalLeaf AI change here?"></textarea>
     <div class="pdf-annotation-actions">
       <button type="button" data-cancel-pdf-annotation>Cancel</button>
-      <button type="button" data-save-pdf-review>Save comment</button>
       <button type="submit">Send to AI</button>
     </div>
   `;
@@ -5116,9 +5074,6 @@ function openPdfAnnotationPopover(target, source) {
   });
   popover.querySelector("[data-cancel-pdf-annotation]")?.addEventListener("click", () => {
     setPdfAnnotateMode(false);
-  });
-  popover.querySelector("[data-save-pdf-review]")?.addEventListener("click", () => {
-    submitPdfReviewThread();
   });
   popover.addEventListener("submit", (submitEvent) => {
     submitEvent.preventDefault();
@@ -5161,45 +5116,6 @@ function submitPdfAnnotation() {
       source: source?.ok ? { path: source.path, line: source.line, column: source.column || 0 } : null
     }
   });
-}
-
-async function submitPdfReviewThread() {
-  const popover = document.querySelector(".pdf-annotation-popover");
-  const body = String(popover?.querySelector("#pdfAnnotationText")?.value || "").trim();
-  if (!body || !local.pdfAnnotationPopover) return;
-  const { target, source } = local.pdfAnnotationPopover;
-  try {
-    const result = await api("/api/review/threads", {
-      method: "POST",
-      body: {
-        body,
-        title: body.slice(0, 120),
-        anchor: {
-          kind: "pdf",
-          page: target.page,
-          x: Math.round(target.x),
-          y: Math.round(target.y),
-          targetRect: target.targetRect ? {
-            left: Math.round(target.targetRect.left),
-            top: Math.round(target.targetRect.top),
-            width: Math.round(target.targetRect.width),
-            height: Math.round(target.targetRect.height)
-          } : null,
-          textPreview: target.textPreview || "",
-          source: source?.ok ? { path: source.path, line: source.line, column: source.column || 0 } : null,
-          compileVersion: local.appState?.compile?.version || 0
-        }
-      }
-    });
-    local.appState.review = { ...(local.appState.review || {}), threads: result.threads || [] };
-    setPdfAnnotateMode(false);
-    local.rightRailTab = "review";
-    localStorage.setItem("localleaf.rightRailTab", "review");
-    refreshRightRailUi();
-    renderPdfReviewMarkers();
-  } catch (error) {
-    showAppNotice(error.message || "Could not save the review comment.", { title: "Review" });
-  }
 }
 
 function editorShellClasses() {
@@ -5380,11 +5296,9 @@ function chatMessageMarkup(message) {
 }
 
 function rightRailTabsMarkup() {
-  const openReviewCount = (local.appState?.review?.threads || []).filter((thread) => thread.status !== "resolved").length;
   const tabs = [
     ["chat", "Chat", ""],
     ["ai", "AI Helper", ""],
-    ["review", "Review", openReviewCount ? String(openReviewCount) : ""],
     ["changes", "Changes", aiPendingCount() ? String(aiPendingCount()) : ""]
   ];
   return `
@@ -5880,177 +5794,12 @@ function changesPanelMarkup() {
   `;
 }
 
-function reviewThreads() {
-  return Array.isArray(local.appState?.review?.threads) ? local.appState.review.threads : [];
-}
-
-function reviewAnchorLabel(thread = {}) {
-  const anchor = thread.anchor || {};
-  const source = anchor.source || {};
-  if (source.path) return `${source.path}${source.line ? `:${source.line}` : ""}`;
-  if (anchor.kind === "pdf" && anchor.page) return `PDF page ${anchor.page}`;
-  if (anchor.kind === "diagnostic") return "Compile diagnostic";
-  return "Project review";
-}
-
-function reviewThreadMessageMarkup(message = {}) {
-  return `
-    <div class="review-thread-message">
-      <strong>${escapeHtml(message.author?.userName || "Reviewer")}</strong>
-      <span>${escapeHtml(formatAiTime(message.createdAt))}</span>
-      <p>${escapeHtml(message.body || "")}</p>
-    </div>
-  `;
-}
-
-function reviewThreadMarkup(thread) {
-  const resolved = thread.status === "resolved";
-  const firstMessage = thread.messages?.[0]?.body || thread.title || "Review comment";
-  const lastMessages = (thread.messages || []).slice(-2);
-  return `
-    <article class="review-thread-card ${resolved ? "resolved" : "open"}" data-review-thread="${escapeHtml(thread.id)}">
-      <div class="review-thread-head">
-        <div>
-          <strong>${escapeHtml(firstMessage.slice(0, 92))}</strong>
-          <span>${escapeHtml(reviewAnchorLabel(thread))}</span>
-        </div>
-        <b>${resolved ? "Resolved" : "Open"}</b>
-      </div>
-      ${thread.anchor?.textPreview ? `<p class="review-thread-preview">${escapeHtml(thread.anchor.textPreview)}</p>` : ""}
-      <div class="review-thread-messages">
-        ${lastMessages.map(reviewThreadMessageMarkup).join("")}
-      </div>
-      <form class="review-thread-reply" data-review-reply-form="${escapeHtml(thread.id)}">
-        <input name="reply" placeholder="Reply" ${resolved ? "disabled" : ""} />
-        <button class="btn" ${resolved ? "disabled" : ""}>Send</button>
-      </form>
-      <div class="review-thread-actions">
-        ${thread.anchor?.source?.path ? `<button class="btn" data-open-review-source="${escapeHtml(thread.id)}">Open source</button>` : ""}
-        ${resolved
-          ? `<button class="btn" data-reopen-review-thread="${escapeHtml(thread.id)}">Reopen</button>`
-          : `<button class="btn" data-resolve-review-thread="${escapeHtml(thread.id)}">Resolve</button>`}
-      </div>
-    </article>
-  `;
-}
-
-function diagnosticReviewItemMarkup(diagnostic) {
-  return `
-    <article class="review-diagnostic-card ${escapeHtml(diagnostic.severity)}">
-      <div>
-        <strong>${escapeHtml(diagnostic.severity === "error" ? "Compile error" : "Compile warning")}</strong>
-        <span>${escapeHtml(local.selectedFile || local.appState?.project?.mainFile || "main file")}:${escapeHtml(diagnostic.line || 1)}</span>
-      </div>
-      <p>${escapeHtml(diagnostic.message || "")}</p>
-      <button class="btn" data-open-diagnostic-line="${escapeHtml(String(diagnostic.line || 1))}">Open line</button>
-    </article>
-  `;
-}
-
-function reviewPanelMarkup() {
-  const threads = reviewThreads();
-  const openThreads = threads.filter((thread) => thread.status !== "resolved");
-  const resolvedThreads = threads.filter((thread) => thread.status === "resolved").slice(0, 12);
-  const diagnostics = compileDiagnosticsForFile(local.selectedFile);
-  return `
-    <section class="review-panel right-rail-panel ${local.rightRailTab === "review" ? "active" : ""}" ${local.rightRailTab === "review" ? "" : "hidden"}>
-      <div class="panel-head">
-        <strong>Review</strong>
-        <small>${openThreads.length} open</small>
-      </div>
-      <div class="review-panel-body">
-        <section class="review-section">
-          <div class="review-section-head">
-            <strong>Diagnostics</strong>
-            <span>${diagnostics.length}</span>
-          </div>
-          ${diagnostics.length ? diagnostics.map(diagnosticReviewItemMarkup).join("") : `<div class="chat-empty">Compile diagnostics will appear here after a failed or warning compile.</div>`}
-        </section>
-        <section class="review-section">
-          <div class="review-section-head">
-            <strong>Open comments</strong>
-            <span>${openThreads.length}</span>
-          </div>
-          ${openThreads.length ? openThreads.map(reviewThreadMarkup).join("") : `<div class="chat-empty">PDF and source review comments will appear here.</div>`}
-        </section>
-        ${resolvedThreads.length ? `
-          <section class="review-section">
-            <div class="review-section-head">
-              <strong>Resolved</strong>
-              <span>${resolvedThreads.length}</span>
-            </div>
-            ${resolvedThreads.map(reviewThreadMarkup).join("")}
-          </section>
-        ` : ""}
-      </div>
-    </section>
-  `;
-}
-
-function findReviewThread(threadId) {
-  return reviewThreads().find((thread) => thread.id === threadId) || null;
-}
-
-async function openReviewThreadSource(threadId) {
-  const thread = findReviewThread(threadId);
-  const source = thread?.anchor?.source;
-  if (!source?.path) return;
-  const previewScroll = capturePreviewScroll();
-  local.sourcePaneVisible = true;
-  localStorage.setItem("localleaf.sourcePaneVisible", "1");
-  setEditorMode("code");
-  await selectProjectFile(source.path);
-  setEditorMode("code");
-  requestAnimationFrame(() => {
-    const offset = offsetForLineColumn(local.editorContent, source.line || 1, source.column || 0);
-    local.codeEditor?.selectRange?.(offset, offset);
-    local.codeEditor?.focus?.();
-    requestAnimationFrame(centerCodeEditorSelection);
-    setTimeout(centerCodeEditorSelection, 80);
-  });
-  restorePreviewScroll(previewScroll);
-}
-
-async function setReviewThreadStatus(threadId, status) {
-  const endpoint = status === "resolved" ? "/api/review/threads/resolve" : "/api/review/threads/reopen";
-  try {
-    const result = await api(endpoint, { method: "POST", body: { threadId } });
-    local.appState.review = { ...(local.appState.review || {}), threads: result.threads || [] };
-    refreshRightRailUi();
-    renderPdfReviewMarkers();
-  } catch (error) {
-    showAppNotice(error.message || "Could not update the review thread.", { title: "Review" });
-  }
-}
-
-async function replyToReviewThread(threadId, body) {
-  const message = String(body || "").trim();
-  if (!message) return;
-  try {
-    const result = await api("/api/review/threads/reply", { method: "POST", body: { threadId, body: message } });
-    local.appState.review = { ...(local.appState.review || {}), threads: result.threads || [] };
-    refreshRightRailUi();
-  } catch (error) {
-    showAppNotice(error.message || "Could not save the review reply.", { title: "Review" });
-  }
-}
-
-async function openDiagnosticLine(lineNumber) {
-  const line = Math.max(1, Number(lineNumber || 1));
-  const offset = offsetForLineColumn(local.editorContent, line, 0);
-  setEditorMode("code");
-  local.codeEditor?.selectRange?.(offset, offset);
-  local.codeEditor?.focus?.();
-  requestAnimationFrame(centerCodeEditorSelection);
-}
-
 function rightRailMarkup() {
   return `
     <aside class="right-rail">
       ${rightRailTabsMarkup()}
       ${chatRailPanelMarkup()}
       ${aiHelperPanelMarkup()}
-      ${reviewPanelMarkup()}
       ${changesPanelMarkup()}
     </aside>
   `;
@@ -6066,13 +5815,11 @@ function refreshRightRailUi() {
   const aiScroll = previousAiList?.scrollTop || 0;
   const shouldStickToLatest = local.aiForceScrollBottom || local.aiChatPinnedToBottom || isAiChatNearBottom(previousAiList);
   const changesScroll = rail.querySelector(".change-history-list")?.scrollTop || 0;
-  const reviewScroll = rail.querySelector(".review-panel-body")?.scrollTop || 0;
   rail.outerHTML = rightRailMarkup();
   bindRightRailControls();
   bindChatForm();
   const nextAiList = document.querySelector(".ai-chat-list");
   const nextChangesList = document.querySelector(".change-history-list");
-  const nextReviewList = document.querySelector(".review-panel-body");
   if (nextAiList) {
     if (local.rightRailTab === "ai" && shouldStickToLatest) {
       requestAnimationFrame(() => scrollAiChatToBottom());
@@ -6082,12 +5829,11 @@ function refreshRightRailUi() {
     }
   }
   if (nextChangesList) nextChangesList.scrollTop = changesScroll;
-  if (nextReviewList) nextReviewList.scrollTop = reviewScroll;
   local.aiForceScrollBottom = false;
 }
 
 function setRightRailTab(tab) {
-  local.rightRailTab = ["chat", "ai", "review", "changes"].includes(tab) ? tab : "chat";
+  local.rightRailTab = ["chat", "ai", "changes"].includes(tab) ? tab : "chat";
   localStorage.setItem("localleaf.rightRailTab", local.rightRailTab);
   if (local.rightRailTab === "ai") local.aiForceScrollBottom = true;
   refreshRightRailUi();
@@ -6920,25 +6666,6 @@ function bindRightRailControls() {
   });
   document.querySelectorAll("[data-review-ai-run]").forEach((button) => {
     button.addEventListener("click", () => reviewAiRun(button.dataset.reviewAiRun));
-  });
-  document.querySelectorAll("[data-open-review-source]").forEach((button) => {
-    button.addEventListener("click", () => openReviewThreadSource(button.dataset.openReviewSource));
-  });
-  document.querySelectorAll("[data-resolve-review-thread]").forEach((button) => {
-    button.addEventListener("click", () => setReviewThreadStatus(button.dataset.resolveReviewThread, "resolved"));
-  });
-  document.querySelectorAll("[data-reopen-review-thread]").forEach((button) => {
-    button.addEventListener("click", () => setReviewThreadStatus(button.dataset.reopenReviewThread, "open"));
-  });
-  document.querySelectorAll("[data-open-diagnostic-line]").forEach((button) => {
-    button.addEventListener("click", () => openDiagnosticLine(button.dataset.openDiagnosticLine));
-  });
-  document.querySelectorAll("[data-review-reply-form]").forEach((form) => {
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const input = form.querySelector("input[name='reply']");
-      replyToReviewThread(form.dataset.reviewReplyForm, input?.value || "");
-    });
   });
   document.querySelectorAll("[data-undo-ai-run]").forEach((button) => {
     button.addEventListener("click", () => undoAiRun(button.dataset.undoAiRun));
@@ -9959,7 +9686,6 @@ function updateCompileUi(options = {}) {
   const logs = document.querySelector(".logs");
   if (logs) logs.innerHTML = compileLogsMarkup(compile.logs || []);
   updateEditorDiagnostics();
-  if (local.rightRailTab === "review") refreshRightRailUi();
   const pinnedLogs = document.querySelector(".log-pinned");
   if (pinnedLogs) pinnedLogs.innerHTML = compilePinnedIssuesMarkup();
   const logTabs = document.querySelector(".log-tabs");
@@ -9983,7 +9709,6 @@ function updateCompileUi(options = {}) {
     previewPane.innerHTML = compiledPreviewMarkup();
     if (!mountPdfPreview(scrollState)) {
       restorePreviewScroll(scrollState, previewPane);
-      renderPdfReviewMarkers();
     }
   }
 }
@@ -10507,7 +10232,6 @@ function connectEvents() {
         .filter((request) => request.status === "pending")
         .forEach(showEditorJoinRequest);
       refreshRightRailUi();
-      renderPdfReviewMarkers();
     }
     if (["session", "active", "project", "home"].includes(current.view)) {
       render();
@@ -10545,15 +10269,6 @@ function connectEvents() {
       const refreshPreview = local.appState.compile.status !== "running";
       updateCompileUi({ refreshPreview, previewScroll: refreshPreview ? local.pendingPreviewScroll : null });
       if (refreshPreview) local.pendingPreviewScroll = null;
-    }
-  });
-  events.addEventListener("review", (event) => {
-    if (!local.appState) return;
-    const payload = JSON.parse(event.data);
-    local.appState.review = { ...(local.appState.review || {}), threads: payload.threads || [] };
-    if (route().view === "editor") {
-      refreshRightRailUi();
-      renderPdfReviewMarkers();
     }
   });
   events.addEventListener("chat", () => {

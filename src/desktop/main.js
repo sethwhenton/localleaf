@@ -138,10 +138,6 @@ function defaultAiChangeRoot() {
   return path.join(app.getPath("userData"), "AiChanges");
 }
 
-function defaultReviewRoot() {
-  return path.join(app.getPath("userData"), "ReviewThreads");
-}
-
 function createAiSecretStore() {
   let root = defaultModelRoot();
   const memorySecrets = new Map();
@@ -209,7 +205,6 @@ async function startHostServer() {
     modelRoot,
     aiSessionRoot: defaultAiSessionRoot(),
     aiChangeRoot: defaultAiChangeRoot(),
-    reviewRoot: defaultReviewRoot(),
     aiSecretStore: createAiSecretStore()
   });
   await hostServer.start(4317);
