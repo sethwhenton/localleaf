@@ -73,6 +73,7 @@ document.documentElement.classList.toggle("platform-win", platformName.includes(
 document.documentElement.classList.toggle("theme-dark", initialTheme === "dark");
 document.documentElement.classList.toggle("theme-light", initialTheme !== "dark");
 requestAnimationFrame(() => syncDesktopTheme(initialTheme));
+localStorage.setItem("localleaf.editorMode", "code");
 if (localStorage.getItem("localleaf.layoutStateVersion") !== LAYOUT_STATE_STORAGE_VERSION) {
   localStorage.setItem("localleaf.logsVisible", "1");
   localStorage.setItem("localleaf.layoutStateVersion", LAYOUT_STATE_STORAGE_VERSION);
@@ -187,7 +188,7 @@ const local = {
   savePromise: null,
   codeEditor: null,
   visualEditor: null,
-  editorMode: localStorage.getItem("localleaf.editorMode") === "visual" ? "visual" : "code",
+  editorMode: "code",
   editorSuggestions: null,
   selectedFolder: "",
   draggedTreePath: "",
@@ -4172,8 +4173,6 @@ function editorStyleMenuMarkup() {
 function editorFormatToolbarMarkup() {
   const tool = (command, label, title, extra = "", id = "") =>
     `<button class="editor-tool-button ${extra}" ${id ? `id="${id}"` : ""} data-editor-command="${command}" title="${title}" aria-label="${title}">${label}</button>`;
-  const visualSupported = supportsVisualEditor(local.selectedFile);
-  const activeMode = visualSupported ? local.editorMode : "code";
   return `
     <div class="editor-format-row" role="toolbar" aria-label="LaTeX editor tools">
       <button class="editor-files-tab-button" id="showFilesPanelInline" title="Show files" aria-label="Show files">
@@ -4200,8 +4199,8 @@ function editorFormatToolbarMarkup() {
       ${tool("indent", editorToolIcon("indent"), "Indent")}
       ${tool("complete", editorToolIcon("complete"), "Open command autocomplete", "accent-tool")}
       <div class="editor-mode-toggle" role="tablist" aria-label="Editor mode">
-        <button class="editor-mode-pill ${activeMode === "code" ? "active" : ""}" type="button" role="tab" data-editor-mode="code" aria-selected="${activeMode === "code" ? "true" : "false"}">Code</button>
-        <button class="editor-mode-pill ${activeMode === "visual" ? "active" : ""}" type="button" role="tab" data-editor-mode="visual" aria-selected="${activeMode === "visual" ? "true" : "false"}" ${visualSupported ? "" : "disabled"} title="${visualSupported ? "Use visual LaTeX editing aids" : "Visual mode is available for .tex files"}">Visual</button>
+        <button class="editor-mode-pill active" type="button" role="tab" data-editor-mode="code" aria-selected="true">Code Editor</button>
+        <button class="editor-mode-pill coming-soon" type="button" role="tab" aria-selected="false" disabled title="Visual Editor is coming soon">Visual Editor <span>soon</span></button>
       </div>
       <button class="editor-tool-button ${local.searchOpen ? "active" : ""}" id="editorSearchToggle" title="Search and replace" aria-label="Search and replace">
         ${editorToolIcon("search")}
@@ -4608,14 +4607,11 @@ function editorModeStorageId(filePath = local.selectedFile) {
 }
 
 function readEditorModeForFile(filePath = local.selectedFile) {
-  if (!supportsVisualEditor(filePath)) return "code";
-  const map = editorModeStorageMap();
-  const stored = map[editorModeStorageId(filePath)] || localStorage.getItem("localleaf.editorMode");
-  return stored === "visual" ? "visual" : "code";
+  return "code";
 }
 
 function writeEditorModeForFile(filePath = local.selectedFile, mode = "code") {
-  const nextMode = mode === "visual" && supportsVisualEditor(filePath) ? "visual" : "code";
+  const nextMode = "code";
   const map = editorModeStorageMap();
   map[editorModeStorageId(filePath)] = nextMode;
   localStorage.setItem(EDITOR_MODE_STORAGE_KEY, JSON.stringify(map));
@@ -8338,20 +8334,13 @@ function updateEditorDiagnostics() {
 }
 
 function syncEditorModeUi() {
-  if (!supportsVisualEditor(local.selectedFile) && local.editorMode !== "code") {
-    local.editorMode = "code";
-  }
+  local.editorMode = "code";
   document.querySelectorAll("[data-editor-mode]").forEach((button) => {
     const active = button.dataset.editorMode === local.editorMode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", active ? "true" : "false");
-    if (button.dataset.editorMode === "visual") {
-      const supported = supportsVisualEditor(local.selectedFile);
-      button.disabled = !supported;
-      button.title = supported ? "Use visual LaTeX editing aids" : "Visual mode is available for .tex files";
-    }
   });
-  const applied = local.codeEditor?.setMode?.(local.editorMode);
+  const applied = local.codeEditor?.setMode?.("code");
   if (applied && applied !== local.editorMode) local.editorMode = applied;
 }
 
@@ -8368,7 +8357,7 @@ function mountCodeEditor() {
     parent: host,
     value: local.editorContent,
     filePath: local.selectedFile,
-    mode: supportsVisualEditor(local.selectedFile) ? local.editorMode : "code",
+    mode: "code",
     diagnostics: compileDiagnosticsForFile(local.selectedFile),
     suggestions: local.editorSuggestions || {},
     onChange: (text) => markEditorChanged(text),
@@ -8661,11 +8650,11 @@ function mountActiveEditor() {
 }
 
 function setEditorMode(mode) {
+  if (mode !== "code") return;
   local.editorContent = currentEditorText();
-  const nextMode = mode === "visual" && supportsVisualEditor(local.selectedFile) ? "visual" : "code";
-  local.editorMode = nextMode;
+  local.editorMode = "code";
   local.tablePickerOpen = false;
-  writeEditorModeForFile(local.selectedFile, nextMode);
+  writeEditorModeForFile(local.selectedFile, "code");
   syncEditorModeUi();
   refreshEditorToolbarPanels();
 }
