@@ -43,7 +43,7 @@ The editor has a right-rail AI Helper with three tabs: `Chat`, `AI Helper`, and 
 - PDF annotation target preview supports both text and rendered image/figure regions. The client detects larger non-white PDF canvas regions for image annotations, outlines them in orange, and sends `elementType`, target rectangle, PDF coordinates, and SyncTeX source context so text-only providers can still edit figure/image LaTeX such as `\includegraphics`, captions, labels, sizing, and placement.
 - Visual editor internals are CodeMirror-native, but the toolbar switch is currently reverted back to `Visual Editor soon`; Code mode remains the only exposed editor mode.
 - Compile diagnostics are derived from compile logs and surfaced in the CodeMirror gutter/line highlights for the selected file while the original log dock remains available at the bottom.
-- Normal PDF source navigation is now double-click-to-source so single clicks do not unexpectedly move the editor. Annotate mode remains explicit single-click targeting.
+- Normal PDF source navigation is single-click-to-source. Annotate mode remains explicit single-click targeting for AI annotation instead of source jumping.
 - The previously added persisted Review tab/comment-thread surface has been removed. The right rail is back to `Chat`, `AI Helper`, and `Changes`; PDF annotation sends anchored context to AI Helper only.
 - Legacy browser-local AI sessions are migrated once into the currently opened project. Session records keep message/proposal metadata but sanitize unexpected credential-shaped fields before writing JSON.
 - Approval cards in the AI chat show their full diff preview without an inner scroll area, while the Changes tab remains an AI change history surface.

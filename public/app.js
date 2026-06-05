@@ -4552,7 +4552,6 @@ function bindPdfPreviewInteractions() {
   if (!previewPane || previewPane.dataset.pdfClickBound === "1") return;
   previewPane.dataset.pdfClickBound = "1";
   previewPane.addEventListener("click", handlePdfPreviewClick);
-  previewPane.addEventListener("dblclick", handlePdfPreviewDoubleClick);
   previewPane.addEventListener("pointermove", handlePdfAnnotationPointerMove, { passive: true });
   previewPane.addEventListener("pointerleave", () => {
     if (!local.pdfAnnotationPopover) removePdfAnnotationOutline();
@@ -5004,13 +5003,6 @@ async function handlePdfPreviewClick(event) {
     openPdfAnnotationPopover(target, source);
     return;
   }
-}
-
-async function handlePdfPreviewDoubleClick(event) {
-  if (event.target.closest?.(".pdf-annotation-popover")) return;
-  if (local.appState?.compile?.mode !== "pdf" || local.pdfAnnotateMode) return;
-  const target = pdfClickTarget(event);
-  if (!target) return;
   event.preventDefault();
   const source = await resolvePdfClickSource(target);
   await jumpToPdfSource(source);
