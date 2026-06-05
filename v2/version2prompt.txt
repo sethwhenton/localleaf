@@ -1,0 +1,151 @@
+if we were to rebuild this project from scratch
+
+which tools or tech would we utilize instead of the current type
+
+I was thinking instant 1.0 or something so we can implement the muti edit feature
+
+what else do you suggest
+
+go through the whole app
+
+and suggest whatever you think is fit for this project
+
+secondly
+
+the pdf
+I wish to be able to have the type of pdf where when we click on a part of the pdf, itll auto open the respective code part so users dont have to be manually scrolling to find it
+
+the pdf should be interactive
+
+lastly
+
+can we have the annotation feature
+
+so when we click it
+
+just like codex has it
+
+we can write a message and submit that to our agent instead of typing that directly in the chat?
+
+so when we click on an element in the pdf after selecting annotate mode
+
+we can write which part we want the agent to edit and so on
+
+
+also go through the app
+
+find some redundant stuff that isnt needed or some settings not needed
+or some settings you suggest, list them please
+
+secondly
+
+I also need this
+
+when we share our host for others, they should also have access to the hosts models, or local models and they can choose which to use
+
+people who join sessions should have limited access to the settings window
+
+maybe they can switch between darkmode and light mode for their view
+
+lets also add text settings so people can increase the size of text across the app or reduce it
+
+so code text settings
+
+and chat/ai text size settings
+
+host own will be stored for him
+
+but users who join the host should be temporary
+
+redesign the help and about
+
+also lets update how the check for updates work
+when clicked on we should see a spinner which checks
+and provides feedback when we click settings
+
+also when there is a new update
+
+just like codex does lets have the update button nicely created on the top right or left
+you choose
+just an icon showing the update
+
+then maybe the app restarts or something and installs the new update
+lets plan all these well
+
+the about page also needs a total redesign
+
+currently its too ugly
+
+utilize [$design-taste-frontend](C:\\Users\\whent\\.codex\\skills\\taste-skill\\SKILL.md)
+[$product-design:index](C:\\Users\\whent\\.codex\\plugins\\cache\\openai-curated-remote\\product-design\\0.1.43\\skills\\index\\SKILL.md)
+
+[$build-web-apps:shadcn](C:\\Users\\whent\\.codex\\plugins\\cache\\openai-curated\\build-web-apps\\9c1190e4\\skills\\shadcn-best-practices\\SKILL.md)  if needed please
+
+on the left bar
+the title images should be pinned so when we scroll its just the images that move
+
+same for file outline also
+
+overleaf is opensource
+
+[overleaf/overleaf](https://github.com/overleaf/overleaf)
+
+lets see what else we can take from here, improve upon and add to our app
+
+specifically how overleaf editor works and the visual editor as well
+
+Possibly go through its code
+
+pick all the good parts of overleaf and lets add that to our app as well
+
+find all the good parts about overleaf lets add it to our app
+
+so utilize sub agents if you need
+
+find whats in overleaf and whats not in our app
+
+list it all
+
+lets ensure our v2 is going to be a big update as well
+
+in terms of the UI also
+
+D:\Downloads\synara-0.1.2\synara-0.1.2
+
+look through if this contains the UI of synara lets copy how things are organized in there with respect to the UI and all and implement it in our app as the base
+
+fyi
+
+this is a v2
+
+so create a new folder as V2 plan and lets have all these in there and how we are going to go about this
+
+lets maintain our primary colors of orange and white or orange and black
+
+but the design elements the UI create a skill or something so the agent going to build the UI of this follows it
+
+overall the beginning concept of our app, the host part and everything is fine
+
+create good and efficient test plans to ensure that during this v2 migration all core concepts of our app
+will work
+
+especially features from overleaf going to be borrwoed so plan out a very good test concept for all UI and core features of our app as well
+
+all test cases from mutations to unti tests etc
+
+across the app also to ensure this v2 doesnt become buggy
+
+and everything in our app
+
+plus overleafs stuff is also added as well
+
+you are a CTO
+
+deploy sub agents to effiently draw out this plan in a way that will impress me or else
+I wouldnt use you anymore
+
+so be good be smart and do your work well
+
+find effient skills if needed so you can produce high quality work
+
+begin

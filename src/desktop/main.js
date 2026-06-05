@@ -130,6 +130,18 @@ function defaultModelRoot() {
   return path.join(app.getPath("userData"), "LocalLeafModel");
 }
 
+function defaultAiSessionRoot() {
+  return path.join(app.getPath("userData"), "AiSessions");
+}
+
+function defaultAiChangeRoot() {
+  return path.join(app.getPath("userData"), "AiChanges");
+}
+
+function defaultReviewRoot() {
+  return path.join(app.getPath("userData"), "ReviewThreads");
+}
+
 function createAiSecretStore() {
   let root = defaultModelRoot();
   const memorySecrets = new Map();
@@ -192,7 +204,14 @@ async function startHostServer() {
   } catch {
     // The server can decide how to fall back if the desktop default is unavailable.
   }
-  hostServer = createLocalLeafServer({ port: 4317, modelRoot, aiSecretStore: createAiSecretStore() });
+  hostServer = createLocalLeafServer({
+    port: 4317,
+    modelRoot,
+    aiSessionRoot: defaultAiSessionRoot(),
+    aiChangeRoot: defaultAiChangeRoot(),
+    reviewRoot: defaultReviewRoot(),
+    aiSecretStore: createAiSecretStore()
+  });
   await hostServer.start(4317);
   return `http://localhost:4317/?host=${encodeURIComponent(hostServer.state.hostToken)}`;
 }

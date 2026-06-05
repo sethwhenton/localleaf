@@ -26,6 +26,15 @@
   ],
   "author": "",
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.19.0",
+    "npm": ">=11.10.0"
+  },
+  "allowScripts": {
+    "electron@41.3.0": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.28.0": true
+  },
   "build": {
     "appId": "dev.localleaf.host",
     "productName": "LocalLeaf Host",

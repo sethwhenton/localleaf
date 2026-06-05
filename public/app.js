@@ -16,9 +16,11 @@ const RECENT_PROJECTS_LIMIT = 3;
 const LAYOUT_STATE_STORAGE_VERSION = "4";
 const AI_PERMISSIONS_STORAGE_KEY = "localleaf.aiPermissions.v1";
 const AI_SESSIONS_STORAGE_KEY = "localleaf.aiSessions.v1";
+const AI_SESSIONS_MIGRATION_STORAGE_KEY = "localleaf.aiSessions.projectStoreMigrated.v1";
 const AI_PROVIDER_ENABLE_STORAGE_KEY = "localleaf.aiProviderEnabled.v1";
 const AI_MODEL_ENABLE_STORAGE_KEY = "localleaf.aiModelEnabled.v1";
 const AI_MODEL_GROUP_STORAGE_KEY = "localleaf.aiModelGroups.v1";
+const EDITOR_MODE_STORAGE_KEY = "localleaf.editorModeByFile.v1";
 const LOCALLEAF_SITE_URL = "https://sethwhenton.github.io/localleaf/";
 const AI_WELCOME_MESSAGE = "Ask me about LaTeX errors, rewrites, tables, or project structure. File edits will be tracked in Changes.";
 const SUPPORTED_PROJECT_FILE_EXTENSIONS = new Set([
@@ -71,7 +73,6 @@ document.documentElement.classList.toggle("platform-win", platformName.includes(
 document.documentElement.classList.toggle("theme-dark", initialTheme === "dark");
 document.documentElement.classList.toggle("theme-light", initialTheme !== "dark");
 requestAnimationFrame(() => syncDesktopTheme(initialTheme));
-localStorage.setItem("localleaf.editorMode", "code");
 if (localStorage.getItem("localleaf.layoutStateVersion") !== LAYOUT_STATE_STORAGE_VERSION) {
   localStorage.setItem("localleaf.logsVisible", "1");
   localStorage.setItem("localleaf.layoutStateVersion", LAYOUT_STATE_STORAGE_VERSION);
@@ -92,33 +93,56 @@ function createAiSession(title = "New session") {
     title,
     createdAt: now,
     updatedAt: now,
+    lastPreview: "Ready to help with this project.",
+    messageCount: 0,
+    changeCount: 0,
     messages: [createAiWelcomeMessage()]
   };
 }
 
-function readAiSessionState() {
+function normalizeAiSession(session) {
+  const fallback = createAiSession();
+  const messages = Array.isArray(session?.messages) && session.messages.length
+    ? session.messages.map((message) => message?.id === "welcome" ? createAiWelcomeMessage() : { ...message })
+    : [createAiWelcomeMessage()];
+  return {
+    ...fallback,
+    ...session,
+    id: String(session?.id || fallback.id),
+    title: String(session?.title || fallback.title || "New session").replace(/\s+/g, " ").trim().slice(0, 64) || "New session",
+    createdAt: Number(session?.createdAt || fallback.createdAt),
+    updatedAt: Number(session?.updatedAt || session?.createdAt || fallback.updatedAt),
+    lastPreview: String(session?.lastPreview || "").trim() || sessionPreviewFromMessages(messages),
+    messageCount: Number(session?.messageCount || messages.filter((message) => message.id !== "welcome").length),
+    changeCount: Number(session?.changeCount || 0),
+    messages
+  };
+}
+
+function fallbackAiSessionState() {
+  const session = createAiSession("First session");
+  return { projectKey: "", projectName: "", sessions: [session], currentSessionId: session.id };
+}
+
+function readLegacyAiSessionState() {
   try {
     const parsed = JSON.parse(localStorage.getItem(AI_SESSIONS_STORAGE_KEY) || "{}");
     const sessions = Array.isArray(parsed.sessions)
-      ? parsed.sessions.filter((session) => session?.id && Array.isArray(session.messages))
+      ? parsed.sessions.filter((session) => session?.id && Array.isArray(session.messages)).map(normalizeAiSession)
       : [];
     if (sessions.length) {
-      sessions.forEach((session) => {
-        session.messages = session.messages.map((message) => message?.id === "welcome" ? createAiWelcomeMessage() : message);
-      });
       const currentSessionId = sessions.some((session) => session.id === parsed.currentSessionId)
         ? parsed.currentSessionId
         : sessions[0].id;
-      return { sessions, currentSessionId };
+      return { projectKey: "", projectName: "", sessions, currentSessionId };
     }
   } catch {
     // Fall through to a fresh local session when storage is unavailable or malformed.
   }
-  const session = createAiSession("First session");
-  return { sessions: [session], currentSessionId: session.id };
+  return fallbackAiSessionState();
 }
 
-const initialAiSessionState = readAiSessionState();
+const initialAiSessionState = readLegacyAiSessionState();
 
 function readBooleanMap(storageKey) {
   try {
@@ -163,7 +187,7 @@ const local = {
   savePromise: null,
   codeEditor: null,
   visualEditor: null,
-  editorMode: "code",
+  editorMode: localStorage.getItem("localleaf.editorMode") === "visual" ? "visual" : "code",
   editorSuggestions: null,
   selectedFolder: "",
   draggedTreePath: "",
@@ -195,11 +219,14 @@ const local = {
   sourcePaneVisible: localStorage.getItem("localleaf.sourcePaneVisible") !== "0",
   previewPaneVisible: localStorage.getItem("localleaf.previewPaneVisible") !== "0",
   rightRailVisible: localStorage.getItem("localleaf.rightRailVisible") !== "0" && !startsNarrow,
-  rightRailTab: ["chat", "ai", "changes"].includes(localStorage.getItem("localleaf.rightRailTab"))
+  rightRailTab: ["chat", "ai", "review", "changes"].includes(localStorage.getItem("localleaf.rightRailTab"))
     ? localStorage.getItem("localleaf.rightRailTab")
     : "chat",
   logsVisible: localStorage.getItem("localleaf.logsVisible") !== "0",
   pdfScale: Number(localStorage.getItem("localleaf.pdfScale") || 1),
+  pdfAnnotateMode: false,
+  pdfAnnotationPopover: null,
+  pdfSourceStatus: "",
   searchOpen: false,
   searchQuery: "",
   searchReplace: "",
@@ -223,6 +250,7 @@ const local = {
   pendingPreviewScroll: null,
   pinnedCompileErrors: [],
   pinnedCompileWarnings: [],
+  compileDiagnostics: [],
   clearedWarningVersion: null,
   updateInfo: null,
   updateCheckStarted: false,
@@ -249,6 +277,9 @@ const local = {
   activeCursorSdkModelId: localStorage.getItem("localleaf.activeCursorSdkModelId") || "",
   aiSessionMenuOpen: false,
   aiSessionMoreMenuOpen: false,
+  aiSessionSearch: "",
+  aiSessionsProjectKey: initialAiSessionState.projectKey || "",
+  aiSessionsProjectName: initialAiSessionState.projectName || "",
   aiQueuedPromptMenuOpenId: "",
   aiChatNeedsJump: false,
   aiChatPinnedToBottom: true,
@@ -675,7 +706,7 @@ function aiHistoryItems() {
   const fromMessages = local.aiMessages.flatMap((message) => message.proposals || []);
   const byId = new Map();
   [...fromMessages, ...local.aiChangeHistory].forEach((proposal) => {
-    if (proposal?.id && (!proposal.sessionId || proposal.sessionId === local.aiCurrentSessionId)) byId.set(proposal.id, proposal);
+    if (proposal?.id) byId.set(proposal.id, proposal);
   });
   return [...byId.values()].reverse();
 }
@@ -695,7 +726,7 @@ function syncAiProposalsFromAppState() {
   proposals.forEach((proposal) => {
     if (!proposal?.id) return;
     const existing = findAiProposal(proposal.id);
-    const merged = { ...(existing || {}), ...proposal, sessionId: existing?.sessionId || local.aiCurrentSessionId };
+    const merged = { ...(existing || {}), ...proposal, sessionId: existing?.sessionId || proposal.sessionId || local.aiCurrentSessionId };
     local.aiMessages.forEach((message) => {
       const index = (message.proposals || []).findIndex((item) => item.id === proposal.id);
       if (index >= 0) message.proposals[index] = { ...message.proposals[index], ...merged };
@@ -714,6 +745,11 @@ function currentAiSession() {
   return session;
 }
 
+function sessionPreviewFromMessages(messages = []) {
+  const last = [...messages].reverse().find((message) => message?.id !== "welcome" && message?.message);
+  return last ? String(last.message || "").replace(/\s+/g, " ").trim().slice(0, 120) : "Ready to help with this project.";
+}
+
 function firstUserPrompt(messages = []) {
   return messages.find((message) => message.role === "user")?.message || "";
 }
@@ -723,15 +759,94 @@ function aiSessionTitleFromPrompt(prompt = "") {
   return clean ? clean.slice(0, 42) : "New session";
 }
 
-function saveAiSessions() {
-  const payload = {
-    currentSessionId: local.aiCurrentSessionId,
-    sessions: local.aiSessions.slice(0, 12).map((session) => ({
-      ...session,
-      messages: (session.messages || []).slice(-80)
-    }))
+function aiSessionSavePayload(session = currentAiSession()) {
+  const active = activeAiProviderModel();
+  const messages = (session.messages || local.aiMessages || []).slice(-120).map((message) => ({ ...message }));
+  return {
+    projectKey: local.aiSessionsProjectKey || "",
+    sessionId: session.id,
+    title: session.title || "New session",
+    messages,
+    providerId: active.providerId || "",
+    providerName: active.providerName || "",
+    modelId: active.modelId || "",
+    modelName: active.modelName || "",
+    permissionMode: local.aiPermissions.yoloMode ? "yolo" : "default",
+    changeCount: aiHistoryItems().length,
+    lastPreview: sessionPreviewFromMessages(messages)
   };
-  localStorage.setItem(AI_SESSIONS_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function applyAiSessionState(sessionState = {}) {
+  const sessions = Array.isArray(sessionState.sessions) ? sessionState.sessions.map(normalizeAiSession) : [];
+  const fallback = fallbackAiSessionState();
+  local.aiSessions = sessions.length ? sessions : fallback.sessions;
+  local.aiCurrentSessionId = local.aiSessions.some((session) => session.id === sessionState.currentSessionId)
+    ? sessionState.currentSessionId
+    : local.aiSessions[0].id;
+  local.aiSessionsProjectKey = sessionState.projectKey || "";
+  local.aiSessionsProjectName = sessionState.projectName || local.appState?.project?.name || "";
+  const active = currentAiSession();
+  local.aiMessages = (active.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
+}
+
+function syncAiSessionsFromAppState() {
+  const sessionState = local.appState?.ai?.sessions;
+  if (sessionState && Array.isArray(sessionState.sessions)) {
+    applyAiSessionState(sessionState);
+  }
+}
+
+async function refreshAiSessionsFromHost(options = {}) {
+  if (!local.hostToken && !local.guestToken) return;
+  try {
+    const sessionState = await api("/api/ai/sessions");
+    applyAiSessionState(sessionState);
+    if (options.render !== false) refreshRightRailUi();
+  } catch {
+    // Keep the in-memory session state if the host endpoint is temporarily unavailable.
+  }
+}
+
+async function importLegacyAiSessionsForProject() {
+  if (isGuestClient() || !local.hostToken || !local.aiSessionsProjectKey) return;
+  const rawMigrationState = localStorage.getItem(AI_SESSIONS_MIGRATION_STORAGE_KEY) || "";
+  let migrated = {};
+  try {
+    migrated = JSON.parse(rawMigrationState || "{}");
+  } catch {
+    migrated = {};
+  }
+  if (rawMigrationState === "1" || migrated.global === true || migrated[local.aiSessionsProjectKey]) return;
+  const legacy = readLegacyAiSessionState();
+  const hasLegacyMessages = legacy.sessions.some((session) => (session.messages || []).some((message) => message.id !== "welcome"));
+  if (!hasLegacyMessages) {
+    localStorage.setItem(AI_SESSIONS_MIGRATION_STORAGE_KEY, "1");
+    return;
+  }
+  try {
+    const imported = await api("/api/ai/sessions/import-legacy", {
+      method: "POST",
+      body: {
+        sessions: legacy.sessions,
+        currentSessionId: legacy.currentSessionId
+      }
+    });
+    applyAiSessionState(imported);
+    localStorage.setItem(AI_SESSIONS_MIGRATION_STORAGE_KEY, "1");
+  } catch {
+    // Leave the legacy state untouched so a later run can import it.
+  }
+}
+
+function saveAiSessions() {
+  if (!local.hostToken && !local.guestToken) return;
+  const payload = aiSessionSavePayload();
+  api("/api/ai/sessions/update", { method: "POST", body: payload })
+    .then((sessionState) => {
+      if (!sessionState.projectKey || sessionState.projectKey === local.aiSessionsProjectKey) applyAiSessionState(sessionState);
+    })
+    .catch(() => {});
 }
 
 function syncCurrentAiSession(titleHint = "") {
@@ -748,41 +863,66 @@ function syncCurrentAiSession(titleHint = "") {
   }
   local.aiSessions = [session, ...local.aiSessions.filter((item) => item.id !== session.id)]
     .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
-    .slice(0, 12);
+    .slice(0, 30);
   saveAiSessions();
 }
 
-function startNewAiSession() {
+async function startNewAiSession() {
   syncCurrentAiSession();
-  const session = createAiSession();
-  local.aiSessions.unshift(session);
-  local.aiCurrentSessionId = session.id;
-  local.aiMessages = session.messages.map((message) => ({ ...message }));
   local.aiSessionMenuOpen = false;
   local.aiSessionMoreMenuOpen = false;
   local.aiForceScrollBottom = true;
   local.aiChatNeedsJump = false;
-  saveAiSessions();
+  try {
+    const sessionState = await api("/api/ai/sessions/create", { method: "POST", body: { title: "New session" } });
+    applyAiSessionState(sessionState);
+  } catch {
+    const session = createAiSession();
+    local.aiSessions.unshift(session);
+    local.aiCurrentSessionId = session.id;
+    local.aiMessages = session.messages.map((message) => ({ ...message }));
+    saveAiSessions();
+  }
   refreshRightRailUi();
 }
 
-function switchAiSession(sessionId) {
+async function switchAiSession(sessionId) {
   syncCurrentAiSession();
   const session = local.aiSessions.find((item) => item.id === sessionId);
   if (!session) return;
-  local.aiCurrentSessionId = session.id;
-  local.aiMessages = (session.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
   local.aiSessionMenuOpen = false;
   local.aiSessionMoreMenuOpen = false;
   local.aiForceScrollBottom = true;
   local.aiChatNeedsJump = false;
-  saveAiSessions();
+  try {
+    const sessionState = await api("/api/ai/sessions/activate", { method: "POST", body: { sessionId: session.id } });
+    applyAiSessionState(sessionState);
+  } catch {
+    local.aiCurrentSessionId = session.id;
+    local.aiMessages = (session.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
+    saveAiSessions();
+  }
   refreshRightRailUi();
 }
 
-function deleteAiSession(sessionId, options = {}) {
+async function deleteAiSession(sessionId, options = {}) {
   const targetId = String(sessionId || "");
   if (!targetId) return;
+  const target = local.aiSessions.find((session) => session.id === targetId);
+  const hasWork = target && ((target.messages || []).some((message) => message.id !== "welcome") || Number(target.changeCount || 0) > 0);
+  if (hasWork && !confirm(`Delete "${target.title || "this session"}"?`)) return;
+  try {
+    const sessionState = await api("/api/ai/sessions/delete", { method: "POST", body: { sessionId: targetId } });
+    applyAiSessionState(sessionState);
+    local.aiSessionMenuOpen = options.keepMenu !== false;
+    local.aiSessionMoreMenuOpen = false;
+    local.aiForceScrollBottom = true;
+    local.aiChatNeedsJump = false;
+    refreshRightRailUi();
+    return;
+  } catch {
+    // Fall back to local deletion below.
+  }
   const nextSessions = local.aiSessions.filter((session) => session.id !== targetId);
   if (!nextSessions.length) {
     const session = createAiSession();
@@ -805,8 +945,8 @@ function deleteAiSession(sessionId, options = {}) {
   refreshRightRailUi();
 }
 
-function renameCurrentAiSession() {
-  const session = currentAiSession();
+async function renameAiSession(sessionId = local.aiCurrentSessionId) {
+  const session = local.aiSessions.find((item) => item.id === sessionId) || currentAiSession();
   const title = prompt("Session name", session.title || "New session");
   if (title === null) return;
   const clean = title.replace(/\s+/g, " ").trim();
@@ -815,7 +955,34 @@ function renameCurrentAiSession() {
   session.updatedAt = Date.now();
   local.aiSessions = [session, ...local.aiSessions.filter((item) => item.id !== session.id)];
   local.aiSessionMoreMenuOpen = false;
-  saveAiSessions();
+  try {
+    const sessionState = await api("/api/ai/sessions/update", {
+      method: "POST",
+      body: { ...aiSessionSavePayload(session), sessionId: session.id, title: session.title }
+    });
+    applyAiSessionState(sessionState);
+  } catch {
+    saveAiSessions();
+  }
+  refreshRightRailUi();
+}
+
+function renameCurrentAiSession() {
+  renameAiSession(local.aiCurrentSessionId);
+}
+
+async function forkAiSession(sessionId = local.aiCurrentSessionId) {
+  syncCurrentAiSession();
+  try {
+    const sessionState = await api("/api/ai/sessions/fork", { method: "POST", body: { sessionId } });
+    applyAiSessionState(sessionState);
+  } catch (error) {
+    showAppNotice(error.message || "Could not fork session.", { type: "error", title: "AI sessions" });
+  }
+  local.aiSessionMenuOpen = false;
+  local.aiSessionMoreMenuOpen = false;
+  local.aiForceScrollBottom = true;
+  local.aiChatNeedsJump = false;
   refreshRightRailUi();
 }
 
@@ -1187,6 +1354,7 @@ function editorToolIcon(name) {
     ref: `<svg ${attrs}><path d="M7 4h10v16l-5-3-5 3V4Z" /><path d="M10 8h4" /><path d="M10 11h4" /></svg>`,
     cite: `<svg ${attrs}><path d="M8 10h4v7H5v-4c0-3.3 1.7-5.3 5-6" /><path d="M17 10h2v7h-7v-4c0-3.3 1.7-5.3 5-6" /></svg>`,
     comment: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`,
+    annotate: `<svg ${attrs}><path d="M12 3.5 13.5 8l4.5 1.5-4.5 1.5L12 15.5 10.5 11 6 9.5 10.5 8 12 3.5Z" /><path d="M5 18.5h5.5" /><path d="M14.5 16.5 18.5 12.5a1.6 1.6 0 0 1 2.3 2.3l-4 4-3 .7.7-3Z" /></svg>`,
     figure: `<svg ${attrs}><rect x="4" y="5" width="16" height="14" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m6.5 17 4.2-4.2 2.5 2.5 2-2L19 17" /></svg>`,
     table: `<svg ${attrs}><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10h16" /><path d="M4 15h16" /><path d="M10 5v14" /><path d="M15 5v14" /></svg>`,
     bulletList: `<svg ${attrs}><path d="M9 7h11" /><path d="M9 12h11" /><path d="M9 17h11" /><circle cx="5" cy="7" r="1.2" /><circle cx="5" cy="12" r="1.2" /><circle cx="5" cy="17" r="1.2" /></svg>`,
@@ -4004,6 +4172,8 @@ function editorStyleMenuMarkup() {
 function editorFormatToolbarMarkup() {
   const tool = (command, label, title, extra = "", id = "") =>
     `<button class="editor-tool-button ${extra}" ${id ? `id="${id}"` : ""} data-editor-command="${command}" title="${title}" aria-label="${title}">${label}</button>`;
+  const visualSupported = supportsVisualEditor(local.selectedFile);
+  const activeMode = visualSupported ? local.editorMode : "code";
   return `
     <div class="editor-format-row" role="toolbar" aria-label="LaTeX editor tools">
       <button class="editor-files-tab-button" id="showFilesPanelInline" title="Show files" aria-label="Show files">
@@ -4030,8 +4200,8 @@ function editorFormatToolbarMarkup() {
       ${tool("indent", editorToolIcon("indent"), "Indent")}
       ${tool("complete", editorToolIcon("complete"), "Open command autocomplete", "accent-tool")}
       <div class="editor-mode-toggle" role="tablist" aria-label="Editor mode">
-        <button class="editor-mode-pill active" type="button" role="tab" aria-selected="true">Code Editor</button>
-        <button class="editor-mode-pill coming-soon" type="button" role="tab" aria-selected="false" disabled title="Visual Editor is coming soon">Visual Editor <span>soon</span></button>
+        <button class="editor-mode-pill ${activeMode === "code" ? "active" : ""}" type="button" role="tab" data-editor-mode="code" aria-selected="${activeMode === "code" ? "true" : "false"}">Code</button>
+        <button class="editor-mode-pill ${activeMode === "visual" ? "active" : ""}" type="button" role="tab" data-editor-mode="visual" aria-selected="${activeMode === "visual" ? "true" : "false"}" ${visualSupported ? "" : "disabled"} title="${visualSupported ? "Use visual LaTeX editing aids" : "Visual mode is available for .tex files"}">Visual</button>
       </div>
       <button class="editor-tool-button ${local.searchOpen ? "active" : ""}" id="editorSearchToggle" title="Search and replace" aria-label="Search and replace">
         ${editorToolIcon("search")}
@@ -4178,6 +4348,11 @@ function previewActionsMarkup(compile = local.appState?.compile || {}) {
       <button class="pdf-zoom-button" id="pdfZoomIn" type="button" title="Zoom in" aria-label="Zoom in">+</button>
     </div>
     <a class="pdf-link" href="${authUrl(`/api/pdf?v=${compile.version}`)}" target="_blank" rel="noopener">PDF</a>
+    ${compile.sourceMapAvailable ? `<span class="pdf-source-chip">SyncTeX</span>` : ""}
+    <button class="pdf-annotate-button ${local.pdfAnnotateMode ? "active" : ""}" id="pdfAnnotateButton" type="button" title="Annotate PDF with AI" aria-label="Annotate PDF with AI" aria-pressed="${local.pdfAnnotateMode ? "true" : "false"}">
+      ${editorToolIcon("annotate")}
+      <span>Annotate</span>
+    </button>
     <span>${escapeHtml(compile.status || "")}</span>
   `;
 }
@@ -4309,12 +4484,14 @@ function mountPdfPreview(scrollState = null) {
   const marker = previewPane?.querySelector(".pdf-preview-mount");
   if (!previewPane || !marker || !window.LocalLeafPdfPreview?.mount) return false;
   if (local.appState?.compile?.status === "running") return false;
-  window.LocalLeafPdfPreview.mount(previewPane, {
+  const mounted = window.LocalLeafPdfPreview.mount(previewPane, {
     url: marker.dataset.pdfUrl,
     scale: local.pdfScale,
     scrollState
   });
+  Promise.resolve(mounted).then(() => renderPdfReviewMarkers());
   updatePdfZoomUi();
+  bindPdfPreviewInteractions();
   return true;
 }
 
@@ -4325,21 +4502,40 @@ function setPdfScale(nextScale) {
   localStorage.setItem("localleaf.pdfScale", String(local.pdfScale));
   updatePdfZoomUi();
   if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.zoom) {
-    window.LocalLeafPdfPreview.zoom(previewPane, {
+    Promise.resolve(window.LocalLeafPdfPreview.zoom(previewPane, {
       scale: local.pdfScale,
       scrollState
-    });
+    })).then(() => renderPdfReviewMarkers());
   } else if (previewPane && local.appState?.compile?.mode === "pdf" && window.LocalLeafPdfPreview?.remount) {
-    window.LocalLeafPdfPreview.remount(previewPane, {
+    Promise.resolve(window.LocalLeafPdfPreview.remount(previewPane, {
       scale: local.pdfScale,
       scrollState
-    });
+    })).then(() => renderPdfReviewMarkers());
   }
+}
+
+function updatePdfAnnotateUi() {
+  const button = document.querySelector("#pdfAnnotateButton");
+  if (button) {
+    button.classList.toggle("active", local.pdfAnnotateMode);
+    button.setAttribute("aria-pressed", local.pdfAnnotateMode ? "true" : "false");
+  }
+  document.querySelector("#previewPane")?.classList.toggle("pdf-annotate-active", local.pdfAnnotateMode);
+  if (!local.pdfAnnotateMode) removePdfAnnotationOutline();
+}
+
+function setPdfAnnotateMode(enabled, options = {}) {
+  local.pdfAnnotateMode = Boolean(enabled);
+  if (options.closePopover !== false) closePdfAnnotationPopover();
+  updatePdfAnnotateUi();
 }
 
 function bindPdfPreviewControls() {
   document.querySelector("#pdfZoomOut")?.addEventListener("click", () => setPdfScale(local.pdfScale - 0.1));
   document.querySelector("#pdfZoomIn")?.addEventListener("click", () => setPdfScale(local.pdfScale + 0.1));
+  document.querySelector("#pdfAnnotateButton")?.addEventListener("click", () => {
+    setPdfAnnotateMode(!local.pdfAnnotateMode);
+  });
 }
 
 function bindPdfWheelZoom() {
@@ -4351,6 +4547,663 @@ function bindPdfWheelZoom() {
     event.preventDefault();
     setPdfScale(local.pdfScale + (event.deltaY < 0 ? 0.1 : -0.1));
   }, { passive: false });
+}
+
+function bindPdfPreviewInteractions() {
+  const previewPane = document.querySelector("#previewPane");
+  if (!previewPane || previewPane.dataset.pdfClickBound === "1") return;
+  previewPane.dataset.pdfClickBound = "1";
+  previewPane.addEventListener("click", handlePdfPreviewClick);
+  previewPane.addEventListener("dblclick", handlePdfPreviewDoubleClick);
+  previewPane.addEventListener("pointermove", handlePdfAnnotationPointerMove, { passive: true });
+  previewPane.addEventListener("pointerleave", () => {
+    if (!local.pdfAnnotationPopover) removePdfAnnotationOutline();
+  }, { passive: true });
+  updatePdfAnnotateUi();
+}
+
+function pdfClickTarget(event) {
+  const page = event.target.closest?.(".pdf-page[data-page-number]");
+  if (!page) return null;
+  const rect = page.getBoundingClientRect();
+  const pageNumber = Number(page.dataset.pageNumber || 1);
+  const targetPreview = pdfAnnotationTargetAtPoint(page, event.clientX, event.clientY);
+  const x = Math.max(0, (event.clientX - rect.left) / Math.max(0.1, local.pdfScale));
+  const y = Math.max(0, (event.clientY - rect.top) / Math.max(0.1, local.pdfScale));
+  return {
+    page: pageNumber,
+    x,
+    y,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    elementType: targetPreview?.type || (targetPreview?.textPreview ? "text" : "page-area"),
+    targetRect: targetPreview?.outline || null,
+    textPreview: targetPreview?.textPreview || pdfTextPreviewAtPoint(page, event.clientX, event.clientY),
+    outline: targetPreview?.outline || null
+  };
+}
+
+function fileExtension(filePath = "") {
+  const name = String(filePath || "").split(/[\\/]/u).pop() || "";
+  const index = name.lastIndexOf(".");
+  return index >= 0 ? name.slice(index).toLowerCase() : "";
+}
+
+function supportsVisualEditor(filePath = local.selectedFile) {
+  return fileExtension(filePath) === ".tex";
+}
+
+function editorModeStorageMap() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(EDITOR_MODE_STORAGE_KEY) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function editorModeStorageId(filePath = local.selectedFile) {
+  const projectId = local.appState?.project?.id || local.appState?.project?.root || "project";
+  return `${projectId}:${filePath || ""}`;
+}
+
+function readEditorModeForFile(filePath = local.selectedFile) {
+  if (!supportsVisualEditor(filePath)) return "code";
+  const map = editorModeStorageMap();
+  const stored = map[editorModeStorageId(filePath)] || localStorage.getItem("localleaf.editorMode");
+  return stored === "visual" ? "visual" : "code";
+}
+
+function writeEditorModeForFile(filePath = local.selectedFile, mode = "code") {
+  const nextMode = mode === "visual" && supportsVisualEditor(filePath) ? "visual" : "code";
+  const map = editorModeStorageMap();
+  map[editorModeStorageId(filePath)] = nextMode;
+  localStorage.setItem(EDITOR_MODE_STORAGE_KEY, JSON.stringify(map));
+  localStorage.setItem("localleaf.editorMode", nextMode);
+}
+
+function pdfTextPreviewAtPoint(page, clientX, clientY) {
+  const spans = Array.from(page.querySelectorAll(".pdf-text-layer span, .textLayer span"));
+  const nearby = spans.filter((span) => {
+    const rect = span.getBoundingClientRect();
+    return rect.bottom >= clientY - 18 && rect.top <= clientY + 18 && rect.right >= clientX - 90 && rect.left <= clientX + 90;
+  }).map((span) => String(span.textContent || "").trim()).filter(Boolean);
+  return nearby.join(" ").replace(/\s+/g, " ").trim().slice(0, 220);
+}
+
+function pdfAnnotationSpanRecords(page) {
+  const pageRect = page.getBoundingClientRect();
+  return Array.from(page.querySelectorAll(".pdf-text-layer span, .textLayer span"))
+    .map((span) => {
+      const text = String(span.textContent || "").replace(/\s+/g, " ").trim();
+      const rect = span.getBoundingClientRect();
+      if (!text || rect.width < 1 || rect.height < 1) return null;
+      return {
+        span,
+        text,
+        left: rect.left - pageRect.left,
+        top: rect.top - pageRect.top,
+        right: rect.right - pageRect.left,
+        bottom: rect.bottom - pageRect.top,
+        width: rect.width,
+        height: rect.height,
+        centerX: rect.left - pageRect.left + rect.width / 2,
+        centerY: rect.top - pageRect.top + rect.height / 2,
+        clientLeft: rect.left,
+        clientTop: rect.top,
+        clientRight: rect.right,
+        clientBottom: rect.bottom
+      };
+    })
+    .filter(Boolean);
+}
+
+function unionPdfRects(records) {
+  const left = Math.min(...records.map((item) => item.left));
+  const top = Math.min(...records.map((item) => item.top));
+  const right = Math.max(...records.map((item) => item.right));
+  const bottom = Math.max(...records.map((item) => item.bottom));
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function groupPdfAnnotationLines(records) {
+  const sorted = [...records].sort((left, right) => left.centerY - right.centerY || left.left - right.left);
+  const lines = [];
+  sorted.forEach((record) => {
+    const last = lines.at(-1);
+    const tolerance = Math.max(5, Math.min(14, record.height * 0.72));
+    if (last && Math.abs(last.centerY - record.centerY) <= tolerance) {
+      last.records.push(record);
+      const rect = unionPdfRects(last.records);
+      Object.assign(last, rect, {
+        centerY: last.records.reduce((sum, item) => sum + item.centerY, 0) / last.records.length,
+        text: last.records.sort((left, right) => left.left - right.left).map((item) => item.text).join(" ")
+      });
+      return;
+    }
+    lines.push({
+      records: [record],
+      ...unionPdfRects([record]),
+      centerY: record.centerY,
+      text: record.text
+    });
+  });
+  return lines;
+}
+
+function horizontalOverlapRatio(left, right) {
+  const overlap = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+  return overlap / Math.max(1, Math.min(left.width, right.width));
+}
+
+function pdfFallbackAnnotationOutline(page, clientX, clientY) {
+  const pageRect = page.getBoundingClientRect();
+  const width = Math.min(220, Math.max(120, pageRect.width * 0.28));
+  const height = Math.min(120, Math.max(72, pageRect.height * 0.1));
+  return {
+    left: Math.max(8, Math.min(pageRect.width - width - 8, clientX - pageRect.left - width / 2)),
+    top: Math.max(8, Math.min(pageRect.height - height - 8, clientY - pageRect.top - height / 2)),
+    width,
+    height
+  };
+}
+
+function isPdfCanvasInk(data, index) {
+  const red = data[index];
+  const green = data[index + 1];
+  const blue = data[index + 2];
+  const alpha = data[index + 3];
+  if (alpha <= 24) return false;
+  const darkest = Math.min(red, green, blue);
+  const lightest = Math.max(red, green, blue);
+  return darkest < 242 || lightest - darkest > 18;
+}
+
+function pdfCanvasInkComponents(page) {
+  const canvas = page.querySelector(".pdf-page-canvas");
+  const context = canvas?.getContext?.("2d", { willReadFrequently: true });
+  if (!canvas || !context || !canvas.width || !canvas.height) return [];
+  const key = `${canvas.width}x${canvas.height}`;
+  if (canvas.__localLeafInkTargetKey === key && Array.isArray(canvas.__localLeafInkTargets)) {
+    return canvas.__localLeafInkTargets;
+  }
+
+  let image;
+  try {
+    image = context.getImageData(0, 0, canvas.width, canvas.height);
+  } catch {
+    return [];
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / Math.max(1, rect.width);
+  const scaleY = canvas.height / Math.max(1, rect.height);
+  const step = Math.max(5, Math.round(Math.min(scaleX, scaleY) * 4));
+  const cols = Math.ceil(canvas.width / step);
+  const rows = Math.ceil(canvas.height / step);
+  const mask = new Uint8Array(cols * rows);
+  const visited = new Uint8Array(cols * rows);
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const pixelX = Math.min(canvas.width - 1, col * step + Math.floor(step / 2));
+      const pixelY = Math.min(canvas.height - 1, row * step + Math.floor(step / 2));
+      const index = (pixelY * canvas.width + pixelX) * 4;
+      if (isPdfCanvasInk(image.data, index)) mask[row * cols + col] = 1;
+    }
+  }
+
+  const components = [];
+  const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const startIndex = row * cols + col;
+      if (!mask[startIndex] || visited[startIndex]) continue;
+      const stack = [[col, row]];
+      visited[startIndex] = 1;
+      let minCol = col;
+      let maxCol = col;
+      let minRow = row;
+      let maxRow = row;
+      let cells = 0;
+      while (stack.length) {
+        const [currentCol, currentRow] = stack.pop();
+        cells += 1;
+        minCol = Math.min(minCol, currentCol);
+        maxCol = Math.max(maxCol, currentCol);
+        minRow = Math.min(minRow, currentRow);
+        maxRow = Math.max(maxRow, currentRow);
+        for (const [dx, dy] of neighbors) {
+          const nextCol = currentCol + dx;
+          const nextRow = currentRow + dy;
+          if (nextCol < 0 || nextRow < 0 || nextCol >= cols || nextRow >= rows) continue;
+          const nextIndex = nextRow * cols + nextCol;
+          if (!mask[nextIndex] || visited[nextIndex]) continue;
+          visited[nextIndex] = 1;
+          stack.push([nextCol, nextRow]);
+        }
+      }
+      const left = (minCol * step) / scaleX;
+      const top = (minRow * step) / scaleY;
+      const width = ((maxCol - minCol + 1) * step) / scaleX;
+      const height = ((maxRow - minRow + 1) * step) / scaleY;
+      if (cells < 14 || width < 28 || height < 22) continue;
+      components.push({ left, top, width, height, right: left + width, bottom: top + height, cells });
+    }
+  }
+
+  canvas.__localLeafInkTargetKey = key;
+  canvas.__localLeafInkTargets = components
+    .sort((left, right) => (right.width * right.height) - (left.width * left.height))
+    .slice(0, 80);
+  return canvas.__localLeafInkTargets;
+}
+
+function distanceToRect(pointX, pointY, rect) {
+  const dx = pointX < rect.left ? rect.left - pointX : pointX > rect.right ? pointX - rect.right : 0;
+  const dy = pointY < rect.top ? rect.top - pointY : pointY > rect.bottom ? pointY - rect.bottom : 0;
+  return Math.hypot(dx, dy);
+}
+
+function pdfCanvasAnnotationTargetAtPoint(page, clientX, clientY) {
+  const pageRect = page.getBoundingClientRect();
+  const x = clientX - pageRect.left;
+  const y = clientY - pageRect.top;
+  const components = pdfCanvasInkComponents(page);
+  const target = components
+    .map((component) => {
+      const padded = {
+        ...component,
+        left: component.left - 10,
+        top: component.top - 10,
+        right: component.right + 10,
+        bottom: component.bottom + 10
+      };
+      const contains = x >= padded.left && x <= padded.right && y >= padded.top && y <= padded.bottom;
+      return {
+        component,
+        contains,
+        distance: distanceToRect(x, y, padded)
+      };
+    })
+    .filter((item) => item.contains || item.distance <= 28)
+    .sort((left, right) => Number(right.contains) - Number(left.contains) || left.distance - right.distance || right.component.cells - left.component.cells)[0]?.component;
+  if (!target) return null;
+  const pad = 8;
+  const left = Math.max(4, target.left - pad);
+  const top = Math.max(4, target.top - pad);
+  return {
+    type: "image",
+    textPreview: "Image or figure region selected.",
+    outline: {
+      left,
+      top,
+      width: Math.min(pageRect.width - left - 4, target.width + pad * 2),
+      height: Math.min(pageRect.height - top - 4, target.height + pad * 2)
+    }
+  };
+}
+
+function pdfAnnotationTargetAtPoint(page, clientX, clientY) {
+  const records = pdfAnnotationSpanRecords(page);
+  if (!records.length) {
+    return pdfCanvasAnnotationTargetAtPoint(page, clientX, clientY) || {
+      type: "page-area",
+      outline: pdfFallbackAnnotationOutline(page, clientX, clientY),
+      textPreview: ""
+    };
+  }
+  const anchor = records
+    .map((record) => {
+      const inside = clientX >= record.clientLeft - 5 && clientX <= record.clientRight + 5 && clientY >= record.clientTop - 7 && clientY <= record.clientBottom + 7;
+      const dx = clientX < record.clientLeft ? record.clientLeft - clientX : clientX > record.clientRight ? clientX - record.clientRight : 0;
+      const dy = clientY < record.clientTop ? record.clientTop - clientY : clientY > record.clientBottom ? clientY - record.clientBottom : 0;
+      return { record, inside, distance: Math.hypot(dx, dy) };
+    })
+    .filter((item) => item.inside || item.distance <= 32)
+    .sort((left, right) => Number(right.inside) - Number(left.inside) || left.distance - right.distance)[0]?.record;
+  if (!anchor) {
+    return pdfCanvasAnnotationTargetAtPoint(page, clientX, clientY) || {
+      type: "page-area",
+      outline: pdfFallbackAnnotationOutline(page, clientX, clientY),
+      textPreview: ""
+    };
+  }
+
+  const lines = groupPdfAnnotationLines(records);
+  const anchorLineIndex = Math.max(0, lines.findIndex((line) => line.records.includes(anchor)));
+  const selected = [lines[anchorLineIndex]];
+  const avgHeight = Math.max(8, records.reduce((sum, item) => sum + item.height, 0) / records.length);
+  const maxGap = Math.max(14, avgHeight * 1.55);
+  const anchorLine = lines[anchorLineIndex];
+
+  for (let index = anchorLineIndex - 1; index >= 0 && selected.length < 10; index -= 1) {
+    const line = lines[index];
+    const below = lines[index + 1];
+    const gap = below.top - line.bottom;
+    if (gap > maxGap || horizontalOverlapRatio(line, anchorLine) < 0.16) break;
+    selected.unshift(line);
+  }
+  for (let index = anchorLineIndex + 1; index < lines.length && selected.length < 10; index += 1) {
+    const line = lines[index];
+    const above = lines[index - 1];
+    const gap = line.top - above.bottom;
+    if (gap > maxGap || horizontalOverlapRatio(line, anchorLine) < 0.16) break;
+    selected.push(line);
+  }
+
+  const pageRect = page.getBoundingClientRect();
+  const rect = unionPdfRects(selected);
+  const padX = 9;
+  const padY = 7;
+  const outline = {
+    left: Math.max(4, rect.left - padX),
+    top: Math.max(4, rect.top - padY),
+    width: Math.min(pageRect.width - Math.max(4, rect.left - padX) - 4, rect.width + padX * 2),
+    height: Math.min(pageRect.height - Math.max(4, rect.top - padY) - 4, rect.height + padY * 2)
+  };
+  return {
+    type: "text",
+    outline,
+    textPreview: selected.map((line) => line.text).join(" ").replace(/\s+/g, " ").trim().slice(0, 260)
+  };
+}
+
+function removePdfAnnotationOutline() {
+  document.querySelectorAll(".pdf-annotation-target-outline").forEach((element) => element.remove());
+}
+
+function renderPdfAnnotationOutline(target, options = {}) {
+  const page = document.querySelector(`.pdf-page[data-page-number="${target?.page || ""}"]`);
+  const outline = target?.outline;
+  if (!page || !outline) {
+    removePdfAnnotationOutline();
+    return;
+  }
+  removePdfAnnotationOutline();
+  const marker = document.createElement("div");
+  marker.className = `pdf-annotation-target-outline ${options.selected ? "selected" : ""}`;
+  marker.style.left = `${Math.round(outline.left)}px`;
+  marker.style.top = `${Math.round(outline.top)}px`;
+  marker.style.width = `${Math.max(16, Math.round(outline.width))}px`;
+  marker.style.height = `${Math.max(16, Math.round(outline.height))}px`;
+  page.append(marker);
+}
+
+function removePdfReviewMarkers() {
+  document.querySelectorAll(".pdf-review-marker").forEach((element) => element.remove());
+}
+
+function renderPdfReviewMarkers() {
+  removePdfReviewMarkers();
+  if (local.appState?.compile?.mode !== "pdf") return;
+  const threads = reviewThreads().filter((thread) => thread.status !== "resolved" && thread.anchor?.kind === "pdf");
+  for (const thread of threads) {
+    const anchor = thread.anchor || {};
+    const page = document.querySelector(`.pdf-page[data-page-number="${anchor.page || ""}"]`);
+    if (!page) continue;
+    const rect = anchor.targetRect || null;
+    const marker = document.createElement("button");
+    marker.type = "button";
+    marker.className = `pdf-review-marker ${rect ? "has-rect" : "pin"}`;
+    marker.title = thread.messages?.[0]?.body || "Review comment";
+    marker.dataset.reviewThread = thread.id;
+    if (rect) {
+      marker.style.left = `${Math.round(rect.left)}px`;
+      marker.style.top = `${Math.round(rect.top)}px`;
+      marker.style.width = `${Math.max(18, Math.round(rect.width))}px`;
+      marker.style.height = `${Math.max(18, Math.round(rect.height))}px`;
+    } else {
+      marker.style.left = `${Math.max(8, Math.round((anchor.x || 0) * local.pdfScale) - 8)}px`;
+      marker.style.top = `${Math.max(8, Math.round((anchor.y || 0) * local.pdfScale) - 8)}px`;
+      marker.style.width = "18px";
+      marker.style.height = "18px";
+    }
+    marker.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      local.rightRailTab = "review";
+      localStorage.setItem("localleaf.rightRailTab", "review");
+      refreshRightRailUi();
+    });
+    page.append(marker);
+  }
+}
+
+function handlePdfAnnotationPointerMove(event) {
+  if (!local.pdfAnnotateMode || local.pdfAnnotationPopover || event.target.closest?.(".pdf-annotation-popover")) return;
+  const target = pdfClickTarget(event);
+  if (!target) {
+    removePdfAnnotationOutline();
+    return;
+  }
+  renderPdfAnnotationOutline(target);
+}
+
+async function resolvePdfClickSource(target) {
+  try {
+    return await api("/api/pdf/source-position", {
+      method: "POST",
+      body: {
+        page: target.page,
+        x: target.x,
+        y: target.y
+      }
+    });
+  } catch (error) {
+    return { ok: false, reason: error.message || "Could not map this PDF location." };
+  }
+}
+
+function offsetForLineColumn(text, line, column = 0) {
+  const lines = String(text || "").split(/\r?\n/u);
+  const lineIndex = Math.max(0, Math.min(lines.length - 1, Number(line || 1) - 1));
+  let offset = 0;
+  for (let index = 0; index < lineIndex; index += 1) {
+    offset += lines[index].length + 1;
+  }
+  return offset + Math.max(0, Math.min(lines[lineIndex]?.length || 0, Number(column || 0)));
+}
+
+function centerCodeEditorSelection() {
+  const scroller = document.querySelector(".code-panel .cm-scroller");
+  const target = document.querySelector(".code-panel .cm-activeLine") || document.querySelector(".code-panel .cm-cursor");
+  if (!scroller || !target) return;
+  const scrollerRect = scroller.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  if (!scrollerRect.height || !targetRect.height) return;
+  const targetMiddle = targetRect.top + targetRect.height / 2;
+  const scrollerMiddle = scrollerRect.top + scrollerRect.height / 2;
+  scroller.scrollTop += targetMiddle - scrollerMiddle;
+}
+
+async function jumpToPdfSource(source) {
+  if (!source?.ok || !source.path) {
+    return;
+  }
+  local.sourcePaneVisible = true;
+  localStorage.setItem("localleaf.sourcePaneVisible", "1");
+  setEditorMode("code");
+  await selectProjectFile(source.path);
+  setEditorMode("code");
+  requestAnimationFrame(() => {
+    const offset = offsetForLineColumn(local.editorContent, source.line, source.column || 0);
+    local.codeEditor?.selectRange?.(offset, offset);
+    local.codeEditor?.focus?.();
+    requestAnimationFrame(centerCodeEditorSelection);
+    setTimeout(centerCodeEditorSelection, 80);
+    document.querySelector(".code-panel")?.classList.add("source-jump-highlight");
+    setTimeout(() => document.querySelector(".code-panel")?.classList.remove("source-jump-highlight"), 1100);
+  });
+}
+
+async function handlePdfPreviewClick(event) {
+  if (event.target.closest?.(".pdf-annotation-popover")) return;
+  if (local.appState?.compile?.mode !== "pdf") return;
+  const target = pdfClickTarget(event);
+  if (!target) return;
+  if (local.pdfAnnotateMode) {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = await resolvePdfClickSource(target);
+    openPdfAnnotationPopover(target, source);
+    return;
+  }
+}
+
+async function handlePdfPreviewDoubleClick(event) {
+  if (event.target.closest?.(".pdf-annotation-popover")) return;
+  if (local.appState?.compile?.mode !== "pdf" || local.pdfAnnotateMode) return;
+  const target = pdfClickTarget(event);
+  if (!target) return;
+  event.preventDefault();
+  const source = await resolvePdfClickSource(target);
+  await jumpToPdfSource(source);
+}
+
+function closePdfAnnotationPopover() {
+  document.querySelector(".pdf-annotation-popover")?.remove();
+  local.pdfAnnotationPopover = null;
+}
+
+function openPdfAnnotationPopover(target, source) {
+  closePdfAnnotationPopover();
+  const previewPane = document.querySelector("#previewPane");
+  if (!previewPane) return;
+  const scrollTop = previewPane.scrollTop;
+  const scrollLeft = previewPane.scrollLeft;
+  const restoreAnnotationScroll = () => {
+    previewPane.scrollTop = scrollTop;
+    previewPane.scrollLeft = scrollLeft;
+  };
+  local.pdfAnnotationPopover = { target, source };
+  renderPdfAnnotationOutline(target, { selected: true });
+  const rect = previewPane.getBoundingClientRect();
+  const viewportLeft = target.clientX - rect.left + 10;
+  const viewportTop = target.clientY - rect.top + 10;
+  const left = previewPane.scrollLeft + Math.min(Math.max(12, viewportLeft), Math.max(12, rect.width - 330));
+  const top = previewPane.scrollTop + Math.min(Math.max(12, viewportTop), Math.max(12, rect.height - 250));
+  const location = source?.ok ? `${source.path}:${source.line}` : source?.reason || "No mapped source";
+  const targetLabel = target.elementType === "image" ? "Image / figure" : target.elementType === "text" ? "Text" : "PDF area";
+  const popover = document.createElement("form");
+  popover.className = "pdf-annotation-popover";
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+  popover.innerHTML = `
+    <div class="pdf-annotation-head">
+      <strong>Ask AI about this spot</strong>
+      <button type="button" data-close-pdf-annotation aria-label="Close annotation">x</button>
+    </div>
+    <div class="pdf-annotation-meta">
+      <span>Page ${escapeHtml(String(target.page))}</span>
+      <span>${escapeHtml(targetLabel)}</span>
+      <span>${escapeHtml(location)}</span>
+    </div>
+    ${target.textPreview ? `<p class="pdf-annotation-preview">${escapeHtml(target.textPreview)}</p>` : ""}
+    <textarea id="pdfAnnotationText" rows="3" placeholder="What should LocalLeaf AI change here?"></textarea>
+    <div class="pdf-annotation-actions">
+      <button type="button" data-cancel-pdf-annotation>Cancel</button>
+      <button type="button" data-save-pdf-review>Save comment</button>
+      <button type="submit">Send to AI</button>
+    </div>
+  `;
+  previewPane.append(popover);
+  const input = popover.querySelector("#pdfAnnotationText");
+  requestAnimationFrame(() => {
+    input?.focus?.({ preventScroll: true });
+    restoreAnnotationScroll();
+  });
+  setTimeout(restoreAnnotationScroll, 80);
+  setTimeout(restoreAnnotationScroll, 220);
+  popover.querySelector("[data-close-pdf-annotation]")?.addEventListener("click", () => {
+    setPdfAnnotateMode(false);
+  });
+  popover.querySelector("[data-cancel-pdf-annotation]")?.addEventListener("click", () => {
+    setPdfAnnotateMode(false);
+  });
+  popover.querySelector("[data-save-pdf-review]")?.addEventListener("click", () => {
+    submitPdfReviewThread();
+  });
+  popover.addEventListener("submit", (submitEvent) => {
+    submitEvent.preventDefault();
+    submitPdfAnnotation();
+  });
+}
+
+function submitPdfAnnotation() {
+  const popover = document.querySelector(".pdf-annotation-popover");
+  const instruction = String(popover?.querySelector("#pdfAnnotationText")?.value || "").trim();
+  if (!instruction || !local.pdfAnnotationPopover) return;
+  const { target, source } = local.pdfAnnotationPopover;
+  const contextLines = [
+    instruction,
+    "",
+    `PDF annotation: page ${target.page}, x ${Math.round(target.x)}, y ${Math.round(target.y)}.`,
+    `Selected PDF element: ${target.elementType || "page-area"}.`,
+    target.targetRect ? `Selected PDF rectangle: left ${Math.round(target.targetRect.left)}, top ${Math.round(target.targetRect.top)}, width ${Math.round(target.targetRect.width)}, height ${Math.round(target.targetRect.height)}.` : "",
+    source?.ok ? `Mapped source: ${source.path}:${source.line}${source.column ? `:${source.column}` : ""}.` : `Mapped source: ${source?.reason || "not available"}.`,
+    target.textPreview ? `Clicked PDF context: "${target.textPreview}".` : ""
+  ].filter(Boolean);
+  setPdfAnnotateMode(false);
+  local.rightRailTab = "ai";
+  localStorage.setItem("localleaf.rightRailTab", "ai");
+  askAiHelper(contextLines.join("\n"), {
+    path: source?.ok ? source.path : local.selectedFile,
+    selectedText: target.textPreview || "",
+    pdfAnnotation: {
+      page: target.page,
+      x: Math.round(target.x),
+      y: Math.round(target.y),
+      elementType: target.elementType || "page-area",
+      targetRect: target.targetRect ? {
+        left: Math.round(target.targetRect.left),
+        top: Math.round(target.targetRect.top),
+        width: Math.round(target.targetRect.width),
+        height: Math.round(target.targetRect.height)
+      } : null,
+      textPreview: target.textPreview || "",
+      source: source?.ok ? { path: source.path, line: source.line, column: source.column || 0 } : null
+    }
+  });
+}
+
+async function submitPdfReviewThread() {
+  const popover = document.querySelector(".pdf-annotation-popover");
+  const body = String(popover?.querySelector("#pdfAnnotationText")?.value || "").trim();
+  if (!body || !local.pdfAnnotationPopover) return;
+  const { target, source } = local.pdfAnnotationPopover;
+  try {
+    const result = await api("/api/review/threads", {
+      method: "POST",
+      body: {
+        body,
+        title: body.slice(0, 120),
+        anchor: {
+          kind: "pdf",
+          page: target.page,
+          x: Math.round(target.x),
+          y: Math.round(target.y),
+          targetRect: target.targetRect ? {
+            left: Math.round(target.targetRect.left),
+            top: Math.round(target.targetRect.top),
+            width: Math.round(target.targetRect.width),
+            height: Math.round(target.targetRect.height)
+          } : null,
+          textPreview: target.textPreview || "",
+          source: source?.ok ? { path: source.path, line: source.line, column: source.column || 0 } : null,
+          compileVersion: local.appState?.compile?.version || 0
+        }
+      }
+    });
+    local.appState.review = { ...(local.appState.review || {}), threads: result.threads || [] };
+    setPdfAnnotateMode(false);
+    local.rightRailTab = "review";
+    localStorage.setItem("localleaf.rightRailTab", "review");
+    refreshRightRailUi();
+    renderPdfReviewMarkers();
+  } catch (error) {
+    showAppNotice(error.message || "Could not save the review comment.", { title: "Review" });
+  }
 }
 
 function editorShellClasses() {
@@ -4531,9 +5384,11 @@ function chatMessageMarkup(message) {
 }
 
 function rightRailTabsMarkup() {
+  const openReviewCount = (local.appState?.review?.threads || []).filter((thread) => thread.status !== "resolved").length;
   const tabs = [
     ["chat", "Chat", ""],
     ["ai", "AI Helper", ""],
+    ["review", "Review", openReviewCount ? String(openReviewCount) : ""],
     ["changes", "Changes", aiPendingCount() ? String(aiPendingCount()) : ""]
   ];
   return `
@@ -4597,7 +5452,7 @@ function aiProposalDiffMarkup(proposal, options = {}) {
   if (!expanded) return "";
   const hunks = Array.isArray(proposal.diffHunks) ? proposal.diffHunks : [];
   if (hunks.length) {
-    const lines = hunks.flatMap((hunk) => hunk.lines || []).slice(0, 80);
+    const lines = hunks.flatMap((hunk) => hunk.lines || []);
     return `
       <pre class="ai-diff-preview">${lines.map((line) => {
         const marker = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
@@ -4606,7 +5461,7 @@ function aiProposalDiffMarkup(proposal, options = {}) {
     `;
   }
   const newText = String(proposal.newText || proposal.replacements?.[0]?.text || "");
-  const lines = newText.split(/\r?\n/).filter(Boolean).slice(-8);
+  const lines = newText.split(/\r?\n/).filter(Boolean);
   return `
     <pre class="ai-diff-preview">${lines.map((line) => `<span class="diff-added">+ ${escapeHtml(line)}</span>`).join("\n") || `<span>Preview unavailable</span>`}</pre>
   `;
@@ -4803,24 +5658,92 @@ function aiQueuedPromptStripMarkup() {
   `;
 }
 
+function aiSessionDateLabel(timestamp) {
+  const date = new Date(timestamp || Date.now());
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  const sameDay = (left, right) => left.toDateString() === right.toDateString();
+  if (sameDay(date, today)) return "Today";
+  if (sameDay(date, yesterday)) return "Yesterday";
+  return "Earlier";
+}
+
+function aiSessionTimeLabel(timestamp) {
+  const date = new Date(timestamp || Date.now());
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function aiSessionStatusPill(session) {
+  if (session.id === local.aiCurrentSessionId) return `<span class="ai-session-status active">Active</span>`;
+  if (Number(session.changeCount || 0) > 0) return `<span class="ai-session-status changed">Changed</span>`;
+  if (session.parentSessionId) return `<span class="ai-session-status forked">Fork</span>`;
+  return "";
+}
+
+function aiSessionRowsMarkup(sessions) {
+  if (!sessions.length) return `<div class="ai-session-empty">No sessions match this project search.</div>`;
+  const groups = sessions.reduce((map, session) => {
+    const label = aiSessionDateLabel(session.updatedAt || session.createdAt);
+    if (!map.has(label)) map.set(label, []);
+    map.get(label).push(session);
+    return map;
+  }, new Map());
+  return [...groups.entries()].map(([label, items]) => `
+    <div class="ai-session-menu-label">${escapeHtml(label)}</div>
+    ${items.map((session) => {
+      const active = session.id === local.aiCurrentSessionId;
+      return `
+        <div class="ai-session-menu-row ${active ? "active" : ""}">
+          <button type="button" role="menuitem" data-ai-session="${escapeHtml(session.id)}">
+            <span class="ai-session-row-top">
+              <strong>${escapeHtml(session.title || "New session")}</strong>
+              ${aiSessionStatusPill(session)}
+              <time>${escapeHtml(aiSessionTimeLabel(session.updatedAt || session.createdAt))}</time>
+            </span>
+            <span class="ai-session-preview">${escapeHtml(session.lastPreview || sessionPreviewFromMessages(session.messages || []))}</span>
+          </button>
+          <div class="ai-session-row-actions">
+            <button type="button" data-rename-ai-session="${escapeHtml(session.id)}" title="Rename session" aria-label="Rename ${escapeHtml(session.title || "session")}">${editorToolIcon("edit")}</button>
+            <button type="button" data-fork-ai-session="${escapeHtml(session.id)}" title="Fork session" aria-label="Fork ${escapeHtml(session.title || "session")}">Fork</button>
+            <button type="button" data-delete-ai-session="${escapeHtml(session.id)}" title="Delete session" aria-label="Delete ${escapeHtml(session.title || "session")}">${editorToolIcon("delete")}</button>
+          </div>
+        </div>
+      `;
+    }).join("")}
+  `).join("");
+}
+
 function aiSessionMenuMarkup() {
-  const sessions = local.aiSessions.slice(0, 8);
+  const query = local.aiSessionSearch.trim().toLowerCase();
+  const sessions = local.aiSessions
+    .filter((session) => {
+      if (!query) return true;
+      return `${session.title || ""} ${session.lastPreview || ""}`.toLowerCase().includes(query);
+    })
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
+    .slice(0, 30);
+  const projectName = local.aiSessionsProjectName || local.appState?.project?.name || "Current project";
   return `
     <div class="ai-session-picker ${local.aiSessionMenuOpen ? "open" : ""}">
       <button class="ai-session-plus" id="aiSessionMenuButton" type="button" title="AI sessions" aria-label="AI sessions" aria-expanded="${local.aiSessionMenuOpen ? "true" : "false"}">${uiGlyph("plus")}</button>
       ${local.aiSessionMenuOpen ? `
         <div class="ai-session-menu" role="menu">
+          <div class="ai-session-menu-head">
+            <span class="ai-session-project-icon">${editorToolIcon("files")}</span>
+            <strong>${escapeHtml(projectName)}</strong>
+            <span>Project</span>
+          </div>
           <button type="button" class="ai-session-new" data-ai-session-new role="menuitem">${uiGlyph("plus")} New session</button>
-          <div class="ai-session-menu-label">Recent sessions</div>
-          ${sessions.map((session) => `
-            <div class="ai-session-menu-row ${session.id === local.aiCurrentSessionId ? "active" : ""}">
-              <button type="button" role="menuitem" data-ai-session="${escapeHtml(session.id)}">
-                <strong>${escapeHtml(session.title || "New session")}</strong>
-                <span>${new Date(session.updatedAt || session.createdAt || Date.now()).toLocaleDateString()}</span>
-              </button>
-              <button type="button" class="ai-session-delete" data-delete-ai-session="${escapeHtml(session.id)}" title="Delete session" aria-label="Delete ${escapeHtml(session.title || "session")}">x</button>
-            </div>
-          `).join("")}
+          <input id="aiSessionSearch" class="ai-session-search" value="${escapeHtml(local.aiSessionSearch)}" placeholder="Search sessions" autocomplete="off" />
+          <div class="ai-session-scroll">
+            ${aiSessionRowsMarkup(sessions)}
+          </div>
+          <div class="ai-session-menu-foot">${editorToolIcon("complete")} Sessions are saved for this project</div>
         </div>
       ` : ""}
     </div>
@@ -4961,12 +5884,177 @@ function changesPanelMarkup() {
   `;
 }
 
+function reviewThreads() {
+  return Array.isArray(local.appState?.review?.threads) ? local.appState.review.threads : [];
+}
+
+function reviewAnchorLabel(thread = {}) {
+  const anchor = thread.anchor || {};
+  const source = anchor.source || {};
+  if (source.path) return `${source.path}${source.line ? `:${source.line}` : ""}`;
+  if (anchor.kind === "pdf" && anchor.page) return `PDF page ${anchor.page}`;
+  if (anchor.kind === "diagnostic") return "Compile diagnostic";
+  return "Project review";
+}
+
+function reviewThreadMessageMarkup(message = {}) {
+  return `
+    <div class="review-thread-message">
+      <strong>${escapeHtml(message.author?.userName || "Reviewer")}</strong>
+      <span>${escapeHtml(formatAiTime(message.createdAt))}</span>
+      <p>${escapeHtml(message.body || "")}</p>
+    </div>
+  `;
+}
+
+function reviewThreadMarkup(thread) {
+  const resolved = thread.status === "resolved";
+  const firstMessage = thread.messages?.[0]?.body || thread.title || "Review comment";
+  const lastMessages = (thread.messages || []).slice(-2);
+  return `
+    <article class="review-thread-card ${resolved ? "resolved" : "open"}" data-review-thread="${escapeHtml(thread.id)}">
+      <div class="review-thread-head">
+        <div>
+          <strong>${escapeHtml(firstMessage.slice(0, 92))}</strong>
+          <span>${escapeHtml(reviewAnchorLabel(thread))}</span>
+        </div>
+        <b>${resolved ? "Resolved" : "Open"}</b>
+      </div>
+      ${thread.anchor?.textPreview ? `<p class="review-thread-preview">${escapeHtml(thread.anchor.textPreview)}</p>` : ""}
+      <div class="review-thread-messages">
+        ${lastMessages.map(reviewThreadMessageMarkup).join("")}
+      </div>
+      <form class="review-thread-reply" data-review-reply-form="${escapeHtml(thread.id)}">
+        <input name="reply" placeholder="Reply" ${resolved ? "disabled" : ""} />
+        <button class="btn" ${resolved ? "disabled" : ""}>Send</button>
+      </form>
+      <div class="review-thread-actions">
+        ${thread.anchor?.source?.path ? `<button class="btn" data-open-review-source="${escapeHtml(thread.id)}">Open source</button>` : ""}
+        ${resolved
+          ? `<button class="btn" data-reopen-review-thread="${escapeHtml(thread.id)}">Reopen</button>`
+          : `<button class="btn" data-resolve-review-thread="${escapeHtml(thread.id)}">Resolve</button>`}
+      </div>
+    </article>
+  `;
+}
+
+function diagnosticReviewItemMarkup(diagnostic) {
+  return `
+    <article class="review-diagnostic-card ${escapeHtml(diagnostic.severity)}">
+      <div>
+        <strong>${escapeHtml(diagnostic.severity === "error" ? "Compile error" : "Compile warning")}</strong>
+        <span>${escapeHtml(local.selectedFile || local.appState?.project?.mainFile || "main file")}:${escapeHtml(diagnostic.line || 1)}</span>
+      </div>
+      <p>${escapeHtml(diagnostic.message || "")}</p>
+      <button class="btn" data-open-diagnostic-line="${escapeHtml(String(diagnostic.line || 1))}">Open line</button>
+    </article>
+  `;
+}
+
+function reviewPanelMarkup() {
+  const threads = reviewThreads();
+  const openThreads = threads.filter((thread) => thread.status !== "resolved");
+  const resolvedThreads = threads.filter((thread) => thread.status === "resolved").slice(0, 12);
+  const diagnostics = compileDiagnosticsForFile(local.selectedFile);
+  return `
+    <section class="review-panel right-rail-panel ${local.rightRailTab === "review" ? "active" : ""}" ${local.rightRailTab === "review" ? "" : "hidden"}>
+      <div class="panel-head">
+        <strong>Review</strong>
+        <small>${openThreads.length} open</small>
+      </div>
+      <div class="review-panel-body">
+        <section class="review-section">
+          <div class="review-section-head">
+            <strong>Diagnostics</strong>
+            <span>${diagnostics.length}</span>
+          </div>
+          ${diagnostics.length ? diagnostics.map(diagnosticReviewItemMarkup).join("") : `<div class="chat-empty">Compile diagnostics will appear here after a failed or warning compile.</div>`}
+        </section>
+        <section class="review-section">
+          <div class="review-section-head">
+            <strong>Open comments</strong>
+            <span>${openThreads.length}</span>
+          </div>
+          ${openThreads.length ? openThreads.map(reviewThreadMarkup).join("") : `<div class="chat-empty">PDF and source review comments will appear here.</div>`}
+        </section>
+        ${resolvedThreads.length ? `
+          <section class="review-section">
+            <div class="review-section-head">
+              <strong>Resolved</strong>
+              <span>${resolvedThreads.length}</span>
+            </div>
+            ${resolvedThreads.map(reviewThreadMarkup).join("")}
+          </section>
+        ` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function findReviewThread(threadId) {
+  return reviewThreads().find((thread) => thread.id === threadId) || null;
+}
+
+async function openReviewThreadSource(threadId) {
+  const thread = findReviewThread(threadId);
+  const source = thread?.anchor?.source;
+  if (!source?.path) return;
+  const previewScroll = capturePreviewScroll();
+  local.sourcePaneVisible = true;
+  localStorage.setItem("localleaf.sourcePaneVisible", "1");
+  setEditorMode("code");
+  await selectProjectFile(source.path);
+  setEditorMode("code");
+  requestAnimationFrame(() => {
+    const offset = offsetForLineColumn(local.editorContent, source.line || 1, source.column || 0);
+    local.codeEditor?.selectRange?.(offset, offset);
+    local.codeEditor?.focus?.();
+    requestAnimationFrame(centerCodeEditorSelection);
+    setTimeout(centerCodeEditorSelection, 80);
+  });
+  restorePreviewScroll(previewScroll);
+}
+
+async function setReviewThreadStatus(threadId, status) {
+  const endpoint = status === "resolved" ? "/api/review/threads/resolve" : "/api/review/threads/reopen";
+  try {
+    const result = await api(endpoint, { method: "POST", body: { threadId } });
+    local.appState.review = { ...(local.appState.review || {}), threads: result.threads || [] };
+    refreshRightRailUi();
+    renderPdfReviewMarkers();
+  } catch (error) {
+    showAppNotice(error.message || "Could not update the review thread.", { title: "Review" });
+  }
+}
+
+async function replyToReviewThread(threadId, body) {
+  const message = String(body || "").trim();
+  if (!message) return;
+  try {
+    const result = await api("/api/review/threads/reply", { method: "POST", body: { threadId, body: message } });
+    local.appState.review = { ...(local.appState.review || {}), threads: result.threads || [] };
+    refreshRightRailUi();
+  } catch (error) {
+    showAppNotice(error.message || "Could not save the review reply.", { title: "Review" });
+  }
+}
+
+async function openDiagnosticLine(lineNumber) {
+  const line = Math.max(1, Number(lineNumber || 1));
+  const offset = offsetForLineColumn(local.editorContent, line, 0);
+  setEditorMode("code");
+  local.codeEditor?.selectRange?.(offset, offset);
+  local.codeEditor?.focus?.();
+  requestAnimationFrame(centerCodeEditorSelection);
+}
+
 function rightRailMarkup() {
   return `
     <aside class="right-rail">
       ${rightRailTabsMarkup()}
       ${chatRailPanelMarkup()}
       ${aiHelperPanelMarkup()}
+      ${reviewPanelMarkup()}
       ${changesPanelMarkup()}
     </aside>
   `;
@@ -4982,11 +6070,13 @@ function refreshRightRailUi() {
   const aiScroll = previousAiList?.scrollTop || 0;
   const shouldStickToLatest = local.aiForceScrollBottom || local.aiChatPinnedToBottom || isAiChatNearBottom(previousAiList);
   const changesScroll = rail.querySelector(".change-history-list")?.scrollTop || 0;
+  const reviewScroll = rail.querySelector(".review-panel-body")?.scrollTop || 0;
   rail.outerHTML = rightRailMarkup();
   bindRightRailControls();
   bindChatForm();
   const nextAiList = document.querySelector(".ai-chat-list");
   const nextChangesList = document.querySelector(".change-history-list");
+  const nextReviewList = document.querySelector(".review-panel-body");
   if (nextAiList) {
     if (local.rightRailTab === "ai" && shouldStickToLatest) {
       requestAnimationFrame(() => scrollAiChatToBottom());
@@ -4996,11 +6086,12 @@ function refreshRightRailUi() {
     }
   }
   if (nextChangesList) nextChangesList.scrollTop = changesScroll;
+  if (nextReviewList) nextReviewList.scrollTop = reviewScroll;
   local.aiForceScrollBottom = false;
 }
 
 function setRightRailTab(tab) {
-  local.rightRailTab = ["chat", "ai", "changes"].includes(tab) ? tab : "chat";
+  local.rightRailTab = ["chat", "ai", "review", "changes"].includes(tab) ? tab : "chat";
   localStorage.setItem("localleaf.rightRailTab", local.rightRailTab);
   if (local.rightRailTab === "ai") local.aiForceScrollBottom = true;
   refreshRightRailUi();
@@ -5235,11 +6326,13 @@ async function askAiHelper(message, options = {}) {
       signal: controller.signal,
       body: {
         runId: options.steer ? local.aiActiveRunId : runId,
+        sessionId: local.aiCurrentSessionId,
         queuedPromptId: options.queuedPrompt?.id || "",
         message: prompt,
-        path: options.queuedPrompt?.path || local.selectedFile,
+        path: options.path || options.queuedPrompt?.path || local.selectedFile,
         currentText: currentEditorText(),
-        selectedText: options.queuedPrompt?.selectedText || selectedEditorText(),
+        selectedText: options.selectedText || options.queuedPrompt?.selectedText || selectedEditorText(),
+        pdfAnnotation: options.pdfAnnotation || null,
         compileLogs: local.appState?.compile?.logs || [],
         conversation: local.aiMessages.slice(-12).map((item) => ({
           role: item.role,
@@ -5677,6 +6770,7 @@ function bindRightRailControls() {
   document.querySelector("#aiModelChip")?.addEventListener("click", () => {
     local.aiModelPickerOpen = !local.aiModelPickerOpen;
     local.aiSessionMoreMenuOpen = false;
+    local.aiSessionMenuOpen = false;
     refreshRightRailUi();
   });
   document.querySelector("#aiPermissionModeButton")?.addEventListener("click", () => {
@@ -5716,7 +6810,17 @@ function bindRightRailControls() {
   document.querySelector("#aiSessionMenuButton")?.addEventListener("click", () => {
     local.aiSessionMenuOpen = !local.aiSessionMenuOpen;
     local.aiSessionMoreMenuOpen = false;
+    local.aiModelPickerOpen = false;
     refreshRightRailUi();
+  });
+  document.querySelector("#aiSessionSearch")?.addEventListener("input", (event) => {
+    local.aiSessionSearch = event.currentTarget.value;
+    refreshRightRailUi();
+    setTimeout(() => {
+      const input = document.querySelector("#aiSessionSearch");
+      input?.focus();
+      input?.setSelectionRange?.(input.value.length, input.value.length);
+    }, 0);
   });
   document.querySelectorAll("[data-edit-queued-ai-prompt]").forEach((button) => {
     button.addEventListener("click", () => editQueuedAiPrompt(button.dataset.editQueuedAiPrompt));
@@ -5751,6 +6855,18 @@ function bindRightRailControls() {
   document.querySelector("[data-ai-session-new]")?.addEventListener("click", startNewAiSession);
   document.querySelectorAll("[data-ai-session]").forEach((button) => {
     button.addEventListener("click", () => switchAiSession(button.dataset.aiSession));
+  });
+  document.querySelectorAll("[data-rename-ai-session]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      renameAiSession(button.dataset.renameAiSession);
+    });
+  });
+  document.querySelectorAll("[data-fork-ai-session]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      forkAiSession(button.dataset.forkAiSession);
+    });
   });
   document.querySelectorAll("[data-delete-ai-session]").forEach((button) => {
     button.addEventListener("click", (event) => {
@@ -5808,6 +6924,25 @@ function bindRightRailControls() {
   });
   document.querySelectorAll("[data-review-ai-run]").forEach((button) => {
     button.addEventListener("click", () => reviewAiRun(button.dataset.reviewAiRun));
+  });
+  document.querySelectorAll("[data-open-review-source]").forEach((button) => {
+    button.addEventListener("click", () => openReviewThreadSource(button.dataset.openReviewSource));
+  });
+  document.querySelectorAll("[data-resolve-review-thread]").forEach((button) => {
+    button.addEventListener("click", () => setReviewThreadStatus(button.dataset.resolveReviewThread, "resolved"));
+  });
+  document.querySelectorAll("[data-reopen-review-thread]").forEach((button) => {
+    button.addEventListener("click", () => setReviewThreadStatus(button.dataset.reopenReviewThread, "open"));
+  });
+  document.querySelectorAll("[data-open-diagnostic-line]").forEach((button) => {
+    button.addEventListener("click", () => openDiagnosticLine(button.dataset.openDiagnosticLine));
+  });
+  document.querySelectorAll("[data-review-reply-form]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const input = form.querySelector("input[name='reply']");
+      replyToReviewThread(form.dataset.reviewReplyForm, input?.value || "");
+    });
   });
   document.querySelectorAll("[data-undo-ai-run]").forEach((button) => {
     button.addEventListener("click", () => undoAiRun(button.dataset.undoAiRun));
@@ -5922,8 +7057,10 @@ async function selectProjectFile(filePath) {
   local.saveStatus = "Saved";
   if (isEditableFile(item)) {
     await loadSelectedFile();
+    local.editorMode = readEditorModeForFile(filePath);
   } else {
     local.editorContent = "";
+    local.editorMode = "code";
   }
   updateEditorSourceUi();
   updateSidebarUi();
@@ -6058,6 +7195,8 @@ function editorView() {
 
 async function loadState() {
   local.appState = await api("/api/state");
+  syncAiSessionsFromAppState();
+  await importLegacyAiSessionsForProject();
   syncAiProposalsFromAppState();
   if (!isGuestClient()) rememberRecentProject(local.appState.project);
   if (!local.guestToken && !new URLSearchParams(location.search).get("name")) {
@@ -6069,6 +7208,7 @@ async function loadState() {
   }
   if (local.selectedFile) {
     expandToFile(local.selectedFile);
+    local.editorMode = readEditorModeForFile(local.selectedFile);
   }
 }
 
@@ -6138,7 +7278,10 @@ function bindHome() {
 async function openRecentProject(projectRoot) {
   if (!projectRoot) return;
   try {
+    syncCurrentAiSession();
     local.appState = await api("/api/project/open", { method: "POST", body: { path: projectRoot } });
+    syncAiSessionsFromAppState();
+    await importLegacyAiSessionsForProject();
     rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
@@ -6151,7 +7294,10 @@ async function openRecentProject(projectRoot) {
 
 async function createNewProject() {
   try {
+    syncCurrentAiSession();
     local.appState = await api("/api/project/new", { method: "POST", body: {} });
+    syncAiSessionsFromAppState();
+    await importLegacyAiSessionsForProject();
     rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
@@ -6175,7 +7321,10 @@ async function openProjectPrompt() {
   const input = prompt("Enter a project folder path:", local.appState.project.root);
   if (!input) return;
   try {
+    syncCurrentAiSession();
     local.appState = await api("/api/project/open", { method: "POST", body: { path: input } });
+    syncAiSessionsFromAppState();
+    await importLegacyAiSessionsForProject();
     rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
@@ -6318,6 +7467,8 @@ async function importStagedHomeFiles() {
         files: payloadFiles
       })
     });
+    syncAiSessionsFromAppState();
+    await importLegacyAiSessionsForProject();
     rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
@@ -6379,6 +7530,8 @@ async function importZipFile(file) {
       },
       rawBody: buffer
     });
+    syncAiSessionsFromAppState();
+    await importLegacyAiSessionsForProject();
     rememberRecentProject(local.appState.project);
     local.selectedFile = local.appState.project.mainFile;
     expandToFile(local.selectedFile);
@@ -7144,6 +8297,64 @@ function mountVisualRawEditors(host, getText, handleInput, documentNode) {
   });
 }
 
+function compileDiagnosticsForFile(filePath = local.selectedFile) {
+  const file = String(filePath || "");
+  const mainFile = local.appState?.project?.mainFile || file;
+  const logs = Array.isArray(local.appState?.compile?.logs) ? local.appState.compile.logs : [];
+  const diagnostics = [];
+  for (let index = 0; index < logs.length; index += 1) {
+    const line = String(logs[index] || "");
+    const severity = compileLogLevel(line);
+    if (!["error", "warning"].includes(severity)) continue;
+    const direct = line.match(/(?:^|\s)([^:\s]+\.tex):(\d+):\s*(.*)$/i);
+    if (direct) {
+      const pathHint = direct[1].replace(/^[./\\]+/u, "").replace(/\\/g, "/");
+      if (pathHint.endsWith(file) || file.endsWith(pathHint)) {
+        diagnostics.push({
+          line: Number(direct[2] || 1),
+          column: 0,
+          severity,
+          message: direct[3] || line
+        });
+      }
+      continue;
+    }
+    const texLine = line.match(/\bl\.(\d+)\b\s*(.*)$/i) || logs[index + 1]?.match?.(/\bl\.(\d+)\b\s*(.*)$/i);
+    if (texLine && (!file || file === mainFile)) {
+      diagnostics.push({
+        line: Number(texLine[1] || 1),
+        column: 0,
+        severity,
+        message: line.replace(/^! ?/u, "").trim() || texLine[2] || line
+      });
+    }
+  }
+  return diagnostics.slice(-60);
+}
+
+function updateEditorDiagnostics() {
+  local.compileDiagnostics = compileDiagnosticsForFile(local.selectedFile);
+  local.codeEditor?.setDiagnostics?.(local.compileDiagnostics);
+}
+
+function syncEditorModeUi() {
+  if (!supportsVisualEditor(local.selectedFile) && local.editorMode !== "code") {
+    local.editorMode = "code";
+  }
+  document.querySelectorAll("[data-editor-mode]").forEach((button) => {
+    const active = button.dataset.editorMode === local.editorMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    if (button.dataset.editorMode === "visual") {
+      const supported = supportsVisualEditor(local.selectedFile);
+      button.disabled = !supported;
+      button.title = supported ? "Use visual LaTeX editing aids" : "Visual mode is available for .tex files";
+    }
+  });
+  const applied = local.codeEditor?.setMode?.(local.editorMode);
+  if (applied && applied !== local.editorMode) local.editorMode = applied;
+}
+
 function mountCodeEditor() {
   const host = document.querySelector("#editorText.editor-code-mount");
   if (!host) return;
@@ -7157,6 +8368,8 @@ function mountCodeEditor() {
     parent: host,
     value: local.editorContent,
     filePath: local.selectedFile,
+    mode: supportsVisualEditor(local.selectedFile) ? local.editorMode : "code",
+    diagnostics: compileDiagnosticsForFile(local.selectedFile),
     suggestions: local.editorSuggestions || {},
     onChange: (text) => markEditorChanged(text),
     onSave: saveAndCompile,
@@ -7169,6 +8382,8 @@ function mountCodeEditor() {
       local.editingNow = false;
     }
   });
+  syncEditorModeUi();
+  updateEditorDiagnostics();
   refreshEditorSuggestions();
 }
 
@@ -7446,12 +8661,13 @@ function mountActiveEditor() {
 }
 
 function setEditorMode(mode) {
-  if (mode !== "code" || local.editorMode === mode) return;
   local.editorContent = currentEditorText();
-  local.editorMode = "code";
+  const nextMode = mode === "visual" && supportsVisualEditor(local.selectedFile) ? "visual" : "code";
+  local.editorMode = nextMode;
   local.tablePickerOpen = false;
-  localStorage.setItem("localleaf.editorMode", "code");
-  updateEditorSourceUi();
+  writeEditorModeForFile(local.selectedFile, nextMode);
+  syncEditorModeUi();
+  refreshEditorToolbarPanels();
 }
 
 function currentVisualEditableElement() {
@@ -7882,6 +9098,7 @@ function closeEditorSearchPanel() {
 function refreshEditorToolbarPanels() {
   const topbar = document.querySelector(".editor-topbar");
   if (!topbar) return;
+  syncEditorModeUi();
   document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
   document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
   const styleButton = document.querySelector("#editorStyleButton");
@@ -8191,6 +9408,7 @@ function bindEditor() {
   mountActiveEditor();
   bindPdfPreviewControls();
   bindPdfWheelZoom();
+  bindPdfPreviewInteractions();
   mountPdfPreview();
 
   document.querySelector("#chatForm")?.addEventListener("submit", async (event) => {
@@ -8671,11 +9889,7 @@ function updateEditorSourceUi() {
   const selection = selectedFileState(file);
   const breadcrumb = document.querySelector(".editor-breadcrumb");
   if (breadcrumb) breadcrumb.innerHTML = editorBreadcrumbMarkup(file, selection);
-  document.querySelectorAll("[data-editor-mode]").forEach((button) => {
-    const active = button.dataset.editorMode === local.editorMode;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", active ? "true" : "false");
-  });
+  syncEditorModeUi();
 
   const codePanel = document.querySelector(".code-panel");
   const oldSurface = codePanel?.querySelector(".editor-code-mount, .editor-visual-mount, #editorText, .asset-preview");
@@ -8706,6 +9920,7 @@ function updateEditorSourceUi() {
   if (status) status.textContent = local.saveStatus;
 
   bindSourceControls();
+  updateEditorDiagnostics();
 }
 
 function updateChatPanel() {
@@ -8749,10 +9964,13 @@ function updateCompileUi(options = {}) {
   if (previewActions) {
     previewActions.innerHTML = previewActionsMarkup(compile);
     bindPdfPreviewControls();
+    bindPdfPreviewInteractions();
   }
 
   const logs = document.querySelector(".logs");
   if (logs) logs.innerHTML = compileLogsMarkup(compile.logs || []);
+  updateEditorDiagnostics();
+  if (local.rightRailTab === "review") refreshRightRailUi();
   const pinnedLogs = document.querySelector(".log-pinned");
   if (pinnedLogs) pinnedLogs.innerHTML = compilePinnedIssuesMarkup();
   const logTabs = document.querySelector(".log-tabs");
@@ -8776,6 +9994,7 @@ function updateCompileUi(options = {}) {
     previewPane.innerHTML = compiledPreviewMarkup();
     if (!mountPdfPreview(scrollState)) {
       restorePreviewScroll(scrollState, previewPane);
+      renderPdfReviewMarkers();
     }
   }
 }
@@ -9298,6 +10517,8 @@ function connectEvents() {
       local.appState.session.joinRequests
         .filter((request) => request.status === "pending")
         .forEach(showEditorJoinRequest);
+      refreshRightRailUi();
+      renderPdfReviewMarkers();
     }
     if (["session", "active", "project", "home"].includes(current.view)) {
       render();
@@ -9335,6 +10556,15 @@ function connectEvents() {
       const refreshPreview = local.appState.compile.status !== "running";
       updateCompileUi({ refreshPreview, previewScroll: refreshPreview ? local.pendingPreviewScroll : null });
       if (refreshPreview) local.pendingPreviewScroll = null;
+    }
+  });
+  events.addEventListener("review", (event) => {
+    if (!local.appState) return;
+    const payload = JSON.parse(event.data);
+    local.appState.review = { ...(local.appState.review || {}), threads: payload.threads || [] };
+    if (route().view === "editor") {
+      refreshRightRailUi();
+      renderPdfReviewMarkers();
     }
   });
   events.addEventListener("chat", () => {
@@ -9400,6 +10630,9 @@ window.addEventListener("pointerdown", (event) => {
 });
 
 window.addEventListener("pointerdown", (event) => {
+  if (local.pdfAnnotationPopover && !event.target.closest?.(".pdf-annotation-popover") && !event.target.closest?.(".pdf-page")) {
+    setPdfAnnotateMode(false);
+  }
   let shouldRender = false;
   if (local.aiSessionMenuOpen && !event.target.closest?.(".ai-session-picker")) {
     local.aiSessionMenuOpen = false;
@@ -9427,6 +10660,11 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape" && route().view === "editor") {
+    if (local.pdfAnnotationPopover || local.pdfAnnotateMode) {
+      event.preventDefault();
+      setPdfAnnotateMode(false);
+      return;
+    }
     if (local.editorMoreMenuOpen) {
       event.preventDefault();
       closeEditorMoreMenuInPlace();

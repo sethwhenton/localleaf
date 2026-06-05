@@ -22,6 +22,9 @@ const {
 const { compileProject, commandExists, detectCompiler } = require("./compiler");
 const { collectProjectEditorSuggestions } = require("./editor-suggestions");
 const { createAiModelManager } = require("./ai-models");
+const { createAiChangeStore } = require("./ai-changes");
+const { createAiSessionStore, createMemoryAiSessionStore } = require("./ai-sessions");
+const { createReviewThreadStore } = require("./review-threads");
 const {
   DEFAULT_CURSOR_MODEL_ID,
   changedTextFiles,
@@ -196,6 +199,44 @@ function canEditProject(state, request, url) {
   if (isHostRequest(state, request, url)) return true;
   const user = getTokenUser(state, request, url);
   return Boolean(user && user.role === "editor");
+}
+
+function requestIdentity(state, request, url) {
+  if (isHostRequest(state, request, url)) {
+    const host = state.session.users.find((user) => user.id === "host") || { id: "host", name: getHostName(), role: "host" };
+    return {
+      isHost: true,
+      user: host,
+      userId: "host",
+      userName: host.name || getHostName(),
+      role: "host",
+      canRead: true,
+      canEdit: true
+    };
+  }
+  const user = getTokenUser(state, request, url);
+  return {
+    isHost: false,
+    user,
+    userId: user?.id || "",
+    userName: user?.name || "",
+    role: user?.role || "",
+    canRead: Boolean(user),
+    canEdit: Boolean(user && user.role === "editor")
+  };
+}
+
+function canUseAi(state, request, url) {
+  const identity = requestIdentity(state, request, url);
+  return identity.isHost || identity.canEdit;
+}
+
+function requesterFromIdentity(identity = {}) {
+  return {
+    userId: identity.userId || (identity.isHost ? "host" : ""),
+    userName: identity.userName || identity.user?.name || (identity.isHost ? getHostName() : ""),
+    role: identity.role || identity.user?.role || (identity.isHost ? "host" : "")
+  };
 }
 
 function readBody(request) {
@@ -971,16 +1012,22 @@ function createInitialState(options = {}) {
       logs: ["[LocalLeaf] Ready."],
       previewHtml: "",
       pdfPath: null,
+      synctexPath: null,
+      sourceMapAvailable: false,
       version: 0
     },
     chat: [],
     ai: {
       models: null,
+      sessions: null,
+      guestSessions: new Map(),
+      changes: null,
       proposals: new Map(),
       cursorRunner: options.cursorAgentRunner || runCursorSdkAgent
     },
     clients: new Map(),
     collabClients: new Map(),
+    review: null,
     tunnelCheck: options.checkPublicTunnel || checkPublicTunnel
   };
   state.ai.models = createAiModelManager({
@@ -990,11 +1037,113 @@ function createInitialState(options = {}) {
     downloadImpl: options.aiDownloadImpl,
     onChange: () => broadcastState(state)
   });
+  state.ai.sessions = options.aiSessionStore || createAiSessionStore({ root: options.aiSessionRoot });
+  state.ai.changes = options.aiChangeStore || createAiChangeStore({ root: options.aiChangeRoot });
+  state.review = options.reviewThreadStore || createReviewThreadStore({ root: options.reviewRoot });
+  state.synctexResolver = options.synctexResolver || null;
   return state;
+}
+
+function publicCompileState(compile = {}) {
+  return {
+    status: compile.status,
+    engine: compile.engine,
+    mode: compile.mode,
+    logs: compile.logs || [],
+    previewHtml: compile.previewHtml || "",
+    pdfPath: compile.pdfPath || null,
+    sourceMapAvailable: Boolean(compile.sourceMapAvailable && compile.synctexPath && fs.existsSync(compile.synctexPath)),
+    version: compile.version || 0
+  };
+}
+
+function aiSessionStoreForIdentity(state, identity) {
+  if (identity.isHost) return state.ai.sessions;
+  if (!identity.userId) return null;
+  if (!state.ai.guestSessions.has(identity.userId)) {
+    state.ai.guestSessions.set(identity.userId, createMemoryAiSessionStore());
+  }
+  return state.ai.guestSessions.get(identity.userId);
+}
+
+function aiChangesForIdentity(state, identity) {
+  const changes = state.ai.changes?.list(state.project) || [];
+  if (identity.isHost) return changes;
+  if (!identity.userId) return [];
+  return changes.filter((change) => {
+    return change.requester?.userId === identity.userId || ["applied", "reverted"].includes(change.status);
+  });
+}
+
+function publicGuestAiState(state, identity) {
+  const modelState = state.ai.models.publicState();
+  const activeModel = modelState.activeModel
+    ? {
+      providerId: "host-ai",
+      providerName: "Host AI",
+      modelId: modelState.activeModel.modelId || modelState.activeModel.name || "",
+      name: modelState.activeModel.name || modelState.activeModel.modelId || "Host model",
+      local: Boolean(modelState.activeModel.local)
+    }
+    : null;
+  const sessionStore = aiSessionStoreForIdentity(state, identity);
+  return {
+    activeModelId: activeModel?.modelId || null,
+    activeProviderId: activeModel ? "host-ai" : null,
+    activeModel,
+    runtime: modelState.runtime || "deterministic-fallback",
+    permissions: {
+      canReadTextFiles: true,
+      canProposeTextEdits: true,
+      canWriteWithoutApproval: false,
+      canDeleteRenameMoveUploadShell: false,
+      textFilesOnly: true
+    },
+    sessions: sessionStore ? sessionStore.publicState(state.project) : null,
+    proposals: aiChangesForIdentity(state, identity),
+    models: [],
+    providerTemplates: [],
+    providers: [],
+    modelChoices: []
+  };
+}
+
+function publicAiState(state, identity) {
+  if (identity.isHost) {
+    return {
+      ...state.ai.models.publicState(),
+      sessions: state.ai.sessions.publicState(state.project),
+      proposals: aiChangesForIdentity(state, identity)
+    };
+  }
+  if (identity.canEdit) return publicGuestAiState(state, identity);
+  return {
+    activeModelId: null,
+    runtime: "host-only",
+    permissions: {
+      canReadTextFiles: false,
+      canProposeTextEdits: false,
+      canWriteWithoutApproval: false,
+      canDeleteRenameMoveUploadShell: false,
+      textFilesOnly: true
+    },
+    sessions: null,
+    proposals: [],
+    models: []
+  };
 }
 
 function publicState(state, options = {}) {
   const isHost = Boolean(options.isHost);
+  const identity = options.identity || {
+    isHost,
+    user: options.user || null,
+    userId: options.user?.id || (isHost ? "host" : ""),
+    userName: options.user?.name || (isHost ? getHostName() : ""),
+    role: options.user?.role || (isHost ? "host" : ""),
+    canRead: Boolean(options.canRead || isHost),
+    canEdit: Boolean(options.canEdit || isHost || options.user?.role === "editor")
+  };
   const canRead = isHost || Boolean(options.canRead);
   const users = state.session.users.map((user) => ({
     id: user.id,
@@ -1047,7 +1196,7 @@ function publicState(state, options = {}) {
     },
     compiler: state.compiler,
     compile: canRead
-      ? state.compile
+      ? publicCompileState(state.compile)
       : {
           status: "idle",
           engine: state.compile.engine,
@@ -1055,25 +1204,13 @@ function publicState(state, options = {}) {
           logs: [],
           previewHtml: "",
           pdfPath: null,
+          sourceMapAvailable: false,
           version: state.compile.version
         },
-    ai: isHost
-      ? {
-          ...state.ai.models.publicState(),
-          proposals: Array.from(state.ai.proposals.values()).map(publicProposal)
-        }
-      : {
-          activeModelId: null,
-          runtime: "host-only",
-          permissions: {
-            canReadTextFiles: false,
-            canProposeTextEdits: false,
-            canWriteWithoutApproval: false,
-            canDeleteRenameMoveUploadShell: false,
-            textFilesOnly: true
-          },
-          models: []
-        },
+    ai: publicAiState(state, identity),
+    review: {
+      threads: canRead ? state.review.list(state.project) : []
+    },
     chat: canRead ? state.chat : []
   };
 }
@@ -1259,7 +1396,16 @@ function attachCollabClient(state, socket, identity) {
     userId: client.userId,
     filePath,
     newText: content,
-    state: publicState(state, { isHost: client.isHost, canRead: true }),
+    state: publicState(state, {
+      isHost: client.isHost,
+      canRead: true,
+      canEdit: client.canEdit,
+      user: {
+        id: client.userId,
+        name: client.name,
+        role: client.role
+      }
+    }),
     presence: collabPresence(state)
   });
 
@@ -1378,13 +1524,16 @@ function closeCollabClients(state, reason) {
 
 function broadcastState(state) {
   for (const [id, client] of state.clients) {
+    const user = client.isHost ? state.session.users.find((item) => item.id === "host") : tokenUserByToken(state, client.token);
     try {
       sendSse(
         client.response,
         "state",
         publicState(state, {
           isHost: client.isHost,
-          canRead: clientCanReadProject(state, client)
+          canRead: clientCanReadProject(state, client),
+          canEdit: client.isHost || user?.role === "editor",
+          user
         })
       );
     } catch {
@@ -1448,6 +1597,18 @@ function createDeterministicAgentProposal(state, body) {
   let newText = originalText;
   let summary = "Prepared a safe text edit proposal.";
   const replacementInstruction = exactReplacementInstruction(message);
+  const annotationReplacement = createAnnotationReplacementProposal(state, { ...body, message }, replacementInstruction, {
+    provider: null,
+    modelId: "deterministic-fallback",
+    runId: body.runId || "",
+    sessionId: body.sessionId || "",
+    requester: body.requester || null,
+    skipChangeLog: body.skipChangeLog === true
+  });
+  if (annotationReplacement) {
+    annotationReplacement.modelId = "deterministic-fallback";
+    return annotationReplacement;
+  }
   if (replacementInstruction && !originalText.includes(replacementInstruction.find)) {
     const found = findTextFileContaining(state, replacementInstruction.find, message);
     if (found) {
@@ -1505,9 +1666,13 @@ function createDeterministicAgentProposal(state, body) {
     userRequest: message,
     provider: null,
     modelId: "deterministic-fallback",
-    runId: body.runId || ""
+    runId: body.runId || "",
+    sessionId: body.sessionId || "",
+    requester: body.requester || null,
+    skipChangeLog: body.skipChangeLog === true
   });
   state.ai.proposals.set(proposal.id, proposal);
+  if (!proposal.skipChangeLog) recordAiProposalChange(state, proposal);
   return proposal;
 }
 
@@ -1526,19 +1691,24 @@ function createAgentProposalFromText(state, body, newText, summary, metadata = {
     userRequest: String(body.message || "").trim().slice(0, 2000),
     provider: metadata.provider || null,
     modelId: metadata.modelId || "",
-    runId: metadata.runId || body.runId || ""
+    runId: metadata.runId || body.runId || "",
+    sessionId: body.sessionId || metadata.sessionId || "",
+    requester: body.requester || metadata.requester || null,
+    skipChangeLog: body.skipChangeLog === true || metadata.skipChangeLog === true
   });
   state.ai.proposals.set(proposal.id, proposal);
+  if (!proposal.skipChangeLog) recordAiProposalChange(state, proposal);
   return proposal;
 }
 
-function createAiProposalRecord({ path: relativePath, originalText, newText, summary, userRequest, provider, modelId, runId }) {
+function createAiProposalRecord({ path: relativePath, originalText, newText, summary, userRequest, provider, modelId, runId, sessionId, requester, skipChangeLog }) {
   const cleanOriginal = String(originalText || "");
   const cleanText = String(newText || "");
   const focus = firstChangedRange(cleanOriginal, cleanText);
   return {
     id: randomId(8),
     runId: String(runId || ""),
+    sessionId: String(sessionId || ""),
     path: relativePath,
     baseHash: textHash(cleanOriginal),
     newHash: textHash(cleanText),
@@ -1553,6 +1723,7 @@ function createAiProposalRecord({ path: relativePath, originalText, newText, sum
     newText: cleanText,
     status: "proposed",
     approvalRequired: true,
+    skipChangeLog: skipChangeLog === true,
     summary: String(summary || "AI proposed a text edit.").slice(0, 220),
     userRequest: String(userRequest || "").slice(0, 2000),
     provider: provider ? {
@@ -1560,6 +1731,7 @@ function createAiProposalRecord({ path: relativePath, originalText, newText, sum
       name: provider.name || provider.id || "Provider"
     } : null,
     modelId: String(modelId || ""),
+    requester: requester ? requesterFromIdentity(requester) : null,
     focus: {
       start: focus.start,
       end: Math.max(focus.start, focus.newEnd),
@@ -1596,7 +1768,7 @@ function compactLineDiff(before, after, context = 3) {
   return [{
     oldStart: beforeFrom + 1,
     newStart: afterFrom + 1,
-    lines: lines.slice(0, 80)
+    lines
   }];
 }
 
@@ -1645,7 +1817,7 @@ function requestedAgentCapabilities(message) {
     fileManagement: /\b(delete|rename|move|create\s+(?:a\s+)?(?:file|folder|directory)|new\s+(?:file|folder|directory))\b/iu.test(text),
     fileUploads: /\b(upload|import|attach|add\s+(?:an?\s+)?(?:image|asset|file|pdf))\b/iu.test(text),
     shellCommands: /\b(shell|terminal|command|execute|run\s+script|npm|node|powershell|cmd)\b/iu.test(text),
-    binaryFiles: /\b(binary|image|png|jpe?g|gif|webp|pdf|eps|asset)\b/iu.test(text)
+    binaryFiles: /\b(binary|png|jpe?g|gif|webp|eps)\b|(?:edit|modify|replace|write|change)\s+(?:the\s+)?(?:image|pdf|asset)\s+(?:file|asset|binary)\b/iu.test(text)
   };
 }
 
@@ -1788,7 +1960,181 @@ function compactAgentFileContext(text, budget = 42000) {
   return `${head}\n\n% ... LocalLeaf omitted the middle of this large file for model context ...\n\n${tail}`;
 }
 
+function lineStartOffsets(text) {
+  const source = String(text || "");
+  const starts = [0];
+  for (let index = 0; index < source.length; index += 1) {
+    if (source.charCodeAt(index) === 10) starts.push(index + 1);
+  }
+  return starts;
+}
+
+function rangeForLineSpan(text, startLine, endLine) {
+  const source = String(text || "");
+  const starts = lineStartOffsets(source);
+  const lineCount = Math.max(1, starts.length);
+  const safeStartLine = Math.max(1, Math.min(lineCount, Number(startLine || 1)));
+  const safeEndLine = Math.max(safeStartLine, Math.min(lineCount, Number(endLine || safeStartLine)));
+  return {
+    start: starts[safeStartLine - 1] || 0,
+    end: safeEndLine < starts.length ? starts[safeEndLine] : source.length
+  };
+}
+
+function lineAt(lines, index) {
+  return String(lines[index] || "").replace(/\r$/u, "");
+}
+
+function latexAnnotationBlockRange(text, mappedLine) {
+  const source = String(text || "");
+  const lines = source.split("\n");
+  const lineCount = Math.max(1, lines.length);
+  let index = Math.max(0, Math.min(lineCount - 1, Number(mappedLine || 1) - 1));
+  if (!lineAt(lines, index).trim()) {
+    let best = index;
+    for (let distance = 1; distance <= 8; distance += 1) {
+      const up = index - distance;
+      const down = index + distance;
+      if (up >= 0 && lineAt(lines, up).trim()) {
+        best = up;
+        break;
+      }
+      if (down < lineCount && lineAt(lines, down).trim()) {
+        best = down;
+        break;
+      }
+    }
+    index = best;
+  }
+
+  const anchor = lineAt(lines, index).trim();
+  if (/^\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?(?:\[[^\]]*\])?\{/u.test(anchor)) {
+    const range = rangeForLineSpan(source, index + 1, index + 1);
+    return { startLine: index + 1, endLine: index + 1, ...range, text: source.slice(range.start, range.end) };
+  }
+
+  const envPattern = /^\\(?:begin|end)\{([^{}]+)\}/u;
+  for (let line = index; line >= 0; line -= 1) {
+    const trimmed = lineAt(lines, line).trim();
+    const env = trimmed.match(envPattern);
+    if (env?.[0]?.startsWith("\\begin")) {
+      const startLine = line + 1;
+      const envName = env[1];
+      if (envName === "document") break;
+      const endPattern = new RegExp(`^\\\\end\\{${envName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\}`, "u");
+      for (let down = index; down < lineCount; down += 1) {
+        if (endPattern.test(lineAt(lines, down).trim())) {
+          const endLine = down + 1;
+          const range = rangeForLineSpan(source, startLine, endLine);
+          return { startLine, endLine, ...range, text: source.slice(range.start, range.end) };
+        }
+      }
+      break;
+    }
+    if (line !== index && !trimmed) break;
+  }
+
+  const isBoundary = (line, current) => {
+    const trimmed = lineAt(lines, line).trim();
+    if (!trimmed) return true;
+    if (line === current) return false;
+    return /^\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph|begin|end|documentclass|usepackage|input|include|bibliography|addbibresource)\b/u.test(trimmed);
+  };
+  let start = index;
+  while (start > 0 && !isBoundary(start - 1, index)) start -= 1;
+  let end = index;
+  while (end + 1 < lineCount && !isBoundary(end + 1, index)) end += 1;
+  const range = rangeForLineSpan(source, start + 1, end + 1);
+  return { startLine: start + 1, endLine: end + 1, ...range, text: source.slice(range.start, range.end) };
+}
+
+function agentPdfAnnotationContext(state, body = {}, preferredPath = "") {
+  const annotation = body.pdfAnnotation && typeof body.pdfAnnotation === "object" ? body.pdfAnnotation : null;
+  const source = annotation?.source && typeof annotation.source === "object" ? annotation.source : null;
+  if (!annotation && !source) return null;
+  const requestedPath = source?.path || preferredPath || body.path;
+  if (!requestedPath) return null;
+  try {
+    const file = agentReadProjectFile(state, requestedPath);
+    const line = Math.max(1, Number(source?.line || 1));
+    const block = latexAnnotationBlockRange(file.content, line);
+    return {
+      path: file.path,
+      hash: file.hash,
+      content: file.content,
+      line,
+      column: Math.max(0, Number(source?.column || 0)),
+      startLine: block.startLine,
+      endLine: block.endLine,
+      start: block.start,
+      end: block.end,
+      text: block.text,
+      elementType: String(annotation?.elementType || "text").replace(/[^\w-]/gu, "").slice(0, 40) || "text",
+      targetRect: annotation?.targetRect && typeof annotation.targetRect === "object"
+        ? {
+          left: Number(annotation.targetRect.left || 0),
+          top: Number(annotation.targetRect.top || 0),
+          width: Number(annotation.targetRect.width || 0),
+          height: Number(annotation.targetRect.height || 0)
+        }
+        : null,
+      pdfText: String(annotation?.textPreview || body.selectedText || "").replace(/\s+/g, " ").trim().slice(0, 800),
+      page: Number(annotation?.page || 0),
+      x: Number(annotation?.x || 0),
+      y: Number(annotation?.y || 0)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function lineNumberedSnippet(text, startLine = 1) {
+  return String(text || "")
+    .split(/\n/u)
+    .map((line, index) => `${String(startLine + index).padStart(4, " ")} | ${line.replace(/\r$/u, "")}`)
+    .join("\n");
+}
+
+function annotationPromptContext(annotation) {
+  if (!annotation) return "";
+  return [
+    "PDF annotation target (highest priority):",
+    `The user clicked page ${annotation.page || "unknown"} at PDF coordinate ${Math.round(annotation.x || 0)}, ${Math.round(annotation.y || 0)}.`,
+    `Selected PDF element: ${annotation.elementType || "text"}.`,
+    annotation.targetRect ? `Selected PDF rectangle: left ${Math.round(annotation.targetRect.left)}, top ${Math.round(annotation.targetRect.top)}, width ${Math.round(annotation.targetRect.width)}, height ${Math.round(annotation.targetRect.height)}.` : "",
+    `Mapped source: ${annotation.path}:${annotation.line}${annotation.column ? `:${annotation.column}` : ""}.`,
+    `Annotated source block: lines ${annotation.startLine}-${annotation.endLine}.`,
+    annotation.pdfText ? `Clicked PDF context:\n${annotation.pdfText}` : "",
+    annotation.elementType === "image" ? "This annotation targets a rendered image or figure region. Prefer edits to the mapped figure/includegraphics/caption/label/placement source block, not nearby body text." : "",
+    "Only edit this annotated source block unless the user explicitly asks for a broader project change.",
+    "When returning replacements, make the replacement find value an exact substring from this annotated source block.",
+    `Annotated source block:\n${lineNumberedSnippet(annotation.text, annotation.startLine)}`
+  ].filter(Boolean).join("\n");
+}
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function exactReplacementInstruction(message) {
+  const normalizedInput = String(message || "")
+    .replace(/[\u201c\u201d]/gu, "\"")
+    .replace(/[\u2018\u2019]/gu, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  const replacementMatch = [
+    /\bfrom\s+["']?(.+?)["']?\s+\bto\s+["']?(.+?)(?=["']?(?:$|[.!?])|\s+\b(?:in|inside|on|at|within|under)\b)/iu,
+    /\b(?:replace|change|update)\s+["']?(.+?)["']?\s+\b(?:with|to)\s+["']?(.+?)(?=["']?(?:$|[.!?])|\s+\b(?:in|inside|on|at|within|under)\b)/iu
+  ].map((pattern) => normalizedInput.match(pattern)).find(Boolean);
+  if (replacementMatch) {
+    const find = String(replacementMatch[1] || "").trim();
+    let replace = String(replacementMatch[2] || "").trim();
+    const findPunctuation = find.match(/[.!?]$/u)?.[0];
+    if (findPunctuation && !/[.!?]$/u.test(replace) && normalizedInput.endsWith(findPunctuation)) {
+      replace += findPunctuation;
+    }
+    if (find && replace && find !== replace) return { find, replace };
+  }
   const normalized = String(message || "").replace(/\s+/g, " ").trim();
   const match = normalized.match(/\bfrom\s+["'“]?(.+?)["'”]?\s+\bto\s+["'“]?(.+?)(?=["'”]?(?:$|[.!?])|\s+\b(?:in|inside|on|at|within|under)\b)/iu);
   if (!match) return null;
@@ -1802,7 +2148,53 @@ function exactReplacementInstruction(message) {
   return { find, replace };
 }
 
-function applyExactReplacementInstructions(originalText, replacements = []) {
+function replaceInstructionInScope(scopeText, instruction) {
+  const source = String(scopeText || "");
+  const find = String(instruction?.find || "");
+  const replace = String(instruction?.replace || "");
+  if (!find || replace === "" || find === replace) return "";
+  if (source.includes(find)) return source.replace(find, replace);
+  const wholeWord = /^[A-Za-z0-9 _-]+$/u.test(find);
+  const pattern = wholeWord ? new RegExp(`\\b${escapeRegex(find)}\\b`, "iu") : new RegExp(escapeRegex(find), "iu");
+  const next = source.replace(pattern, replace);
+  return next === source ? "" : next;
+}
+
+function createAnnotationReplacementProposal(state, body, exactInstruction, metadata = {}) {
+  const annotation = agentPdfAnnotationContext(state, body);
+  if (!annotation || !exactInstruction) return null;
+  const replacementBlock = replaceInstructionInScope(annotation.text, exactInstruction);
+  if (!replacementBlock) return null;
+  const newText = `${annotation.content.slice(0, annotation.start)}${replacementBlock}${annotation.content.slice(annotation.end)}`;
+  const proposal = createAgentProposalFromText(
+    state,
+    { ...body, path: annotation.path },
+    newText,
+    `Replace "${exactInstruction.find}" with "${exactInstruction.replace}" in the annotated PDF selection.`,
+    metadata
+  );
+  proposal.annotation = {
+    page: annotation.page,
+    path: annotation.path,
+    line: annotation.line,
+    startLine: annotation.startLine,
+    endLine: annotation.endLine,
+    elementType: annotation.elementType,
+    targetRect: annotation.targetRect,
+    pdfText: annotation.pdfText
+  };
+  return proposal;
+}
+
+function providerNewTextLooksLikeFullFile(originalText, proposedText) {
+  const original = String(originalText || "");
+  const proposed = String(proposedText || "");
+  if (!proposed.trim()) return false;
+  if (/\\begin\{document\}/u.test(original)) return /\\begin\{document\}/u.test(proposed);
+  return proposed.length > Math.max(400, original.length * 0.55);
+}
+
+function applyExactReplacementInstructions(originalText, replacements = [], options = {}) {
   const source = String(originalText || "");
   const exactItems = [];
   const rangeItems = [];
@@ -1825,6 +2217,25 @@ function applyExactReplacementInstructions(originalText, replacements = []) {
       next = `${next.slice(0, item.start)}${item.text}${next.slice(item.end)}`;
     }
     return next === source ? "" : next;
+  }
+  const scope = options.scope && Number.isInteger(options.scope.start) && Number.isInteger(options.scope.end)
+    ? {
+      start: Math.max(0, Math.min(source.length, options.scope.start)),
+      end: Math.max(0, Math.min(source.length, options.scope.end))
+    }
+    : null;
+  if (scope && scope.end >= scope.start && exactItems.length) {
+    let scoped = source.slice(scope.start, scope.end);
+    let changed = false;
+    for (const item of exactItems) {
+      const nextScoped = replaceInstructionInScope(scoped, item);
+      if (!nextScoped) continue;
+      scoped = item.all && scoped.includes(item.find)
+        ? scoped.split(item.find).join(item.replace)
+        : nextScoped;
+      changed = true;
+    }
+    if (changed) return `${source.slice(0, scope.start)}${scoped}${source.slice(scope.end)}`;
   }
   let next = source;
   for (const item of exactItems) {
@@ -1959,6 +2370,10 @@ async function createCursorAgentResponse(state, body) {
 function createProviderProposalsFromParsed(state, body, parsed, metadata, permissions) {
   const exactInstruction = exactReplacementInstruction(body.message || "");
   if (exactInstruction) {
+    const annotationProposal = createAnnotationReplacementProposal(state, body, exactInstruction, metadata);
+    if (annotationProposal) {
+      return [setProposalApprovalFromPermissions(annotationProposal, permissions)];
+    }
     const found = findTextFileContaining(state, exactInstruction.find, body.message || "");
     if (found) {
       const nextText = found.content.replace(exactInstruction.find, exactInstruction.replace);
@@ -1982,8 +2397,21 @@ function createProviderProposalsFromParsed(state, body, parsed, metadata, permis
   for (const edit of edits.slice(0, permissions.multiFileEdits ? 8 : 1)) {
     const targetPath = edit.path || body.path;
     const targetFile = agentReadProjectFile(state, targetPath);
-    const replacementText = applyExactReplacementInstructions(targetFile.content, edit.replacements);
-    const proposedText = replacementText || (typeof edit.newText === "string" && edit.newText.trim() ? edit.newText : "");
+    const annotationTarget = agentPdfAnnotationContext(state, body, targetFile.path);
+    const replacementText = applyExactReplacementInstructions(targetFile.content, edit.replacements, {
+      scope: annotationTarget && annotationTarget.path === targetFile.path
+        ? { start: annotationTarget.start, end: annotationTarget.end }
+        : null
+    });
+    let proposedText = replacementText;
+    if (!proposedText && typeof edit.newText === "string" && edit.newText.trim()) {
+      const cleanNewText = edit.newText;
+      if (annotationTarget && annotationTarget.path === targetFile.path && !providerNewTextLooksLikeFullFile(targetFile.content, cleanNewText)) {
+        proposedText = `${targetFile.content.slice(0, annotationTarget.start)}${cleanNewText.replace(/\s*$/u, "")}\n${targetFile.content.slice(annotationTarget.end)}`;
+      } else {
+        proposedText = cleanNewText;
+      }
+    }
     if (!proposedText) continue;
     proposals.push(setProposalApprovalFromPermissions(createAgentProposalFromText(
       state,
@@ -2004,7 +2432,8 @@ async function createProviderAgentResponse(state, body, options = {}) {
     ...HOSTED_AGENT_PROMPT_LIMITS,
     ...(options.promptLimits || {})
   };
-  const currentFile = agentReadProjectFile(state, body.path);
+  const annotationContext = agentPdfAnnotationContext(state, body);
+  const currentFile = agentReadProjectFile(state, annotationContext?.path || body.path);
   const relativePath = currentFile.path;
   const originalText = currentFile.content;
   const compileLogs = Array.isArray(body.compileLogs)
@@ -2025,12 +2454,14 @@ async function createProviderAgentResponse(state, body, options = {}) {
     "Prefer replacements for small edits. Only set newText for larger structural edits. Keep LaTeX valid. Do not delete unrelated content.",
     "Each replacement find value must exactly match text shown from the relevant project file.",
     "You may edit another text file if the user asks about content that lives outside the currently open file.",
+    "For PDF annotation requests, treat the annotation target as the user's selection and avoid editing unrelated matching text elsewhere.",
     "Current AI Helper permissions:",
     agentPermissionSummary(permissions),
     "If an advanced action is allowed, explain the intended action clearly. For this MVP, file writes still happen through LocalLeaf proposals and approval cards.",
     `File path: ${relativePath}`,
     "Current file:",
     compactAgentFileContext(originalText, limits.currentFileBudget),
+    annotationPromptContext(annotationContext),
     "Project context:",
     compactAgentFileContext(projectContext, limits.projectContextBudget),
     conversation ? `Recent chat context:\n${conversation}` : "",
@@ -2179,6 +2610,7 @@ function publicProposal(proposal) {
   return {
     id: proposal.id,
     runId: proposal.runId || "",
+    sessionId: proposal.sessionId || "",
     path: proposal.path,
     baseHash: proposal.baseHash,
     newHash: proposal.newHash || textHash(proposal.newText || ""),
@@ -2189,6 +2621,7 @@ function publicProposal(proposal) {
     userRequest: proposal.userRequest || "",
     provider: proposal.provider || null,
     modelId: proposal.modelId || "",
+    requester: proposal.requester || null,
     approvalRequired: proposal.approvalRequired !== false,
     diffHunks: compactLineDiff(proposal.originalText || "", proposal.newText || ""),
     focus: proposal.focus || firstChangedRange(proposal.originalText || "", proposal.newText || ""),
@@ -2199,20 +2632,31 @@ function publicProposal(proposal) {
   };
 }
 
+function recordAiProposalChange(state, proposal) {
+  if (!state.ai.changes || !proposal?.id || proposal.skipChangeLog) return;
+  try {
+    state.ai.changes.upsert(state.project, publicProposal(proposal));
+  } catch {
+    // Change history is useful for review, but it should not block safe file application.
+  }
+}
+
 function applyAgentProposalAndBroadcast(state, proposal) {
   const applied = applyAiProposalToFile(state, proposal);
+  const actorId = proposal.requester?.userId || "host";
+  const actorName = proposal.requester?.userName ? `${proposal.requester.userName} via LocalLeaf AI` : "LocalLeaf AI";
   broadcastCollab(state, {
     type: "file_updated",
     filePath: proposal.path,
     newText: proposal.newText,
-    userId: "host",
-    name: "LocalLeaf AI",
+    userId: actorId,
+    name: actorName,
     version: applied.version
   });
   broadcastProject(state, "file-update", {
     path: proposal.path,
     content: proposal.newText,
-    user: "LocalLeaf AI",
+    user: actorName,
     version: applied.version
   });
   broadcastState(state);
@@ -2234,6 +2678,7 @@ function applyAiProposalToFile(state, proposal) {
   const currentText = fs.readFileSync(fullPath, "utf8");
   if (textHash(currentText) !== proposal.baseHash) {
     proposal.status = "stale";
+    recordAiProposalChange(state, proposal);
     const error = new Error("File changed since this AI proposal was created.");
     error.statusCode = 409;
     error.proposal = publicProposal(proposal);
@@ -2244,6 +2689,7 @@ function applyAiProposalToFile(state, proposal) {
   proposal.appliedAt = Date.now();
   proposal.newHash = textHash(proposal.newText || "");
   refreshProject(state);
+  recordAiProposalChange(state, proposal);
   return {
     version: Date.now(),
     proposal: publicProposal(proposal)
@@ -2266,6 +2712,7 @@ function validateProposalRevertTarget(state, proposal) {
   const expectedHash = proposal.newHash || textHash(proposal.newText || "");
   if (textHash(currentText) !== expectedHash) {
     proposal.status = "stale";
+    recordAiProposalChange(state, proposal);
     const error = new Error("File changed since this AI proposal was applied.");
     error.statusCode = 409;
     error.proposal = publicProposal(proposal);
@@ -2280,6 +2727,7 @@ function revertAiProposalToFile(state, proposal) {
   proposal.status = "reverted";
   proposal.revertedAt = Date.now();
   refreshProject(state);
+  recordAiProposalChange(state, proposal);
   return {
     version: Date.now(),
     proposal: publicProposal(proposal)
@@ -2288,18 +2736,20 @@ function revertAiProposalToFile(state, proposal) {
 
 function revertAgentProposalAndBroadcast(state, proposal) {
   const reverted = revertAiProposalToFile(state, proposal);
+  const actorId = proposal.requester?.userId || "host";
+  const actorName = proposal.requester?.userName ? `${proposal.requester.userName} via LocalLeaf AI` : "LocalLeaf AI";
   broadcastCollab(state, {
     type: "file_updated",
     filePath: proposal.path,
     newText: proposal.originalText || "",
-    userId: "host",
-    name: "LocalLeaf AI",
+    userId: actorId,
+    name: actorName,
     version: reverted.version
   });
   broadcastProject(state, "file-update", {
     path: proposal.path,
     content: proposal.originalText || "",
-    user: "LocalLeaf AI",
+    user: actorName,
     version: reverted.version
   });
   broadcastState(state);
@@ -2309,7 +2759,95 @@ function revertAgentProposalAndBroadcast(state, proposal) {
 function rejectAiProposal(state, proposal) {
   proposal.status = "rejected";
   proposal.rejectedAt = Date.now();
+  recordAiProposalChange(state, proposal);
   return publicProposal(proposal);
+}
+
+function sourcePathFromSynctexInput(projectRoot, inputPath) {
+  const raw = String(inputPath || "").trim();
+  if (!raw) return "";
+  const root = path.resolve(projectRoot);
+  const absolute = path.isAbsolute(raw) || /^[a-zA-Z]:[\\/]/.test(raw)
+    ? path.resolve(raw)
+    : path.resolve(projectRoot, raw);
+  const rootWithSeparator = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (absolute !== root && !absolute.startsWith(rootWithSeparator)) return "";
+  if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile() || !isTextFile(absolute)) return "";
+  return path.relative(root, absolute).replace(/\\/g, "/");
+}
+
+function parseSynctexEditOutput(state, output) {
+  const text = String(output || "");
+  const input = text.match(/^Input:\s*(.+)$/imu)?.[1] || "";
+  const line = Number.parseInt(text.match(/^Line:\s*(\d+)$/imu)?.[1] || "0", 10);
+  const columnMatch = text.match(/^Column:\s*(-?\d+)$/imu);
+  const column = columnMatch ? Math.max(0, Number.parseInt(columnMatch[1] || "0", 10)) : 0;
+  const relativePath = sourcePathFromSynctexInput(state.project.root, input);
+  if (!relativePath || !Number.isFinite(line) || line < 1) return null;
+  return {
+    ok: true,
+    path: relativePath,
+    line,
+    column
+  };
+}
+
+function synctexCommand() {
+  const candidates = [
+    process.env.LOCALLEAF_SYNCTEX_PATH,
+    path.join(ROOT, "bin", process.platform === "win32" ? "synctex.exe" : "synctex"),
+    process.resourcesPath ? path.join(process.resourcesPath, "bin", process.platform === "win32" ? "synctex.exe" : "synctex") : ""
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // Continue to PATH fallback.
+    }
+  }
+  return commandExists("synctex") ? "synctex" : "";
+}
+
+function resolvePdfSourcePosition(state, input = {}) {
+  if (typeof state.synctexResolver === "function") {
+    const result = state.synctexResolver({
+      page: input.page,
+      x: input.x,
+      y: input.y,
+      pdfPath: state.compile.pdfPath,
+      synctexPath: state.compile.synctexPath,
+      projectRoot: state.project.root
+    });
+    if (result?.ok) return { ok: true, path: result.path, line: result.line, column: result.column || 0 };
+    return { ok: false, reason: result?.reason || "PDF source position could not be mapped." };
+  }
+  const page = Number(input.page || 0);
+  const x = Number(input.x || 0);
+  const y = Number(input.y || 0);
+  if (!Number.isFinite(page) || page < 1 || !Number.isFinite(x) || !Number.isFinite(y)) {
+    return { ok: false, reason: "A valid PDF page and coordinates are required." };
+  }
+  if (!state.compile.pdfPath || !fs.existsSync(state.compile.pdfPath)) {
+    return { ok: false, reason: "Compile the project to PDF first." };
+  }
+  if (!state.compile.synctexPath || !fs.existsSync(state.compile.synctexPath)) {
+    return { ok: false, reason: "SyncTeX data is not available for this PDF. Recompile with SyncTeX support." };
+  }
+  const command = synctexCommand();
+  if (!command) {
+    return { ok: false, reason: "SyncTeX command was not found on this computer." };
+  }
+  const outputArg = `${Math.round(page)}:${Math.round(x)}:${Math.round(y)}:${state.compile.pdfPath}`;
+  const result = spawnSync(command, ["edit", "-o", outputArg], {
+    cwd: state.project.root,
+    encoding: "utf8",
+    timeout: 10000,
+    windowsHide: true
+  });
+  if (result.error) return { ok: false, reason: result.error.message || "SyncTeX lookup failed." };
+  const parsed = parseSynctexEditOutput(state, `${result.stdout || ""}\n${result.stderr || ""}`);
+  if (!parsed) return { ok: false, reason: "That PDF location is not mapped to editable source." };
+  return parsed;
 }
 
 function setProjectRoot(state, projectRoot) {
@@ -2332,6 +2870,8 @@ function setProjectRoot(state, projectRoot) {
     logs: ["[LocalLeaf] Project opened."],
     previewHtml: "",
     pdfPath: null,
+    synctexPath: null,
+    sourceMapAvailable: false,
     version: state.compile.version + 1
   };
 }
@@ -2724,6 +3264,7 @@ function applyEndedSessionState(state) {
   state.session.publicUrl = null;
   state.session.joinRequests = [];
   state.session.activeTokens.clear();
+  state.ai.guestSessions.clear();
   state.session.users = state.session.users.map((user) => ({ ...user, online: user.role === "host" }));
   state.session.tunnel.providerId = null;
   state.session.tunnel.providerName = null;
@@ -2821,7 +3362,118 @@ function createLocalLeafServer(options = {}) {
   async function handleApi(request, response, url) {
     if (request.method === "GET" && url.pathname === "/api/state") {
       const isHost = isHostRequest(state, request, url);
-      jsonResponse(response, 200, publicState(state, { isHost, canRead: isHost || Boolean(getTokenUser(state, request, url)) }));
+      const user = getTokenUser(state, request, url);
+      jsonResponse(response, 200, publicState(state, {
+        isHost,
+        canRead: isHost || Boolean(user),
+        canEdit: isHost || user?.role === "editor",
+        user
+      }));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/ai/sessions") {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.isHost && !identity.canEdit) {
+        deny(response, "Editor approval is required before using LocalLeaf AI sessions.");
+        return;
+      }
+      jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).publicState(state.project));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/sessions/create") {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.isHost && !identity.canEdit) {
+        deny(response, "Editor approval is required before creating LocalLeaf AI sessions.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).createSession(state.project, body));
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/sessions/activate") {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.isHost && !identity.canEdit) {
+        deny(response, "Editor approval is required before activating LocalLeaf AI sessions.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).activateSession(state.project, String(body.sessionId || body.id || "")));
+      } catch (error) {
+        jsonResponse(response, 404, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/sessions/update") {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.isHost && !identity.canEdit) {
+        deny(response, "Editor approval is required before updating LocalLeaf AI sessions.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        const sessionStore = aiSessionStoreForIdentity(state, identity);
+        const currentProjectKey = sessionStore.projectKeyForRoot(state.project.root);
+        if (body.projectKey && body.projectKey !== currentProjectKey) {
+          jsonResponse(response, 409, { error: "AI session belongs to a different project." });
+          return;
+        }
+        jsonResponse(response, 200, sessionStore.updateSession(state.project, String(body.sessionId || body.id || ""), body));
+      } catch (error) {
+        jsonResponse(response, 404, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/sessions/delete") {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.isHost && !identity.canEdit) {
+        deny(response, "Editor approval is required before deleting LocalLeaf AI sessions.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).deleteSession(state.project, String(body.sessionId || body.id || "")));
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/sessions/fork") {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.isHost && !identity.canEdit) {
+        deny(response, "Editor approval is required before forking LocalLeaf AI sessions.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).forkSession(state.project, String(body.sessionId || body.id || "")));
+      } catch (error) {
+        jsonResponse(response, 404, { error: error.message });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/sessions/import-legacy") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Only the host app can import LocalLeaf AI sessions.");
+        return;
+      }
+      const body = await readBody(request);
+      try {
+        jsonResponse(response, 200, state.ai.sessions.importLegacySessions(state.project, body.sessions || [], body.currentSessionId || ""));
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+      }
       return;
     }
 
@@ -3066,7 +3718,7 @@ function createLocalLeafServer(options = {}) {
         });
         fs.writeFileSync(smokePath, "\\documentclass{article}\n\\begin{document}\nWe utilize this draft.\n\\end{document}\n", "utf8");
         refreshProject(state);
-        proposal = createDeterministicAgentProposal(state, { path: smokeFile, message: "rewrite this section" });
+        proposal = createDeterministicAgentProposal(state, { path: smokeFile, message: "rewrite this section", skipChangeLog: true });
         const applied = applyAiProposalToFile(state, proposal);
         const editOk = /We use this draft/.test(fs.readFileSync(smokePath, "utf8"));
         jsonResponse(response, editOk && provider.ok ? 200 : 400, {
@@ -3090,13 +3742,14 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/message") {
-      if (!isHostRequest(state, request, url)) {
-        deny(response, "Only the host app can ask LocalLeaf AI to inspect project text.");
+      const identity = requestIdentity(state, request, url);
+      if (!canUseAi(state, request, url)) {
+        deny(response, "Editor approval is required before asking LocalLeaf AI to inspect project text.");
         return;
       }
       const body = await readBody(request);
       try {
-        const result = await createAgentMessageResponse(state, body);
+        const result = await createAgentMessageResponse(state, { ...body, requester: requesterFromIdentity(identity) });
         broadcastState(state);
         jsonResponse(response, 200, result);
       } catch (error) {
@@ -3106,13 +3759,14 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/steer") {
-      if (!isHostRequest(state, request, url)) {
-        deny(response, "Only the host app can steer LocalLeaf AI runs.");
+      const identity = requestIdentity(state, request, url);
+      if (!canUseAi(state, request, url)) {
+        deny(response, "Editor approval is required before steering LocalLeaf AI runs.");
         return;
       }
       const body = await readBody(request);
       try {
-        const result = await createAgentMessageResponse(state, { ...body, steer: true });
+        const result = await createAgentMessageResponse(state, { ...body, steer: true, requester: requesterFromIdentity(identity) });
         broadcastState(state);
         jsonResponse(response, 200, {
           ...result,
@@ -3127,8 +3781,9 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/run") {
-      if (!isHostRequest(state, request, url)) {
-        deny(response, "Only the host app can run LocalLeaf AI.");
+      const identity = requestIdentity(state, request, url);
+      if (!canUseAi(state, request, url)) {
+        deny(response, "Editor approval is required before running LocalLeaf AI.");
         return;
       }
       const body = await readBody(request);
@@ -3162,7 +3817,7 @@ function createLocalLeafServer(options = {}) {
             result: { lines: logs.length }
           });
         }
-        const result = await createAgentMessageResponse(state, { ...body, runId });
+        const result = await createAgentMessageResponse(state, { ...body, runId, requester: requesterFromIdentity(identity) });
         sendNdjson(response, { type: "assistant_delta", runId, delta: result.reply || "" });
         for (const proposal of result.proposals || []) {
           sendNdjson(response, { type: "proposal_created", runId, proposal });
@@ -3181,10 +3836,6 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && (url.pathname === "/api/agent/proposal/apply" || url.pathname === "/api/agent/approval/approve")) {
-      if (!isHostRequest(state, request, url)) {
-        deny(response, "Only the host app can apply LocalLeaf AI proposals.");
-        return;
-      }
       if (!canEditProject(state, request, url)) {
         deny(response, "Editor approval is required before applying LocalLeaf AI proposals.");
         return;
@@ -3213,10 +3864,6 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/proposal/revert") {
-      if (!isHostRequest(state, request, url)) {
-        deny(response, "Only the host app can revert LocalLeaf AI proposals.");
-        return;
-      }
       if (!canEditProject(state, request, url)) {
         deny(response, "Editor approval is required before reverting LocalLeaf AI proposals.");
         return;
@@ -3244,10 +3891,6 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/run/revert") {
-      if (!isHostRequest(state, request, url)) {
-        deny(response, "Only the host app can undo LocalLeaf AI runs.");
-        return;
-      }
       if (!canEditProject(state, request, url)) {
         deny(response, "Editor approval is required before undoing LocalLeaf AI runs.");
         return;
@@ -3273,8 +3916,8 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/approval/reject") {
-      if (!isHostRequest(state, request, url)) {
-        deny(response, "Only the host app can reject LocalLeaf AI proposals.");
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before rejecting LocalLeaf AI proposals.");
         return;
       }
       const body = await readBody(request);
@@ -3795,6 +4438,7 @@ function createLocalLeafServer(options = {}) {
         }
       };
       state.chat = [];
+      state.ai.guestSessions.clear();
 
       if (shouldStartPublicTunnel) {
         startPublicTunnel(state, baseUrl);
@@ -3931,13 +4575,14 @@ function createLocalLeafServer(options = {}) {
         logs: ["[LocalLeaf] Compile started..."],
         version: state.compile.version + 1
       };
-      broadcastProject(state, "compile", state.compile);
+      broadcastProject(state, "compile", publicCompileState(state.compile));
 
       const previousPdfPath = state.compile.pdfPath;
+      const previousSynctexPath = state.compile.synctexPath;
       const result = await compileProject(state.project.root, state.project.mainFile, (chunk) => {
         state.compile.logs = [...state.compile.logs, ...chunk.split(/\r?\n/).filter(Boolean)].slice(-300);
-        broadcastProject(state, "compile", state.compile);
-      }, { previousPdfPath });
+        broadcastProject(state, "compile", publicCompileState(state.compile));
+      }, { previousPdfPath, previousSynctexPath });
 
       state.compile = {
         status: result.ok ? "success" : "failed",
@@ -3946,11 +4591,82 @@ function createLocalLeafServer(options = {}) {
         logs: result.logs.length ? result.logs : state.compile.logs,
         previewHtml: result.previewHtml,
         pdfPath: result.pdfPath,
+        synctexPath: result.synctexPath || null,
+        sourceMapAvailable: Boolean(result.synctexPath && fs.existsSync(result.synctexPath)),
         version: state.compile.version + 1
       };
-      broadcastProject(state, "compile", state.compile);
+      broadcastProject(state, "compile", publicCompileState(state.compile));
       broadcastState(state);
-      jsonResponse(response, 200, state.compile);
+      jsonResponse(response, 200, publicCompileState(state.compile));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/pdf/source-position") {
+      if (!canReadProject(state, request, url)) {
+        deny(response, "Join approval is required before mapping PDF source positions.");
+        return;
+      }
+      const body = await readBody(request);
+      jsonResponse(response, 200, resolvePdfSourcePosition(state, body));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/review/threads") {
+      if (!canReadProject(state, request, url)) {
+        deny(response, "Join approval is required before reading review comments.");
+        return;
+      }
+      jsonResponse(response, 200, { threads: state.review.list(state.project) });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/review/threads") {
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before creating review comments.");
+        return;
+      }
+      const identity = requestIdentity(state, request, url);
+      const body = await readBody(request);
+      const thread = state.review.create(state.project, {
+        title: body.title,
+        anchor: body.anchor,
+        body: body.body || body.message,
+        author: requesterFromIdentity(identity)
+      });
+      broadcastProject(state, "review", { threads: state.review.list(state.project), thread });
+      broadcastState(state);
+      jsonResponse(response, 200, { thread, threads: state.review.list(state.project) });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/review/threads/reply") {
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before replying to review comments.");
+        return;
+      }
+      const identity = requestIdentity(state, request, url);
+      const body = await readBody(request);
+      const thread = state.review.reply(state.project, String(body.threadId || body.id || ""), {
+        body: body.body || body.message,
+        author: requesterFromIdentity(identity)
+      });
+      broadcastProject(state, "review", { threads: state.review.list(state.project), thread });
+      broadcastState(state);
+      jsonResponse(response, 200, { thread, threads: state.review.list(state.project) });
+      return;
+    }
+
+    if (request.method === "POST" && (url.pathname === "/api/review/threads/resolve" || url.pathname === "/api/review/threads/reopen")) {
+      if (!canEditProject(state, request, url)) {
+        deny(response, "Editor approval is required before changing review status.");
+        return;
+      }
+      const body = await readBody(request);
+      const status = url.pathname.endsWith("/resolve") ? "resolved" : "open";
+      const thread = state.review.setStatus(state.project, String(body.threadId || body.id || ""), status);
+      broadcastProject(state, "review", { threads: state.review.list(state.project), thread });
+      broadcastState(state);
+      jsonResponse(response, 200, { thread, threads: state.review.list(state.project) });
       return;
     }
 
@@ -4073,12 +4789,15 @@ function createLocalLeafServer(options = {}) {
           token,
           heartbeat
         });
+        const user = tokenUserByToken(state, token);
         sendSse(
           response,
           "state",
           publicState(state, {
             isHost,
-            canRead: isHost || Boolean(token && state.session.status === "live" && state.session.activeTokens.has(token))
+            canRead: isHost || Boolean(token && state.session.status === "live" && state.session.activeTokens.has(token)),
+            canEdit: isHost || user?.role === "editor",
+            user
           })
         );
         request.on("close", () => {

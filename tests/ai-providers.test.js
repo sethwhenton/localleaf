@@ -308,6 +308,190 @@ test("uses hosted provider replacement instructions to create safe LaTeX edit pr
   }
 });
 
+test("splices provider annotation block rewrites into the mapped source block", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-provider-annotation-project-"));
+  const mainPath = path.join(projectRoot, "main.tex");
+  fs.writeFileSync(mainPath, [
+    "\\documentclass{article}",
+    "\\begin{document}",
+    "\\section{Introduction}",
+    "The aim of this lab was to continue the machine learning vulnerability detection work from the last lab.",
+    "",
+    "\\section{Conclusion}",
+    "The aim of the final section is to summarize the results.",
+    "\\end{document}",
+    ""
+  ].join("\n"));
+  const mock = await startOpenAiCompatibleMock(({ body }) => {
+    const prompt = body.messages?.map((message) => message.content).join("\n") || "";
+    if (/LOCALLEAF_OK/u.test(prompt)) {
+      return {
+        status: 200,
+        body: { choices: [{ message: { role: "assistant", content: "LOCALLEAF_OK" } }] }
+      };
+    }
+    assert.match(prompt, /PDF annotation target/);
+    assert.match(prompt, /Annotated source block/);
+    return {
+      status: 200,
+      body: {
+        choices: [{
+          message: {
+            role: "assistant",
+            content: JSON.stringify({
+              reply: "I rewrote the annotated sentence.",
+              summary: "Rewrite annotated sentence.",
+              edits: [{
+                path: "main.tex",
+                newText: "The objective of this lab was to continue the machine learning vulnerability detection work from the last lab."
+              }]
+            })
+          }
+        }]
+      }
+    };
+  });
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    await request(baseUrl, "/api/ai/providers/validate", {
+      method: "POST",
+      body: {
+        provider: {
+          id: "hosted",
+          name: "Hosted",
+          type: "openai-compatible",
+          baseUrl: mock.baseUrl,
+          apiKey: "test-provider-key",
+          modelId: "kimi-k2.6",
+          models: [{ id: "kimi-k2.6", name: "Kimi K2.6" }]
+        }
+      }
+    });
+    await request(baseUrl, "/api/ai/providers/activate", {
+      method: "POST",
+      body: { providerId: "hosted", modelId: "kimi-k2.6" }
+    });
+
+    const message = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        path: "main.tex",
+        message: "make this sentence use objective instead of aim",
+        selectedText: "The aim of this lab was to continue the machine learning vulnerability detection work from the last lab.",
+        pdfAnnotation: {
+          page: 1,
+          x: 120,
+          y: 180,
+          textPreview: "The aim of this lab was to continue the machine learning vulnerability detection work from the last lab.",
+          source: { path: "main.tex", line: 4, column: 1 }
+        }
+      }
+    });
+    assert.equal(message.provider.id, "hosted");
+    assert.equal(message.proposals.length, 1);
+    assert.match(message.proposals[0].newText, /The objective of this lab/);
+    assert.match(message.proposals[0].newText, /The aim of the final section/);
+    assert.match(message.proposals[0].newText, /\\begin\{document\}/);
+    assert.doesNotMatch(fs.readFileSync(mainPath, "utf8"), /The objective of this lab/);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("sends image annotation context to hosted providers", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-provider-image-annotation-project-"));
+  fs.writeFileSync(path.join(projectRoot, "main.tex"), [
+    "\\documentclass{article}",
+    "\\begin{document}",
+    "\\begin{figure}",
+    "\\centering",
+    "\\includegraphics[width=0.75\\linewidth]{diagram.png}",
+    "\\caption{Old diagram caption}",
+    "\\end{figure}",
+    "\\end{document}",
+    ""
+  ].join("\n"));
+  const mock = await startOpenAiCompatibleMock(({ body }) => {
+    const prompt = body.messages?.map((message) => message.content).join("\n") || "";
+    if (/LOCALLEAF_OK/u.test(prompt)) {
+      return {
+        status: 200,
+        body: { choices: [{ message: { role: "assistant", content: "LOCALLEAF_OK" } }] }
+      };
+    }
+    assert.match(prompt, /Selected PDF element: image/);
+    assert.match(prompt, /rendered image or figure region/);
+    assert.match(prompt, /\\includegraphics\[width=0\.75\\linewidth\]\{diagram\.png\}/);
+    return {
+      status: 200,
+      body: {
+        choices: [{
+          message: {
+            role: "assistant",
+            content: JSON.stringify({
+              reply: "I updated the image caption.",
+              summary: "Update figure caption.",
+              replacements: [{
+                find: "\\caption{Old diagram caption}",
+                replace: "\\caption{Updated diagram caption}"
+              }]
+            })
+          }
+        }]
+      }
+    };
+  });
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    await request(baseUrl, "/api/ai/providers/validate", {
+      method: "POST",
+      body: {
+        provider: {
+          id: "hosted",
+          name: "Hosted",
+          type: "openai-compatible",
+          baseUrl: mock.baseUrl,
+          apiKey: "test-provider-key",
+          modelId: "kimi-k2.6",
+          models: [{ id: "kimi-k2.6", name: "Kimi K2.6" }]
+        }
+      }
+    });
+    await request(baseUrl, "/api/ai/providers/activate", {
+      method: "POST",
+      body: { providerId: "hosted", modelId: "kimi-k2.6" }
+    });
+
+    const message = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        path: "main.tex",
+        message: "update this image caption",
+        selectedText: "Image or figure region selected.",
+        pdfAnnotation: {
+          page: 1,
+          x: 220,
+          y: 240,
+          elementType: "image",
+          targetRect: { left: 80, top: 120, width: 320, height: 180 },
+          textPreview: "Image or figure region selected.",
+          source: { path: "main.tex", line: 5, column: 1 }
+        }
+      }
+    });
+    assert.equal(message.proposals.length, 1);
+    assert.match(message.proposals[0].newText, /Updated diagram caption/);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test("falls back to deterministic proposals when no hosted provider is active", async () => {
   const projectRoot = createProject();
   const { app, baseUrl } = await startApp(projectRoot);

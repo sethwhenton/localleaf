@@ -34,6 +34,20 @@ The editor has a right-rail AI Helper with three tabs: `Chat`, `AI Helper`, and 
 - Mutating actions use approval endpoints: `/api/agent/approval/approve` and `/api/agent/approval/reject`. `/api/agent/proposal/apply` remains as a compatibility alias for approving a proposal.
 - Safe edit enforcement is host-side: text files only, project-contained paths, base-hash protection, and no delete/rename/move/upload/shell/binary actions.
 - The AI Helper chat renders approval cards. The Changes tab is history/review only with view, explain, copy diff, and open file actions.
+- AI chat sessions are now host-persisted per project root through `src/server/ai-sessions.js`. The desktop app stores host sessions under the app-private `AiSessions` directory. Switching projects restores that project's host session list instead of reusing one global AI chat.
+- AI chat sessions are identity-aware during live collaboration. The host still uses persisted project sessions, while approved editor guests get temporary in-memory AI sessions keyed by their live session identity. Guest AI session state is cleared when the host starts or ends a live session, and guests do not receive host provider settings, provider keys, model storage paths, or host chat history.
+- Project AI change history is persisted separately through `src/server/ai-changes.js` under the app-private `AiChanges` directory. Host Changes shows AI proposals from the host and guests; approved guests see their own AI changes plus applied shared changes. Proposal records include requester metadata and are updated on proposed, applied, rejected, stale, and reverted transitions.
+- PDF previews now support a SyncTeX-backed source-position lookup through `POST /api/pdf/source-position`. Successful compiles preserve the `.synctex.gz` path privately on the host while public compile state exposes only `sourceMapAvailable`.
+- The editor PDF toolbar includes an Annotate mode. Normal PDF clicks try to jump to mapped LaTeX source; Annotate clicks open a compact popover and send page/coordinate/text/source context to AI Helper as a targeted edit request. This is not persistent PDF commenting in the MVP.
+- PDF annotation AI requests are server-scoped to the mapped source block around the SyncTeX line. The provider prompt includes a line-numbered annotated source block, exact replacement instructions apply inside that block first, and provider `newText` that looks like a block rewrite is spliced into the annotated source instead of replacing the whole file.
+- PDF annotation target preview supports both text and rendered image/figure regions. The client detects larger non-white PDF canvas regions for image annotations, outlines them in orange, and sends `elementType`, target rectangle, PDF coordinates, and SyncTeX source context so text-only providers can still edit figure/image LaTeX such as `\includegraphics`, captions, labels, sizing, and placement.
+- Visual editor mode is now CodeMirror-native instead of using the old contenteditable prototype. `.tex` files can switch between Code and Visual modes from the editor toolbar, with mode remembered per project file. The source document remains the single truth; Visual mode adds CodeMirror decorations/widgets for headings, frontmatter, environments, captions, labels, refs/cites, inline math, and common formatting, plus HTML-to-LaTeX paste conversion for lists/tables/basic rich text.
+- Compile diagnostics are derived from compile logs and surfaced in the CodeMirror gutter/line highlights for the selected file while the original log dock remains available at the bottom.
+- Normal PDF source navigation is now double-click-to-source so single clicks do not unexpectedly move the editor. Annotate mode remains explicit single-click targeting.
+- Review threads are now a project-level persisted surface stored through `src/server/review-threads.js`. The right rail has a separate `Review` tab for compile diagnostics plus open/resolved PDF/source anchored comments. The PDF annotation popover can either save a persistent review comment or send the same anchored context to AI. Review comments are separate from AI proposal history; `Changes` remains AI change history.
+- PDF review comments with page rectangles render persistent orange markers over the PDF preview after mount and zoom. Review thread actions can open the mapped source line, reply, resolve, and reopen.
+- Legacy browser-local AI sessions are migrated once into the currently opened project. Session records keep message/proposal metadata but sanitize unexpected credential-shaped fields before writing JSON.
+- Approval cards in the AI chat show their full diff preview without an inner scroll area, while the Changes tab remains a history/review surface.
 - AI Helper permission settings are stored client-side and sent with each AI request. They currently control hosted-provider routing, rewrite requests, ask-before-edit approval cards, YOLO/no-confirm auto-apply for safe text proposals, multi-file intent, and advanced request gates for file management, uploads/imports, shell commands, and binary files.
 - The AI Helper timeline auto-scrolls to the latest message for active sessions and shows a floating jump-to-latest arrow when the user scrolls up. The composer has a compact session strip for steering, deleting/renaming sessions, queueing follow-up prompts, and toggling between Default permissions and YOLO mode.
 - Advanced actions are still host-gated. When enabled, those requests can reach the active model; the deterministic local fallback only automates safe text proposals and otherwise returns an acknowledgement rather than executing shell/file-management operations directly.
@@ -48,8 +62,9 @@ The editor has a right-rail AI Helper with three tabs: `Chat`, `AI Helper`, and 
 Current focused verification after the AI Helper harness work:
 
 ```powershell
-node --check public\app.js src\server\index.js src\server\ai-models.js
-node --test tests\ai-agent.test.js tests\ai-providers.test.js
+node --check public\app.js src\server\index.js src\server\ai-models.js src\server\ai-sessions.js src\desktop\main.js
+node --check src\server\review-threads.js src\client\editor.js public\editor.bundle.js
+node --test tests\ai-sessions.test.js tests\ai-agent.test.js tests\ai-providers.test.js tests\server-flow.test.js
 ```
 
 ## Security Audit Context
@@ -73,6 +88,11 @@ Package manager hardening:
 
 - `.npmrc` now sets `min-release-age=7`.
 - `.npmrc` now sets `ignore-scripts=true`.
+- `.npmrc` now sets `engine-strict=true`.
+- `.npmrc` blocks Git, remote URL tarball, local file tarball, and directory dependency sources with `allow-git=none`, `allow-remote=none`, `allow-file=none`, and `allow-directory=none`.
+- `.npmrc` now sets `strict-allow-scripts=true` so unreviewed dependency install scripts become hard errors whenever scripts are not globally ignored.
+- `package.json` declares Node/npm engine expectations: Node `>=22.19.0` and npm `>=11.10.0`.
+- `package.json` has a pinned `allowScripts` review allowlist for the only dependency packages currently marked with install scripts: `electron@41.3.0`, `electron-winstaller@5.4.0`, and `esbuild@0.28.0`.
 - CI installs dependencies with `npm ci --ignore-scripts`.
 - CI explicitly rebuilds only the known required install-script packages:
   - macOS: `electron`, `esbuild`
@@ -134,3 +154,15 @@ On macOS, `electron-winstaller` is not needed for the macOS release path, so CI 
 - When bumping Tectonic or cloudflared, update both the pinned release tag and SHA-256 hashes in `scripts/prepare-binaries.js` and the Windows helper scripts.
 - When adding dependencies, check whether the lockfile introduces `hasInstallScript`, Git/GitHub/tarball sources, or affected namespaces before allowing the change.
 - When adding workflows, keep top-level permissions read-only, isolate write-token jobs from build/test/package-manager execution, and pin actions to full SHAs.
+
+## Major Overhaul Handoff
+
+The next architectural focus is documented in `update.md`. The short version:
+
+- Product north star: LocalLeaf should be a lightweight host-owned LaTeX writing room: open/create project, compile locally, start sharing, approve guests, write/chat/compile, export, stop.
+- Realtime core: the current collaboration model is host-authoritative whole-file snapshot sync. Replace it with versioned operations through `@codemirror/collab` or a Yjs document layer; do not move core editor sync to a cloud service unless the product intentionally changes away from host-owned sessions.
+- Host boundary: bind local control APIs to loopback, keep public tunnel APIs narrow, and make guest capabilities explicit.
+- Compile/import/export: move heavy work into queued worker jobs with cancellation, stale-result suppression, resource limits, and safer LaTeX isolation.
+- AI helper: keep AI optional and host-mediated. Add SHA-256 checks for GGUF downloads, idle shutdown/thread caps for `llama-server`, explicit hosted-provider privacy copy, and proposal pruning.
+- UX: collapse Home, Project Overview, and Session Management into a Host Dashboard; rename sharing actions in plain language; move AI setup out of first-run; simplify the editor toolbar.
+- Design docs: `DESIGN.md` is an Ollama-derived design analysis, not a LocalLeaf design system. Create/rename a real LocalLeaf design system doc before a UI rebuild, and either update or retire the stale `context.md`.

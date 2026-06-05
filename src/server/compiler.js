@@ -177,6 +177,10 @@ function expectedPdfPath(projectRoot, mainFile, outputDir = projectRoot) {
   return path.join(outputDir, `${path.basename(mainFile, ".tex")}.pdf`);
 }
 
+function expectedSynctexPath(projectRoot, mainFile, outputDir = projectRoot) {
+  return path.join(outputDir, `${path.basename(mainFile, ".tex")}.synctex.gz`);
+}
+
 function hasBibliography(projectRoot, source) {
   if (/\\(?:bibliography|addbibresource)\b/.test(source)) {
     return true;
@@ -208,7 +212,8 @@ async function runLatexmk(projectRoot, mainFile, outputDir, onData) {
     engine: "latexmk",
     exitCode: result.code || 0,
     logs: splitLogs(result.output),
-    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
+    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir),
+    synctexPath: expectedSynctexPath(projectRoot, mainFile, outputDir)
   };
 }
 
@@ -223,7 +228,8 @@ async function runTectonic(projectRoot, mainFile, outputDir, command, onData) {
     engine: command === "tectonic" ? "tectonic" : "bundled tectonic",
     exitCode: result.code || 0,
     logs: splitLogs(result.output),
-    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
+    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir),
+    synctexPath: expectedSynctexPath(projectRoot, mainFile, outputDir)
   };
 }
 
@@ -259,7 +265,8 @@ async function runDirectEngine(projectRoot, mainFile, source, outputDir, engine,
     engine,
     exitCode,
     logs,
-    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir)
+    pdfPath: expectedPdfPath(projectRoot, mainFile, outputDir),
+    synctexPath: expectedSynctexPath(projectRoot, mainFile, outputDir)
   };
 }
 
@@ -280,6 +287,7 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
   const previewHtml = renderLatexPreview(source, includedFiles);
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-compile-"));
   const previousPdfPath = options.previousPdfPath;
+  const previousSynctexPath = options.previousSynctexPath;
   let restoredPreviousPdf = false;
 
   if (!compiler.available) {
@@ -329,6 +337,7 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
   const logs = [];
   let engine = compiler.engine;
   let producedPdf = null;
+  let producedSynctex = null;
   let producedOk = false;
 
   for (const attempt of attempts) {
@@ -339,6 +348,7 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
 
     if (fs.existsSync(result.pdfPath)) {
       producedPdf = result.pdfPath;
+      producedSynctex = result.synctexPath && fs.existsSync(result.synctexPath) ? result.synctexPath : null;
       producedOk = result.exitCode === 0;
       if (!producedOk) {
         logs.push("[LocalLeaf] The compiler produced a PDF but reported errors. Review the pinned errors before sharing the PDF.");
@@ -351,6 +361,7 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
 
   if (!producedPdf && previousPdfPath && fs.existsSync(previousPdfPath)) {
     producedPdf = previousPdfPath;
+    producedSynctex = previousSynctexPath && fs.existsSync(previousSynctexPath) ? previousSynctexPath : null;
     restoredPreviousPdf = true;
     logs.push("[LocalLeaf] Compile failed. Keeping the last successful PDF preview visible.");
   }
@@ -375,7 +386,8 @@ async function compileProject(projectRoot, mainFile, onData, options = {}) {
         : ["[LocalLeaf] Native PDF compile failed. Showing HTML preview fallback with the compiler log above."])
     ],
     previewHtml,
-    pdfPath: producedPdf
+    pdfPath: producedPdf,
+    synctexPath: producedSynctex
   };
 }
 

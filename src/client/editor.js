@@ -12,8 +12,8 @@ import {
 } from "@codemirror/commands";
 import { StreamLanguage, HighlightStyle, bracketMatching, syntaxHighlighting } from "@codemirror/language";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
-import { EditorSelection, EditorState, Prec, Transaction } from "@codemirror/state";
-import { Decoration, EditorView, MatchDecorator, ViewPlugin, keymap } from "@codemirror/view";
+import { Compartment, EditorSelection, EditorState, Prec, RangeSetBuilder, Transaction } from "@codemirror/state";
+import { Decoration, EditorView, GutterMarker, MatchDecorator, ViewPlugin, WidgetType, gutter, keymap } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 
 const COMMON_PACKAGES = [
@@ -260,6 +260,325 @@ const latexCommandHighlighter = ViewPlugin.fromClass(
   }
 );
 
+function cleanLatexLabel(value) {
+  return String(value || "")
+    .replace(/\\(?:textbf|textit|emph|texttt)\{([^{}]*)\}/g, "$1")
+    .replace(/\\(?:label|ref|eqref|autoref|pageref|cite|citep|citet|parencite|textcite)\{([^{}]*)\}/g, "$1")
+    .replace(/\\[A-Za-z@]+(?:\[[^\]]*])?/g, "")
+    .replace(/[{}]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+}
+
+class VisualCueWidget extends WidgetType {
+  constructor(kind, title, detail = "") {
+    super();
+    this.kind = kind;
+    this.title = title;
+    this.detail = detail;
+  }
+
+  eq(other) {
+    return other.kind === this.kind && other.title === this.title && other.detail === this.detail;
+  }
+
+  toDOM() {
+    const wrap = document.createElement("span");
+    wrap.className = `cm-visual-cue cm-visual-cue-${this.kind}`;
+    const label = document.createElement("b");
+    label.textContent = this.title || this.kind;
+    wrap.append(label);
+    if (this.detail) {
+      const detail = document.createElement("span");
+      detail.textContent = this.detail;
+      wrap.append(detail);
+    }
+    return wrap;
+  }
+
+  ignoreEvent() {
+    return false;
+  }
+}
+
+class DiagnosticMarker extends GutterMarker {
+  constructor(severity, message) {
+    super();
+    this.severity = severity;
+    this.message = message;
+  }
+
+  eq(other) {
+    return other.severity === this.severity && other.message === this.message;
+  }
+
+  toDOM() {
+    const marker = document.createElement("span");
+    marker.className = `cm-diagnostic-marker cm-diagnostic-marker-${this.severity}`;
+    marker.title = this.message;
+    return marker;
+  }
+}
+
+function collectRegexDecorations(text, regexp, className, decorations) {
+  let match;
+  while ((match = regexp.exec(text))) {
+    const value = match[0];
+    if (!value) {
+      regexp.lastIndex += 1;
+      continue;
+    }
+    decorations.push({
+      from: match.index,
+      to: match.index + value.length,
+      rank: 20,
+      decoration: Decoration.mark({ class: className })
+    });
+  }
+}
+
+function visualCueForLine(lineText) {
+  const trimmed = lineText.trim();
+  const heading = trimmed.match(/^\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?\{(.+)\}/);
+  if (heading) {
+    return {
+      kind: "heading",
+      title: heading[1].replace(/sub/g, "Sub "),
+      detail: cleanLatexLabel(heading[2])
+    };
+  }
+  const title = trimmed.match(/^\\(title|author|date)\{(.+)\}/);
+  if (title) {
+    return {
+      kind: "frontmatter",
+      title: title[1],
+      detail: cleanLatexLabel(title[2])
+    };
+  }
+  if (/^\\maketitle\b/.test(trimmed)) {
+    return { kind: "frontmatter", title: "Title block", detail: "maketitle" };
+  }
+  const environment = trimmed.match(/^\\begin\{([^{}]+)\}/);
+  if (environment) {
+    const name = environment[1];
+    const visualNames = {
+      abstract: "Abstract",
+      align: "Math block",
+      center: "Centered block",
+      description: "Description list",
+      enumerate: "Numbered list",
+      equation: "Equation",
+      figure: "Figure",
+      itemize: "Bullet list",
+      proof: "Proof",
+      quote: "Quote",
+      table: "Table",
+      tabular: "Tabular data",
+      theorem: "Theorem",
+      lemma: "Lemma",
+      corollary: "Corollary"
+    };
+    if (visualNames[name]) return { kind: "environment", title: visualNames[name], detail: name };
+  }
+  if (/^\\item\b/.test(trimmed)) return { kind: "list", title: "List item", detail: cleanLatexLabel(trimmed.replace(/^\\item\s*/u, "")) };
+  const caption = trimmed.match(/^\\caption\{(.+)\}/);
+  if (caption) return { kind: "caption", title: "Caption", detail: cleanLatexLabel(caption[1]) };
+  const image = trimmed.match(/\\includegraphics(?:\[[^\]]*])?\{([^{}]+)\}/);
+  if (image) return { kind: "figure", title: "Image", detail: cleanLatexLabel(image[1]) };
+  const label = trimmed.match(/^\\label\{([^{}]+)\}/);
+  if (label) return { kind: "label", title: "Label", detail: label[1] };
+  if (/^\\\[/u.test(trimmed) || /^\\begin\{(?:equation|align|gather|multline)\}/u.test(trimmed)) {
+    return { kind: "math", title: "Display math", detail: "" };
+  }
+  return null;
+}
+
+function buildVisualDecorations(view) {
+  const decorations = [];
+  const doc = view.state.doc;
+  for (let lineNumber = 1; lineNumber <= doc.lines; lineNumber += 1) {
+    const line = doc.line(lineNumber);
+    const cue = visualCueForLine(line.text);
+    if (!cue) continue;
+    const lineClass = `cm-visual-line cm-visual-line-${cue.kind}`;
+    decorations.push({
+      from: line.from,
+      to: line.from,
+      rank: 2,
+      decoration: Decoration.line({
+        class: lineClass,
+        attributes: {
+          "data-visual-kind": cue.title,
+          "data-visual-detail": cue.detail || ""
+        }
+      })
+    });
+    decorations.push({
+      from: line.from,
+      to: line.from,
+      rank: 1,
+      decoration: Decoration.widget({
+        widget: new VisualCueWidget(cue.kind, cue.title, cue.detail),
+        side: -1
+      })
+    });
+  }
+
+  const text = doc.toString();
+  collectRegexDecorations(text, /\\(?:textbf|textit|emph|texttt)\{[^{}\n]{1,240}\}/g, "cm-visual-inline-format", decorations);
+  collectRegexDecorations(text, /\\(?:ref|eqref|autoref|pageref)\{[^{}\n]{1,160}\}/g, "cm-visual-reference", decorations);
+  collectRegexDecorations(text, /\\(?:cite|citep|citet|parencite|textcite)\{[^{}\n]{1,220}\}/g, "cm-visual-citation", decorations);
+  collectRegexDecorations(text, /\\label\{[^{}\n]{1,180}\}/g, "cm-visual-label", decorations);
+  collectRegexDecorations(text, /\\\([^]*?\\\)|(?<!\\)\$[^$\n]{1,240}(?<!\\)\$/g, "cm-visual-inline-math", decorations);
+
+  decorations.sort((left, right) => left.from - right.from || left.to - right.to || left.rank - right.rank);
+  const builder = new RangeSetBuilder();
+  for (const item of decorations) {
+    builder.add(item.from, item.to, item.decoration);
+  }
+  return builder.finish();
+}
+
+function createVisualModeExtension() {
+  return [
+    EditorView.editorAttributes.of({ class: "cm-localleaf-visual-mode" }),
+    ViewPlugin.fromClass(
+      class {
+        constructor(view) {
+          this.decorations = buildVisualDecorations(view);
+        }
+
+        update(update) {
+          if (update.docChanged || update.viewportChanged) {
+            this.decorations = buildVisualDecorations(update.view);
+          }
+        }
+      },
+      {
+        decorations: (plugin) => plugin.decorations
+      }
+    )
+  ];
+}
+
+function normalizeDiagnostics(items = []) {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => ({
+    line: Math.max(1, Number(item?.line || 1)),
+    column: Math.max(0, Number(item?.column || 0)),
+    severity: ["error", "warning", "info"].includes(item?.severity) ? item.severity : "info",
+    message: String(item?.message || "").trim().slice(0, 1000)
+  })).filter((item) => item.message).slice(0, 200);
+}
+
+function buildDiagnosticDecorations(view, diagnostics = []) {
+  const builder = new RangeSetBuilder();
+  const doc = view.state.doc;
+  const sorted = normalizeDiagnostics(diagnostics).sort((left, right) => left.line - right.line || left.column - right.column);
+  for (const diagnostic of sorted) {
+    const line = doc.line(Math.min(doc.lines, diagnostic.line));
+    builder.add(line.from, line.from, Decoration.line({
+      class: `cm-diagnostic-line cm-diagnostic-line-${diagnostic.severity}`,
+      attributes: { title: diagnostic.message }
+    }));
+  }
+  return builder.finish();
+}
+
+function createDiagnosticsExtension(diagnostics = []) {
+  const clean = normalizeDiagnostics(diagnostics);
+  return [
+    gutter({
+      class: "cm-localleaf-diagnostic-gutter",
+      markers(view) {
+        const builder = new RangeSetBuilder();
+        const doc = view.state.doc;
+        const sorted = clean.sort((left, right) => left.line - right.line || left.column - right.column);
+        for (const diagnostic of sorted) {
+          const line = doc.line(Math.min(doc.lines, diagnostic.line));
+          builder.add(line.from, line.from, new DiagnosticMarker(diagnostic.severity, diagnostic.message));
+        }
+        return builder.finish();
+      },
+      initialSpacer: () => new DiagnosticMarker("info", "")
+    }),
+    ViewPlugin.fromClass(
+      class {
+        constructor(view) {
+          this.decorations = buildDiagnosticDecorations(view, clean);
+        }
+
+        update(update) {
+          if (update.docChanged || update.viewportChanged) {
+            this.decorations = buildDiagnosticDecorations(update.view, clean);
+          }
+        }
+      },
+      {
+        decorations: (plugin) => plugin.decorations
+      }
+    )
+  ];
+}
+
+function latexEscapePlainText(value) {
+  return String(value || "")
+    .replace(/\\/g, "\\textbackslash{}")
+    .replace(/([#$%&_{}])/g, "\\$1")
+    .replace(/\^/g, "\\^{}")
+    .replace(/~/g, "\\~{}");
+}
+
+function htmlNodeToLatex(node) {
+  if (!node) return "";
+  if (node.nodeType === Node.TEXT_NODE) return latexEscapePlainText(node.nodeValue || "");
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const tag = node.tagName.toLowerCase();
+  const children = () => Array.from(node.childNodes).map(htmlNodeToLatex).join("");
+  if (tag === "br") return "\n";
+  if (tag === "strong" || tag === "b") return `\\textbf{${children()}}`;
+  if (tag === "em" || tag === "i") return `\\emph{${children()}}`;
+  if (tag === "code") return `\\texttt{${children()}}`;
+  if (tag === "a") {
+    const href = latexEscapePlainText(node.getAttribute("href") || "");
+    return href ? `\\href{${href}}{${children()}}` : children();
+  }
+  if (tag === "li") return `  \\item ${children().trim()}\n`;
+  if (tag === "ul" || tag === "ol") {
+    const env = tag === "ol" ? "enumerate" : "itemize";
+    return `\\begin{${env}}\n${children()}\\end{${env}}\n\n`;
+  }
+  if (tag === "tr") {
+    return `${Array.from(node.children).map((cell) => htmlNodeToLatex(cell).trim()).join(" & ")} \\\\\n`;
+  }
+  if (tag === "table") {
+    const rows = Array.from(node.querySelectorAll("tr"));
+    const maxCells = Math.max(1, ...rows.map((row) => row.children.length));
+    const body = rows.map((row) => htmlNodeToLatex(row)).join("");
+    return `\\begin{table}[h]\n  \\centering\n  \\begin{tabular}{${"l".repeat(maxCells)}}\n${body}  \\end{tabular}\n  \\caption{}\n  \\label{tab:}\n\\end{table}\n\n`;
+  }
+  if (tag === "td" || tag === "th") return children();
+  if (tag === "pre") return `\\begin{verbatim}\n${node.textContent || ""}\n\\end{verbatim}\n\n`;
+  if (["p", "div", "section", "article"].includes(tag)) {
+    const value = children().trim();
+    return value ? `${value}\n\n` : "";
+  }
+  return children();
+}
+
+function htmlToLatexPaste(html, text) {
+  if (!html || typeof DOMParser === "undefined") return "";
+  try {
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    const latex = Array.from(parsed.body.childNodes).map(htmlNodeToLatex).join("").replace(/\n{3,}/g, "\n\n").trim();
+    const plain = String(text || "").trim();
+    return latex && latex !== plain ? latex : "";
+  } catch {
+    return "";
+  }
+}
+
 const localLeafTheme = EditorView.theme(
   {
     "&": {
@@ -356,6 +675,10 @@ function createEditor(parent, options = {}) {
   let view;
   let suppressChange = false;
   let suggestions = normalizeSuggestions(options.suggestions);
+  let currentMode = options.mode === "visual" ? "visual" : "code";
+  let diagnostics = normalizeDiagnostics(options.diagnostics);
+  const visualModeCompartment = new Compartment();
+  const diagnosticsCompartment = new Compartment();
 
   const getText = () => view.state.doc.toString();
 
@@ -408,6 +731,17 @@ function createEditor(parent, options = {}) {
       () => cursorOffset,
       (_text, _selected, start) => start
     );
+  }
+
+  function insertLatexFromHtmlPaste(event) {
+    if (currentMode !== "visual") return false;
+    const html = event.clipboardData?.getData("text/html") || "";
+    const plain = event.clipboardData?.getData("text/plain") || "";
+    const latex = htmlToLatexPaste(html, plain);
+    if (!latex) return false;
+    event.preventDefault();
+    insertRaw(latex, latex.length);
+    return true;
   }
 
   function lineAllowsVisibleBreak(lineText) {
@@ -633,7 +967,12 @@ function createEditor(parent, options = {}) {
     EditorView.lineWrapping,
     EditorState.tabSize.of(2),
     EditorState.readOnly.of(Boolean(options.readOnly)),
+    visualModeCompartment.of(currentMode === "visual" ? createVisualModeExtension() : []),
+    diagnosticsCompartment.of(createDiagnosticsExtension(diagnostics)),
     Prec.highest(EditorView.domEventHandlers({
+      paste(event) {
+        return insertLatexFromHtmlPaste(event);
+      },
       keydown(event) {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
           event.preventDefault();
@@ -669,6 +1008,7 @@ function createEditor(parent, options = {}) {
     }),
     parent
   });
+  parent.classList.toggle("editor-code-mount-visual", currentMode === "visual");
 
   const api = {
     host: parent,
@@ -686,6 +1026,23 @@ function createEditor(parent, options = {}) {
     },
     setSuggestions(nextSuggestions) {
       suggestions = normalizeSuggestions(nextSuggestions);
+    },
+    setMode(mode) {
+      currentMode = mode === "visual" ? "visual" : "code";
+      parent.classList.toggle("editor-code-mount-visual", currentMode === "visual");
+      view.dispatch({
+        effects: visualModeCompartment.reconfigure(currentMode === "visual" ? createVisualModeExtension() : [])
+      });
+      return currentMode;
+    },
+    getMode() {
+      return currentMode;
+    },
+    setDiagnostics(nextDiagnostics) {
+      diagnostics = normalizeDiagnostics(nextDiagnostics);
+      view.dispatch({
+        effects: diagnosticsCompartment.reconfigure(createDiagnosticsExtension(diagnostics))
+      });
     },
     selectRange,
     find(query, options) {

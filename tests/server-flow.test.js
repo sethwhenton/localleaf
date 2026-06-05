@@ -282,6 +282,158 @@ test("serves compiled PDFs with byte-range support for embedded viewers", async 
   }
 });
 
+test("maps PDF click coordinates to source positions through SyncTeX resolver", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-pdf-source-test-"));
+  fs.writeFileSync(path.join(tempRoot, "main.tex"), "\\documentclass{article}\n\\begin{document}\nSource jump\n\\end{document}", "utf8");
+  const pdfPath = path.join(tempRoot, "main.pdf");
+  const synctexPath = path.join(tempRoot, "main.synctex.gz");
+  fs.writeFileSync(pdfPath, Buffer.from("%PDF-1.4\n%%EOF\n", "utf8"));
+  fs.writeFileSync(synctexPath, "synctex", "utf8");
+
+  const app = createLocalLeafServer({
+    port: 0,
+    projectRoot: tempRoot,
+    autoStartTunnel: false,
+    synctexResolver: ({ page, x, y, pdfPath: mappedPdf, synctexPath: mappedSynctex }) => {
+      assert.equal(page, 1);
+      assert.equal(Math.round(x), 40);
+      assert.equal(Math.round(y), 70);
+      assert.equal(mappedPdf, pdfPath);
+      assert.equal(mappedSynctex, synctexPath);
+      return { ok: true, path: "main.tex", line: 3, column: 2 };
+    }
+  });
+  app.server.listen(0);
+  await once(app.server, "listening");
+  const port = app.server.address().port;
+  app.state.port = port;
+  app.state.compile = {
+    ...app.state.compile,
+    status: "success",
+    mode: "pdf",
+    pdfPath,
+    synctexPath,
+    sourceMapAvailable: true,
+    version: 1
+  };
+  const baseUrl = hostBaseUrl(app, port);
+
+  try {
+    const state = await request(baseUrl, "/api/state");
+    assert.equal(state.compile.sourceMapAvailable, true);
+    assert.equal(Object.hasOwn(state.compile, "synctexPath"), false);
+
+    const mapped = await request(baseUrl, "/api/pdf/source-position", {
+      method: "POST",
+      body: { page: 1, x: 40, y: 70 }
+    });
+    assert.deepEqual(mapped, { ok: true, path: "main.tex", line: 3, column: 2 });
+  } finally {
+    await app.stop();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("PDF source-position returns a graceful miss when SyncTeX data is absent", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-pdf-source-miss-"));
+  fs.writeFileSync(path.join(tempRoot, "main.tex"), "\\documentclass{article}\\begin{document}No map\\end{document}", "utf8");
+  const pdfPath = path.join(tempRoot, "main.pdf");
+  fs.writeFileSync(pdfPath, Buffer.from("%PDF-1.4\n%%EOF\n", "utf8"));
+
+  const app = createLocalLeafServer({ port: 0, projectRoot: tempRoot, autoStartTunnel: false });
+  app.server.listen(0);
+  await once(app.server, "listening");
+  const port = app.server.address().port;
+  app.state.port = port;
+  app.state.compile = {
+    ...app.state.compile,
+    status: "success",
+    mode: "pdf",
+    pdfPath,
+    synctexPath: null,
+    sourceMapAvailable: false,
+    version: 1
+  };
+  const baseUrl = hostBaseUrl(app, port);
+
+  try {
+    const mapped = await request(baseUrl, "/api/pdf/source-position", {
+      method: "POST",
+      body: { page: 1, x: 40, y: 70 }
+    });
+    assert.equal(mapped.ok, false);
+    assert.match(mapped.reason, /SyncTeX data is not available/);
+  } finally {
+    await app.stop();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("persists review threads with PDF/source anchors and status changes", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-review-thread-test-"));
+  const reviewRoot = path.join(tempRoot, ".review-store");
+  fs.writeFileSync(path.join(tempRoot, "main.tex"), "\\documentclass{article}\n\\begin{document}\nReview me\n\\end{document}", "utf8");
+
+  const app = createLocalLeafServer({
+    port: 0,
+    projectRoot: tempRoot,
+    reviewRoot,
+    autoStartTunnel: false
+  });
+  app.server.listen(0);
+  await once(app.server, "listening");
+  const port = app.server.address().port;
+  app.state.port = port;
+  const baseUrl = hostBaseUrl(app, port);
+
+  try {
+    const created = await request(baseUrl, "/api/review/threads", {
+      method: "POST",
+      body: {
+        body: "Please make this paragraph clearer.",
+        anchor: {
+          kind: "pdf",
+          page: 1,
+          x: 40,
+          y: 70,
+          targetRect: { left: 12, top: 18, width: 140, height: 34 },
+          textPreview: "Review me",
+          source: { path: "main.tex", line: 3, column: 0 },
+          compileVersion: 2
+        }
+      }
+    });
+    assert.equal(created.thread.status, "open");
+    assert.equal(created.thread.anchor.source.path, "main.tex");
+    assert.equal(created.thread.messages[0].body, "Please make this paragraph clearer.");
+
+    const state = await request(baseUrl, "/api/state");
+    assert.equal(state.review.threads.length, 1);
+    assert.equal(state.review.threads[0].anchor.textPreview, "Review me");
+
+    const replied = await request(baseUrl, "/api/review/threads/reply", {
+      method: "POST",
+      body: { threadId: created.thread.id, body: "I agree with this comment." }
+    });
+    assert.equal(replied.thread.messages.length, 2);
+
+    const resolved = await request(baseUrl, "/api/review/threads/resolve", {
+      method: "POST",
+      body: { threadId: created.thread.id }
+    });
+    assert.equal(resolved.thread.status, "resolved");
+
+    const reopened = await request(baseUrl, "/api/review/threads/reopen", {
+      method: "POST",
+      body: { threadId: created.thread.id }
+    });
+    assert.equal(reopened.thread.status, "open");
+  } finally {
+    await app.stop();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("reports update availability and platform downloads to the host", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-update-test-"));
   fs.writeFileSync(path.join(tempRoot, "main.tex"), "\\documentclass{article}\\begin{document}Update\\end{document}", "utf8");

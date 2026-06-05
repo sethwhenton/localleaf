@@ -327,6 +327,48 @@ test("creates exact replacement proposals for update requests", async () => {
   }
 });
 
+test("scopes PDF annotation replacements to the mapped source block", async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-agent-annotation-project-"));
+  const mainPath = path.join(projectRoot, "main.tex");
+  fs.writeFileSync(mainPath, [
+    "\\documentclass{article}",
+    "\\begin{document}",
+    "\\section{Introduction}",
+    "The aim of this lab was to continue the machine learning vulnerability detection work from the last lab.",
+    "",
+    "\\section{Conclusion}",
+    "The aim of the final section is to summarize the results.",
+    "\\end{document}",
+    ""
+  ].join("\n"));
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    const message = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        path: "main.tex",
+        message: "replace aim with objective",
+        selectedText: "The aim of this lab was to continue the machine learning vulnerability detection work from the last lab.",
+        pdfAnnotation: {
+          page: 1,
+          x: 120,
+          y: 180,
+          textPreview: "The aim of this lab was to continue the machine learning vulnerability detection work from the last lab.",
+          source: { path: "main.tex", line: 4, column: 1 }
+        }
+      }
+    });
+    assert.equal(message.proposals.length, 1);
+    assert.match(message.proposals[0].summary, /annotated PDF selection/);
+    assert.match(message.proposals[0].newText, /The objective of this lab/);
+    assert.match(message.proposals[0].newText, /The aim of the final section/);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test("honors AI permission approval mode on proposals", async () => {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localleaf-ai-agent-permission-project-"));
   fs.writeFileSync(path.join(projectRoot, "main.tex"), "\\documentclass{article}\n\\begin{document}\nWe utilize this draft.\n\\end{document}\n");
