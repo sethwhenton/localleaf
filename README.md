@@ -130,9 +130,9 @@ The built-in Cursor-style harness powers AI edit proposals inside LocalLeaf: mod
 | macOS Apple Silicon | [LocalLeaf-Host-mac-arm64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg) |
 | macOS Intel | [LocalLeaf-Host-mac-x64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg) |
 
-Current release: `0.1.21`
+Current release: `0.1.22`
 
-Version `0.1.21` polishes the LocalLeaf Local model cards, settings/theme iconography, and editor menu tray so the AI model picker and workspace actions feel cleaner and more consistent. It also keeps the larger local AI context handling and pinned release binary downloads from the previous release.
+Version `0.1.22` fixes image/PDF asset uploads so uploaded assets are saved with normalized cross-platform paths, appear immediately in the Images panel, and remain downloadable from the project state.
 
 ## macOS First Launch
 

@@ -638,6 +638,7 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
     });
     assert.equal(uploaded.response.status, 200);
     assert.equal(uploaded.payload.path, "images/proof.png");
+    assert.deepEqual(fs.readFileSync(path.join(tempRoot, "images", "proof.png")), png);
     state = await request(baseUrl, "/api/state");
     assert.ok(state.project.files.some((item) => item.path === "images" && item.type === "directory"));
     assert.ok(state.project.files.some((item) => item.path === "images/proof.png" && item.type === "image"));
@@ -646,6 +647,25 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
     assert.equal(image.response.status, 200);
     assert.equal(image.response.headers.get("content-type"), "image/png");
     assert.ok(image.buffer.length > 20);
+
+    const windowsPathUpload = await rawRequest(baseUrl, "/api/file/upload", {
+      method: "POST",
+      headers: {
+        "content-type": "image/png",
+        "x-file-path": "images\\windows-proof.png"
+      },
+      rawBody: png
+    });
+    assert.equal(windowsPathUpload.response.status, 200);
+    assert.equal(windowsPathUpload.payload.path, "images/windows-proof.png");
+    assert.deepEqual(fs.readFileSync(path.join(tempRoot, "images", "windows-proof.png")), png);
+    state = await request(baseUrl, "/api/state");
+    assert.ok(state.project.files.some((item) => item.path === "images/windows-proof.png" && item.type === "image"));
+
+    const windowsPathImage = await binaryRequest(baseUrl, "/api/asset?path=images%2Fwindows-proof.png");
+    assert.equal(windowsPathImage.response.status, 200);
+    assert.equal(windowsPathImage.response.headers.get("content-type"), "image/png");
+    assert.ok(windowsPathImage.buffer.length > 20);
 
     const exportedZip = await publicTunnelBinaryRequest(
       baseUrl,

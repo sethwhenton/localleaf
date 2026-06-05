@@ -3574,7 +3574,7 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Editor approval is required before uploading files.");
         return;
       }
-      const filePath = String(request.headers["x-file-path"] || request.headers["x-file-name"] || "").trim();
+      const filePath = normalizeRelativePath(String(request.headers["x-file-path"] || request.headers["x-file-name"] || "").trim());
       const fullPath = resolveProjectPath(state.project.root, filePath);
       if (!isTextFile(fullPath) && !isImageFile(fullPath)) {
         jsonResponse(response, 400, { error: "Only LaTeX source/support files and image/PDF assets can be uploaded." });

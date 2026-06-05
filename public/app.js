@@ -52,6 +52,16 @@ const SUPPORTED_PROJECT_FILE_EXTENSIONS = new Set([
   ".pdf",
   ".eps"
 ]);
+const SUPPORTED_PROJECT_IMAGE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".svg",
+  ".pdf",
+  ".eps"
+]);
 const SUPPORTED_PROJECT_SPECIAL_FILENAMES = new Set(["latexmkrc", "makefile", ".latexmkrc"]);
 const shouldResetSidebarSectionLayout = localStorage.getItem("localleaf.sidebarSectionLayoutVersion") !== SIDEBAR_SECTION_LAYOUT_VERSION;
 const initialTheme = localStorage.getItem("localleaf.theme") === "dark" ? "dark" : "light";
@@ -303,7 +313,11 @@ async function api(path, options = {}) {
       method: options.method || "GET",
       headers,
       signal,
-      body: options.rawBody || (options.body ? JSON.stringify(options.body) : undefined)
+      body: Object.prototype.hasOwnProperty.call(options, "rawBody")
+        ? options.rawBody
+        : options.body
+          ? JSON.stringify(options.body)
+          : undefined
     });
   } catch (error) {
     if (error.name === "AbortError") {
@@ -1278,6 +1292,14 @@ function importFileExtension(fileOrPath) {
 function isSupportedProjectFileName(fileOrPath) {
   const name = importFileName(fileOrPath).toLowerCase();
   return SUPPORTED_PROJECT_SPECIAL_FILENAMES.has(name) || SUPPORTED_PROJECT_FILE_EXTENSIONS.has(importFileExtension(fileOrPath));
+}
+
+function isSupportedImageProjectFileName(fileOrPath) {
+  return SUPPORTED_PROJECT_IMAGE_EXTENSIONS.has(importFileExtension(fileOrPath));
+}
+
+function normalizeProjectPathInput(pathValue = "") {
+  return pathParts(pathValue).join("/");
 }
 
 function unsupportedProjectFiles(files) {
@@ -9087,8 +9109,9 @@ async function uploadProjectFile(baseDirOverride = undefined) {
       return;
     }
     const baseDir = baseDirOverridePath ?? selectedDirectoryPath();
-    const defaultName = upload.type.startsWith("image/") && !baseDir ? `images/${upload.name}` : joinProjectPath(baseDir, upload.name);
-    const targetPath = prompt("Upload to path:", defaultName);
+    const uploadIsAsset = upload.type.startsWith("image/") || isSupportedImageProjectFileName(upload.name);
+    const defaultName = uploadIsAsset && !baseDir ? `images/${upload.name}` : joinProjectPath(baseDir, upload.name);
+    const targetPath = normalizeProjectPathInput(prompt("Upload to path:", defaultName));
     if (!targetPath) return;
     if (!isSupportedProjectFileName(targetPath)) {
       showAppNotice(`Unsupported file type: ${importFileName(targetPath) || targetPath}.`, {
@@ -9112,8 +9135,22 @@ async function uploadProjectFile(baseDirOverride = undefined) {
       local.selectedFile = result.path;
       local.selectedFolder = "";
       expandToFile(result.path);
-      await loadSelectedFile();
-      local.saveStatus = "Uploaded";
+      const uploadedMeta = fileMeta(result.path);
+      if (isImageAsset(uploadedMeta)) {
+        local.imagesCollapsed = false;
+        local.editorContent = "";
+      } else if (isEditableFile(uploadedMeta)) {
+        await loadSelectedFile();
+      }
+      local.saveStatus = `Uploaded ${importFileName(result.path)}`;
+      showAppNotice(`${importFileName(result.path)} was saved.`, {
+        type: "success",
+        title: "Upload saved",
+        detail: isImageAsset(uploadedMeta)
+          ? "It is available in the Images panel."
+          : "It is available in the Files panel.",
+        timeoutMs: 3600
+      });
       render();
     } catch (error) {
       showAppNotice(error.message, { type: "error", title: "Upload failed" });
