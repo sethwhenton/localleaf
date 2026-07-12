@@ -1,9 +1,9 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
-const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const extract = require("extract-zip");
 
@@ -36,16 +36,58 @@ function runtimeIsReady(platformPath) {
   }
 }
 
-async function downloadFile(url, targetPath) {
-  const response = await fetch(url, {
-    redirect: "follow",
-    headers: { "user-agent": "LocalLeaf-release-build" },
-    signal: AbortSignal.timeout(5 * 60 * 1000)
-  });
-  if (!response.ok || !response.body) {
-    throw new Error(`Electron download failed with HTTP ${response.status}: ${response.url || url}`);
+const directHttpsAgent = new https.Agent({ keepAlive: true });
+
+function downloadHttps(url, targetPath, signal, redirects = 0) {
+  if (redirects > 8) {
+    return Promise.reject(new Error("Electron download exceeded the redirect limit"));
   }
-  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(targetPath));
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      url,
+      {
+        agent: directHttpsAgent,
+        signal,
+        headers: { "user-agent": "LocalLeaf-release-build" }
+      },
+      (response) => {
+        if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+          response.resume();
+          resolve(downloadHttps(new URL(response.headers.location, url).toString(), targetPath, signal, redirects + 1));
+          return;
+        }
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`Electron download failed with HTTP ${response.statusCode}: ${url}`));
+          return;
+        }
+
+        const output = fs.createWriteStream(targetPath);
+        response.setTimeout(2 * 60 * 1000, () => {
+          response.destroy(new Error("Electron download stalled"));
+        });
+        response.on("error", reject);
+        output.on("error", (error) => {
+          response.destroy(error);
+          reject(error);
+        });
+        output.on("finish", () => output.close(resolve));
+        response.pipe(output);
+      }
+    );
+    request.setTimeout(2 * 60 * 1000, () => request.destroy(new Error("Electron download request timed out")));
+    request.on("error", reject);
+  });
+}
+
+async function downloadFile(url, targetPath) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("Electron download exceeded five minutes")), 5 * 60 * 1000);
+  try {
+    await downloadHttps(url, targetPath, controller.signal);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function sha256File(filePath) {
