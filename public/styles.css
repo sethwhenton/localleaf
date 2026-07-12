@@ -12587,8 +12587,8 @@ html.theme-dark .settings-list-main .provider-test-result.red {
   scrollbar-width: thin;
 }
 
-html:has(.new-project-backdrop),
-body:has(.new-project-backdrop) {
+html:has(:is(.new-project-backdrop, .settings-modal-backdrop, .modal-backdrop)),
+body:has(:is(.new-project-backdrop, .settings-modal-backdrop, .modal-backdrop)) {
   height: 100%;
   min-height: 0;
   overflow: hidden;

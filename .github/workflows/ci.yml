@@ -73,7 +73,9 @@ jobs:
           # GitHub's unprivileged runner cannot use Electron's setuid helper.
           # The launcher accepts this override only on Linux GitHub Actions.
           LOCALLEAF_RENDERED_SMOKE_NO_SANDBOX: "true"
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1024x640x24" pmg npm run test:rendered
+        # The virtual desktop must be larger than the test window so Electron's
+        # frame cannot shave a pixel from its explicit 1024x640 content size.
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" pmg npm run test:rendered
 
       - name: Enforce Package Manager Guard policy
         if: always()
