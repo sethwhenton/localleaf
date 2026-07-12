@@ -70,7 +70,12 @@ async function installElectronRuntime() {
   console.log(`Installed and verified Electron ${electronPackage.version} for ${platform}-${arch}.`);
 }
 
-installElectronRuntime().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+// A pending Promise alone does not keep Node alive before the downloader has
+// opened its first socket. Hold one referenced timer until installation settles.
+const keepAlive = setInterval(() => {}, 1000);
+installElectronRuntime()
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => clearInterval(keepAlive));
