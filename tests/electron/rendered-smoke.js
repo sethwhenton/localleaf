@@ -208,6 +208,11 @@ async function setEmulatedMediaFeatures(features = []) {
 async function testHostStartupAndHelp(baseUrl) {
   await smokeWindow.loadURL(`${baseUrl}/?host=${encodeURIComponent(hostToken)}`);
   await installRendererErrorCapture();
+  smokeWindow.setContentSize(1024, 640);
+  await waitForRenderer(
+    `innerWidth === 1024 && innerHeight === 640`,
+    "the initial 1024x640 content viewport"
+  );
   await waitForRenderer(
     `(() => Boolean(document.querySelector("#railHelp")) && !document.querySelector(".app-error") && !document.body.textContent.includes("LocalLeaf failed to start"))()`,
     "the host-authenticated Home screen"
@@ -1757,6 +1762,7 @@ async function run() {
       backgroundThrottling: false
     }
   });
+  smokeWindow.setContentSize(1024, 640);
   smokeWindow.webContents.on("console-message", (event) => {
     const level = event?.level;
     const message = event?.message;

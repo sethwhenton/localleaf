@@ -2802,8 +2802,13 @@ function removeModal(backdrop, options = {}) {
   if (!backdrop) return;
   const returnFocus = backdrop._localleafReturnFocus;
   backdrop.remove();
-  if (options.restoreFocus !== false && returnFocus?.isConnected) {
-    window.setTimeout(() => returnFocus.focus({ preventScroll: true }), 0);
+  if (options.restoreFocus !== false) {
+    const focusTarget = returnFocus?.isConnected
+      ? returnFocus
+      : options.fallbackFocusSelector
+        ? document.querySelector(options.fallbackFocusSelector)
+        : null;
+    if (focusTarget) window.setTimeout(() => focusTarget.focus({ preventScroll: true }), 0);
   }
 }
 
@@ -8668,7 +8673,10 @@ function newProjectDestinationDirectory() {
 }
 
 function hideNewProjectDialog(options = {}) {
-  removeModal(document.querySelector(".new-project-backdrop"), options);
+  removeModal(document.querySelector(".new-project-backdrop"), {
+    fallbackFocusSelector: "#newProject",
+    ...options
+  });
 }
 
 function setNewProjectDialogState(modal, options = {}) {
@@ -8701,7 +8709,7 @@ function showNewProjectDialog() {
   const creationRequestId = typeof crypto?.randomUUID === "function"
     ? crypto.randomUUID()
     : `new-project-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-  app.insertAdjacentHTML("beforeend", `
+  document.body.insertAdjacentHTML("beforeend", `
     <div class="new-project-backdrop" role="presentation">
       <section class="new-project-modal" role="dialog" aria-modal="true" aria-labelledby="newProjectTitle" aria-describedby="newProjectDescription">
         <header class="new-project-modal-head">
