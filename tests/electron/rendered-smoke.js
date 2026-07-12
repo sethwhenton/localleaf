@@ -730,6 +730,10 @@ async function captureDesktopParity(theme, surfaceSelectors, contrastSelectors) 
 }
 
 async function verifyCurrentThemePair(label, surfaceSelectors, contrastSelectors) {
+  await waitForRenderer(
+    `(() => Array.from(document.querySelectorAll(".settings-tab.active")).every((tab) => Number.parseFloat(getComputedStyle(tab, "::after").opacity) >= 0.99))()`,
+    `${label} selected underline settling`
+  );
   for (const theme of ["light", "dark"]) {
     process.stdout.write(`[rendered-smoke] AUDIT ${label} ${theme}\n`);
     const result = await captureDesktopParity(theme, surfaceSelectors, [
@@ -1520,7 +1524,12 @@ async function testEditorPdfFlow(baseUrl, fixture) {
     `(() => {
       const marker = document.querySelector('.pdf-page[data-page-number="2"] .pdf-review-target');
       const status = document.querySelector('#changesReviewStatus')?.textContent || '';
-      return Boolean(marker) && status.includes('Showing page 2');
+      const markerRect = marker?.getBoundingClientRect();
+      const previewRect = document.querySelector('#previewPane')?.getBoundingClientRect();
+      const markerVisible = Boolean(markerRect && previewRect)
+        && markerRect.bottom >= previewRect.top
+        && markerRect.top <= previewRect.bottom;
+      return Boolean(marker) && markerVisible && status.includes('Showing page 2');
     })()`,
     "Review locating the changed source on PDF page 2"
   );

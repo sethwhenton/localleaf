@@ -43,9 +43,13 @@ function captureScroll(container) {
   return state;
 }
 
-function restoreScroll(container, scrollState) {
+function restoreScroll(container, scrollState, options = {}) {
   if (!container || !scrollState) return;
+  const shouldRestore = typeof options.shouldRestore === "function"
+    ? options.shouldRestore
+    : () => true;
   const apply = () => {
+    if (!shouldRestore()) return false;
     const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
     const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
     let nextTop = Math.max(scrollState.top, Math.round(maxTop * scrollState.topRatio));
@@ -58,11 +62,26 @@ function restoreScroll(container, scrollState) {
     }
     container.scrollTop = Math.min(maxTop, Math.max(0, nextTop));
     container.scrollLeft = Math.min(maxLeft, Math.max(scrollState.left, Math.round(maxLeft * scrollState.leftRatio)));
+    return true;
   };
   requestAnimationFrame(() => {
-    apply();
+    if (!apply()) return;
     setTimeout(apply, 80);
     setTimeout(apply, 260);
+  });
+}
+
+function restoreViewerScroll(container, state, scrollState) {
+  if (!state || !scrollState) return;
+  const token = (state.scrollRestoreToken || 0) + 1;
+  state.scrollRestoreToken = token;
+  restoreScroll(container, scrollState, {
+    shouldRestore: () => (
+      viewers.get(container) === state
+      && !state.cancelled
+      && !state.reviewRevealed
+      && state.scrollRestoreToken === token
+    )
   });
 }
 
@@ -131,12 +150,28 @@ function showPdfPosition(container, state, rawTarget) {
   marker.style.height = `${markerHeight}px`;
   page.append(marker);
 
-  const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
-  const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
-  container.scrollTop = Math.max(0, Math.min(maxTop, page.offsetTop + top + (markerHeight / 2) - (container.clientHeight / 2)));
-  container.scrollLeft = Math.max(0, Math.min(maxLeft, page.offsetLeft + left + (markerWidth / 2) - (container.clientWidth / 2)));
+  state.scrollRestoreToken = (state.scrollRestoreToken || 0) + 1;
   state.lastRevealTarget = target;
   state.reviewRevealed = true;
+
+  const containerRect = container.getBoundingClientRect();
+  const markerRect = marker.getBoundingClientRect();
+  const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+  const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+  const viewportTop = containerRect.top + container.clientTop;
+  const viewportLeft = containerRect.left + container.clientLeft;
+  const nextTop = container.scrollTop
+    + markerRect.top
+    + (markerRect.height / 2)
+    - viewportTop
+    - (container.clientHeight / 2);
+  const nextLeft = container.scrollLeft
+    + markerRect.left
+    + (markerRect.width / 2)
+    - viewportLeft
+    - (container.clientWidth / 2);
+  container.scrollTop = Math.max(0, Math.min(maxTop, nextTop));
+  container.scrollLeft = Math.max(0, Math.min(maxLeft, nextLeft));
   return true;
 }
 
@@ -345,11 +380,11 @@ async function mount(container, options = {}) {
       documentShell.append(pageShell);
       flushPdfPositionWaiters(container, state);
       if (!state.reviewRevealed && options.scrollState?.pageNumber === pageNumber) {
-        restoreScroll(container, options.scrollState);
+        restoreViewerScroll(container, state, options.scrollState);
       }
     }
 
-    if (!state.reviewRevealed) restoreScroll(container, options.scrollState);
+    if (!state.reviewRevealed) restoreViewerScroll(container, state, options.scrollState);
     state.revealWaiters.forEach((waiter) => {
       state.revealWaiters.delete(waiter);
       clearTimeout(waiter.timer);
@@ -405,7 +440,7 @@ async function zoom(container, nextOptions = {}) {
   const token = state.zoomToken;
 
   resizeExistingPages(container, nextScale, previousScale);
-  if (!state.reviewRevealed) restoreScroll(container, scrollState);
+  if (!state.reviewRevealed) restoreViewerScroll(container, state, scrollState);
 
   for (let pageNumber = 1; pageNumber <= state.document.numPages; pageNumber += 1) {
     if (state.cancelled || state.zoomToken !== token) return state;
@@ -417,10 +452,10 @@ async function zoom(container, nextOptions = {}) {
     if (existing) existing.replaceWith(pageShell);
     else container.querySelector(".pdf-document")?.append(pageShell);
     if (state.lastRevealTarget?.page === pageNumber) showPdfPosition(container, state, state.lastRevealTarget);
-    if (!state.reviewRevealed && pageNumber === scrollState?.pageNumber) restoreScroll(container, scrollState);
+    if (!state.reviewRevealed && pageNumber === scrollState?.pageNumber) restoreViewerScroll(container, state, scrollState);
   }
 
-  if (!state.reviewRevealed) restoreScroll(container, scrollState);
+  if (!state.reviewRevealed) restoreViewerScroll(container, state, scrollState);
   return state;
 }
 

@@ -69,6 +69,10 @@ jobs:
         run: git diff --exit-code -- public/editor.bundle.js public/pdf-preview.bundle.js public/pdf.worker.bundle.js
 
       - name: Run rendered Electron regression gate
+        env:
+          # GitHub's unprivileged runner cannot use Electron's setuid helper.
+          # The launcher accepts this override only on Linux GitHub Actions.
+          LOCALLEAF_RENDERED_SMOKE_NO_SANDBOX: "true"
         run: xvfb-run --auto-servernum --server-args="-screen 0 1024x640x24" pmg npm run test:rendered
 
       - name: Enforce Package Manager Guard policy

@@ -5,8 +5,14 @@ const electronPath = require("electron");
 const root = path.resolve(__dirname, "..");
 const entry = path.join(root, "tests", "electron", "rendered-smoke.js");
 const timeoutMs = 75_000;
+const useGitHubLinuxNoSandbox =
+  process.platform === "linux" &&
+  process.env.CI === "true" &&
+  process.env.GITHUB_ACTIONS === "true" &&
+  process.env.LOCALLEAF_RENDERED_SMOKE_NO_SANDBOX === "true";
+const electronArgs = useGitHubLinuxNoSandbox ? ["--no-sandbox", entry] : [entry];
 
-const child = spawn(electronPath, [entry], {
+const child = spawn(electronPath, electronArgs, {
   cwd: root,
   env: {
     ...process.env,

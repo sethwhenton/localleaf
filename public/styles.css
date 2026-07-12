@@ -12587,6 +12587,13 @@ html.theme-dark .settings-list-main .provider-test-result.red {
   scrollbar-width: thin;
 }
 
+html:has(.new-project-backdrop),
+body:has(.new-project-backdrop) {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .new-project-backdrop {
   position: fixed;
   inset: 0;
@@ -12594,14 +12601,19 @@ html.theme-dark .settings-list-main .provider-test-result.red {
   display: grid;
   place-items: center;
   padding: var(--space-6);
+  overflow: hidden;
+  overscroll-behavior: contain;
   background: rgba(24, 24, 24, 0.34);
   animation: new-project-backdrop-in 140ms ease-out both;
 }
 
 .new-project-modal {
   width: min(100%, 540px);
+  max-height: calc(100vh - 48px);
   max-height: calc(100dvh - 48px);
+  min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--panel);
