@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const net = require("node:net");
+const { estimateTokens, normalizeProviderUsage } = require("./ai-context");
 
 const MODEL_FOLDER_NAME = "LocalLeafModel";
 const PROVIDERS_FILE = "providers.json";
@@ -203,6 +204,15 @@ function normalizeProviderId(value) {
   return id;
 }
 
+function normalizeContextWindowTokens(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const tokens = Number(value);
+  if (!Number.isInteger(tokens) || tokens < 1024 || tokens > 10000000) {
+    throw new Error("Context window must be a whole number from 1,024 to 10,000,000 tokens.");
+  }
+  return tokens;
+}
+
 function normalizeModels(models) {
   const items = Array.isArray(models) ? models : [];
   const seen = new Set();
@@ -213,7 +223,10 @@ function normalizeModels(models) {
         : String(model?.id || model?.modelId || model?.model || "").trim(),
       name: typeof model === "string"
         ? model.trim()
-        : String(model?.name || model?.displayName || model?.id || model?.modelId || model?.model || "").trim()
+        : String(model?.name || model?.displayName || model?.id || model?.modelId || model?.model || "").trim(),
+      contextWindowTokens: typeof model === "string"
+        ? null
+        : normalizeContextWindowTokens(model?.contextWindowTokens)
     }))
     .filter((model) => model.id || model.name)
     .map((model) => {
@@ -509,6 +522,7 @@ function createAiModelManager(options = {}) {
       providerName: "LocalLeaf Local",
       modelId: model.id,
       name: model.name,
+      contextWindowTokens: localContextSize(),
       local: true
     }));
     const remote = [...providers.values()].flatMap((provider) => (provider.models || []).map((model) => ({
@@ -516,6 +530,7 @@ function createAiModelManager(options = {}) {
       providerName: provider.name,
       modelId: model.id,
       name: model.name,
+      contextWindowTokens: model.contextWindowTokens || null,
       local: false,
       hasApiKey: provider.hasApiKey,
       status: provider.status || "not_configured"
@@ -536,6 +551,7 @@ function createAiModelManager(options = {}) {
         providerName: provider.name,
         modelId: model.id,
         name: model.name,
+        contextWindowTokens: model.contextWindowTokens || null,
         local: false
       } : null;
     }
@@ -545,6 +561,7 @@ function createAiModelManager(options = {}) {
       providerName: "LocalLeaf Local",
       modelId: model.id,
       name: model.name,
+      contextWindowTokens: localContextSize(),
       local: true
     } : null;
   }
@@ -581,6 +598,7 @@ function createAiModelManager(options = {}) {
         const isInstalled = installed.has(model.id);
         return {
           ...model,
+          contextWindowTokens: localContextSize(),
           installed: isInstalled,
           status: progress?.status || (isInstalled ? "installed" : "not_downloaded"),
           progress: progress?.progress || (isInstalled ? 100 : 0),
@@ -787,8 +805,15 @@ function createAiModelManager(options = {}) {
   }
 
   function buildProvider(input = {}) {
-    const template = PROVIDER_TEMPLATES.find((item) => item.id === input.templateId || item.id === input.id);
+    const requestedTemplateId = String(input.templateId || "").trim().toLowerCase();
+    const template = requestedTemplateId
+      ? PROVIDER_TEMPLATES.find((item) => item.id === requestedTemplateId)
+      : null;
+    if (requestedTemplateId && !template) throw new Error("Unknown provider preset.");
     const id = normalizeProviderId(input.id || input.providerId || template?.id);
+    if (template && id !== template.id) {
+      throw new Error(`Provider ID must match the selected ${template.name} preset.`);
+    }
     const name = String(input.name || input.displayName || template?.name || "").trim();
     if (!name) throw new Error("Display name is required.");
     const type = input.type || template?.type || "openai-compatible";
@@ -807,8 +832,8 @@ function createAiModelManager(options = {}) {
       models,
       headers,
       requiresApiKey: input.requiresApiKey ?? template?.requiresApiKey ?? false,
-      custom: Boolean(input.custom ?? template?.custom ?? !template),
-      builtin: Boolean(template && id === template.id),
+      custom: template ? Boolean(template.custom) : true,
+      builtin: Boolean(template && !template.custom && id === template.id),
       recommended: Boolean(template?.recommended),
       hasApiKey: Boolean(input.apiKey || input.hasApiKey || providers.get(id)?.hasApiKey),
       status: providers.get(id)?.status || "not_configured",
@@ -878,6 +903,9 @@ function createAiModelManager(options = {}) {
     const apiKey = inputKey || await secretStore.getSecret(provider.id);
     const modelId = String(input.modelId || activeModelId || provider.models?.[0]?.id || "").trim();
     if (!modelId) throw new Error("Choose a model before testing this provider.");
+    if (!(provider.models || []).some((model) => model.id === modelId)) {
+      throw new Error(`Choose a configured model for ${provider.name}.`);
+    }
     if (provider.requiresApiKey && !apiKey) throw new Error("API key is required for this provider.");
     return { provider, apiKey, modelId };
   }
@@ -887,26 +915,35 @@ function createAiModelManager(options = {}) {
     const { provider, apiKey, modelId } = await resolveProviderForUse(input);
     const timeoutMs = Number(input.timeoutMs || DEFAULT_TEST_TIMEOUT_MS);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const cancelFromCaller = () => controller.abort();
+    if (input.signal?.aborted) controller.abort();
+    else input.signal?.addEventListener?.("abort", cancelFromCaller, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
     const headers = {
       "content-type": "application/json",
       ...provider.headers
     };
     if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+    const requestPayload = {
+      model: modelId,
+      messages: input.messages || [
+        { role: "user", content: "Reply with LOCALLEAF_OK only." }
+      ],
+      max_tokens: Number(input.maxTokens || 32),
+      temperature: Number(input.temperature ?? 0)
+    };
+    const serializedRequest = JSON.stringify(requestPayload);
 
     try {
       const response = await fetchImpl(chatCompletionsUrl(provider.baseUrl), {
         method: "POST",
         headers,
         signal: controller.signal,
-        body: JSON.stringify({
-          model: modelId,
-          messages: input.messages || [
-            { role: "user", content: "Reply with LOCALLEAF_OK only." }
-          ],
-          max_tokens: Number(input.maxTokens || 32),
-          temperature: Number(input.temperature ?? 0)
-        })
+        body: serializedRequest
       });
       const text = await response.text();
       let payload = {};
@@ -926,12 +963,27 @@ function createAiModelManager(options = {}) {
         emptyError.statusCode = 502;
         throw emptyError;
       }
-      return { provider, modelId, content, raw: payload };
+      const model = (provider.models || []).find((item) => item.id === modelId) || null;
+      return {
+        provider,
+        modelId,
+        content,
+        usage: normalizeProviderUsage(payload),
+        requestInputTokensEstimate: estimateTokens(serializedRequest),
+        contextWindowTokens: model?.contextWindowTokens || null,
+        windowSource: model?.contextWindowTokens ? "provider_model_config" : "unknown"
+      };
     } catch (error) {
+      if (error.name === "AbortError" && (input.signal?.aborted || !timedOut)) {
+        const cancelled = new Error("Provider request was cancelled.");
+        cancelled.code = "AI_RUN_CANCELLED";
+        throw cancelled;
+      }
       if (error.name === "AbortError") throw new Error(`Provider request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
       throw error;
     } finally {
       clearTimeout(timeout);
+      input.signal?.removeEventListener?.("abort", cancelFromCaller);
     }
   }
 
@@ -1103,16 +1155,19 @@ function createAiModelManager(options = {}) {
   async function askLocalModel(messages, options = {}) {
     const requestedModel = String(options.modelId || activeModelId || "").trim();
     const { model, baseUrl } = await ensureLocalRuntime(requestedModel);
+    const requestPayload = {
+      model: model.filename || model.id,
+      messages,
+      temperature: Number(options.temperature ?? 0.1),
+      max_tokens: Number(options.maxTokens || 1200),
+      stream: false
+    };
+    const serializedRequest = JSON.stringify(requestPayload);
     const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: model.filename || model.id,
-        messages,
-        temperature: Number(options.temperature ?? 0.1),
-        max_tokens: Number(options.maxTokens || 1200),
-        stream: false
-      })
+      signal: options.signal,
+      body: serializedRequest
     });
     const text = await response.text();
     let payload = {};
@@ -1134,7 +1189,10 @@ function createAiModelManager(options = {}) {
       },
       modelId: model.id,
       content,
-      raw: payload
+      usage: normalizeProviderUsage(payload),
+      requestInputTokensEstimate: estimateTokens(serializedRequest),
+      contextWindowTokens: localContextSize(),
+      windowSource: "local_runtime"
     };
   }
 
@@ -1161,7 +1219,8 @@ function createAiModelManager(options = {}) {
       messages,
       maxTokens: options.maxTokens || 800,
       temperature: options.temperature ?? 0.2,
-      timeoutMs: options.timeoutMs || DEFAULT_GENERATION_TIMEOUT_MS
+      timeoutMs: options.timeoutMs || DEFAULT_GENERATION_TIMEOUT_MS,
+      signal: options.signal
     });
   }
 

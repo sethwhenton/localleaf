@@ -48,6 +48,7 @@ function sanitizeChange(record = {}) {
     id: String(record.id).slice(0, 80),
     runId: String(record.runId || "").slice(0, 80),
     sessionId: String(record.sessionId || "").slice(0, 80),
+    operation: record.operation === "create" ? "create" : "edit",
     path: String(record.path || "").slice(0, 260),
     baseHash: String(record.baseHash || "").slice(0, 128),
     newHash: String(record.newHash || "").slice(0, 128),
@@ -62,7 +63,7 @@ function sanitizeChange(record = {}) {
       }
       : null,
     modelId: String(record.modelId || "").slice(0, 120),
-    approvalRequired: record.approvalRequired !== false,
+    approvalRequired: record.operation === "create" ? true : record.approvalRequired !== false,
     diffHunks: sanitizeDiffHunks(record.diffHunks),
     focus: record.focus && typeof record.focus === "object"
       ? {

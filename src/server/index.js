@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { URL } = require("node:url");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const AdmZip = require("adm-zip");
 const { WebSocketServer } = require("ws");
 const PACKAGE_INFO = require("../../package.json");
@@ -19,11 +19,22 @@ const {
   normalizeRelativePath,
   resolveProjectPath
 } = require("./safe-path");
-const { compileProject, commandExists, detectCompiler } = require("./compiler");
+const {
+  capCompilerLogs,
+  cleanupCompileArtifact,
+  compileProject,
+  commandExists,
+  createCompileSnapshot,
+  detectCompiler,
+  isValidPdfArtifact
+} = require("./compiler");
 const { collectProjectEditorSuggestions } = require("./editor-suggestions");
 const { createAiModelManager } = require("./ai-models");
 const { createAiChangeStore } = require("./ai-changes");
-const { createAiSessionStore, createMemoryAiSessionStore } = require("./ai-sessions");
+const { createAiSessionStore, createMemoryAiSessionStore, projectKeyForRoot } = require("./ai-sessions");
+const { buildContextUsage } = require("./ai-context");
+const { aiResponsePromptGuidance, boundedPlainText, formatAgentReply } = require("./ai-response-style");
+const { createSynctexWorkerClient } = require("./synctex-worker-client");
 const {
   DEFAULT_CURSOR_MODEL_ID,
   changedTextFiles,
@@ -46,6 +57,8 @@ const SAMPLE_PROJECT = path.join(ROOT, "samples", "thesis");
 const DEFAULT_PROJECT_NAME = "LocalLeaf Project";
 const DEFAULT_PORT = Number(process.env.PORT || 4317);
 const MAX_USERS = 5;
+const MAX_PENDING_JOIN_REQUESTS = 20;
+const MAX_RETAINED_JOIN_REQUESTS = 100;
 const TUNNEL_VERIFY_ATTEMPTS = 12;
 const TUNNEL_RESTART_ATTEMPTS = 3;
 const TUNNEL_START_TIMEOUT_MS = 35000;
@@ -57,6 +70,32 @@ const PUBLIC_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"];
 const MAX_IMPORT_ENTRIES = 5000;
 const MAX_IMPORT_UNCOMPRESSED_BYTES = 250 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES = 75 * 1024 * 1024;
+const MAX_AI_CREATED_FILE_BYTES = 256 * 1024;
+const MAX_IN_MEMORY_AI_PROPOSALS = 250;
+const MAX_IN_MEMORY_AI_PROPOSAL_BYTES = 32 * 1024 * 1024;
+const AI_CREATABLE_TEXT_EXTENSIONS = new Set([
+  ".tex",
+  ".bib",
+  ".bst",
+  ".cls",
+  ".sty",
+  ".clo",
+  ".cfg",
+  ".def",
+  ".ldf",
+  ".bbx",
+  ".cbx",
+  ".bbl",
+  ".txt",
+  ".md",
+  ".latex",
+  ".tikz",
+  ".csv",
+  ".dat"
+]);
+const SYNCTEX_LOOKUP_TIMEOUT_MS = 2500;
+const SYNCTEX_LOOKUP_MAX_OUTPUT_BYTES = 64 * 1024;
+const SYNCTEX_MAX_CONCURRENT_LOOKUPS = 4;
 const HOSTED_AGENT_PROMPT_LIMITS = {
   currentFileBudget: 42000,
   projectContextBudget: 70000,
@@ -200,6 +239,19 @@ function canEditProject(state, request, url) {
   return Boolean(user && user.role === "editor");
 }
 
+function apiErrorPayload(error) {
+  const payload = { error: error?.message || "Request failed." };
+  if (error?.code) payload.code = String(error.code);
+  if (error?.sessionId) payload.sessionId = String(error.sessionId);
+  if (error?.runId) payload.runId = String(error.runId);
+  return payload;
+}
+
+function apiErrorResponse(response, error, fallbackStatus = 400) {
+  const statusCode = Number(error?.statusCode || fallbackStatus);
+  jsonResponse(response, statusCode, apiErrorPayload(error));
+}
+
 function requestIdentity(state, request, url) {
   if (isHostRequest(state, request, url)) {
     const host = state.session.users.find((user) => user.id === "host") || { id: "host", name: getHostName(), role: "host" };
@@ -290,7 +342,7 @@ function randomCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let value = "";
   for (let index = 0; index < 8; index += 1) {
-    value += alphabet[Math.floor(Math.random() * alphabet.length)];
+    value += alphabet[crypto.randomInt(alphabet.length)];
   }
   return `${value.slice(0, 4)}-${value.slice(4)}`;
 }
@@ -354,14 +406,9 @@ function findSsh() {
   return commandExists("ssh") ? "ssh" : null;
 }
 
-function sshKnownHostsTarget() {
-  return process.platform === "win32" ? "NUL" : "/dev/null";
-}
-
 function createSshArgs() {
   return [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", `UserKnownHostsFile=${sshKnownHostsTarget()}`,
+    "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ServerAliveInterval=20",
     "-o", "ServerAliveCountMax=3"
   ];
@@ -431,6 +478,72 @@ function getUserProjectsDir() {
   return process.env.LOCALLEAF_PROJECTS_DIR || path.join(os.homedir(), "Documents", "LocalLeaf Projects");
 }
 
+function validateNewProjectName(value) {
+  if (value === undefined) return DEFAULT_PROJECT_NAME;
+  if (typeof value !== "string") {
+    throw new Error("Project name must be text.");
+  }
+
+  const name = value.trim();
+  if (!name) throw new Error("Project name is required.");
+  if (name.length > 70) throw new Error("Project name must be 70 characters or fewer.");
+  if (name === "." || name === "..") throw new Error("Choose a different project name.");
+  if (/[\u0000-\u001f<>:\"/\\|?*]/.test(name)) {
+    throw new Error("Project name contains characters that cannot be used in a folder name.");
+  }
+  if (/[. ]$/.test(name)) {
+    throw new Error("Project name cannot end with a period or space.");
+  }
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
+    throw new Error("Choose a project name that is not reserved by the operating system.");
+  }
+  return name;
+}
+
+function resolveNewProjectDestination(value) {
+  let destination;
+  if (value === undefined) {
+    destination = path.resolve(getUserProjectsDir());
+    fs.mkdirSync(destination, { recursive: true });
+  } else {
+    if (typeof value !== "string") {
+      throw new Error("Destination folder must be a path.");
+    }
+
+    const input = value.trim();
+    if (!input) throw new Error("Destination folder is required.");
+    if (input.length > 2048 || input.includes("\0")) {
+      throw new Error("Destination folder path is invalid.");
+    }
+    if (input.startsWith("\\\\") || input.startsWith("//")) {
+      throw new Error("Choose a local destination folder instead of a network path.");
+    }
+    if (!path.isAbsolute(input)) {
+      throw new Error("Destination folder must use an absolute path.");
+    }
+
+    destination = path.resolve(input);
+    let stats;
+    try {
+      stats = fs.statSync(destination);
+    } catch {
+      throw new Error("Destination folder was not found.");
+    }
+    if (!stats.isDirectory()) {
+      throw new Error("Destination must be a folder.");
+    }
+  }
+  const realDestination = fs.realpathSync(destination);
+  const realTemplateRoot = fs.realpathSync(SAMPLE_PROJECT);
+  const templateWithSeparator = realTemplateRoot.endsWith(path.sep)
+    ? realTemplateRoot
+    : `${realTemplateRoot}${path.sep}`;
+  if (realDestination === realTemplateRoot || realDestination.startsWith(templateWithSeparator)) {
+    throw new Error("Choose a destination outside LocalLeaf's bundled starter template.");
+  }
+  return destination;
+}
+
 function sanitizeProjectName(name) {
   const clean = String(name || "Imported Project")
     .replace(/\.[^.]+$/, "")
@@ -463,6 +576,22 @@ function uniqueDirectory(parent, baseName) {
     index += 1;
   }
   return candidate;
+}
+
+function reserveUniqueDirectory(parent, baseName) {
+  let index = 1;
+  while (index < 10_000) {
+    const suffix = index === 1 ? "" : ` ${index}`;
+    const candidate = path.join(parent, `${baseName}${suffix}`);
+    try {
+      fs.mkdirSync(candidate);
+      return candidate;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      index += 1;
+    }
+  }
+  throw new Error("Could not choose an unused project folder name.");
 }
 
 function ensureDefaultProjectRoot(options = {}) {
@@ -619,14 +748,21 @@ function importLooseFilesProject(fileRecords, projectName) {
   return projectRoot;
 }
 
-function createNewTemplateProject() {
-  const projectRoot = uniqueDirectory(getUserProjectsDir(), DEFAULT_PROJECT_NAME);
-  copyDirectory(SAMPLE_PROJECT, projectRoot);
-  const mainFile = detectMainFile(projectRoot);
-  if (!mainFile) {
-    throw new Error("Starter template is missing a .tex file.");
+function createNewTemplateProject(options = {}) {
+  const projectName = validateNewProjectName(options.projectName);
+  const destination = resolveNewProjectDestination(options.destinationDirectory);
+  const projectRoot = reserveUniqueDirectory(destination, projectName);
+  try {
+    copyDirectory(SAMPLE_PROJECT, projectRoot);
+    const mainFile = detectMainFile(projectRoot);
+    if (!mainFile) {
+      throw new Error("Starter template is missing a .tex file.");
+    }
+    return projectRoot;
+  } catch (error) {
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+    throw error;
   }
-  return projectRoot;
 }
 
 function safeDownloadName(name, extension) {
@@ -652,8 +788,23 @@ function attachmentHeaders(filename, contentType) {
   };
 }
 
-function streamFileResponse(request, response, filePath, contentType, extraHeaders = {}) {
-  const { size } = fs.statSync(filePath);
+function streamFileResponse(request, response, filePath, contentType, extraHeaders = {}, lifecycle = {}) {
+  let completed = false;
+  const complete = () => {
+    if (completed) return;
+    completed = true;
+    lifecycle.onComplete?.();
+  };
+  let size;
+  try {
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) throw new Error("Requested path is not a file.");
+    size = stats.size;
+  } catch {
+    textResponse(response, 404, "The requested file is no longer available.");
+    complete();
+    return false;
+  }
   const commonHeaders = {
     ...securityHeaders(),
     "content-type": contentType,
@@ -668,8 +819,20 @@ function streamFileResponse(request, response, filePath, contentType, extraHeade
       ...commonHeaders,
       "content-length": size
     });
-    fs.createReadStream(filePath).pipe(response);
-    return;
+    const stream = fs.createReadStream(filePath);
+    stream.once("error", () => {
+      if (!response.headersSent) {
+        textResponse(response, 404, "The requested file is no longer available.");
+      } else {
+        response.destroy();
+      }
+    });
+    stream.once("close", complete);
+    response.once("close", () => {
+      if (!stream.destroyed) stream.destroy();
+    });
+    stream.pipe(response);
+    return true;
   }
 
   const match = /^bytes=(\d*)-(\d*)$/.exec(String(range));
@@ -699,7 +862,8 @@ function streamFileResponse(request, response, filePath, contentType, extraHeade
       "content-range": `bytes */${size}`
     });
     response.end();
-    return;
+    complete();
+    return true;
   }
 
   end = Math.min(end, size - 1);
@@ -708,7 +872,20 @@ function streamFileResponse(request, response, filePath, contentType, extraHeade
     "content-length": end - start + 1,
     "content-range": `bytes ${start}-${end}/${size}`
   });
-  fs.createReadStream(filePath, { start, end }).pipe(response);
+  const stream = fs.createReadStream(filePath, { start, end });
+  stream.once("error", () => {
+    if (!response.headersSent) {
+      textResponse(response, 404, "The requested file is no longer available.");
+    } else {
+      response.destroy();
+    }
+  });
+  stream.once("close", complete);
+  response.once("close", () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+  stream.pipe(response);
+  return true;
 }
 
 function addDirectoryToZip(zip, directory, baseDirectory = directory) {
@@ -985,6 +1162,9 @@ function createInitialState(options = {}) {
         providers: tunnelProviders,
         providerId: null,
         providerName: null,
+        preferredProviderId: null,
+        selectionMode: "automatic",
+        previousLinkInvalidated: false,
         attempts: [],
         autoStart: autoStartTunnel,
         raceId: null,
@@ -1013,13 +1193,24 @@ function createInitialState(options = {}) {
       pdfPath: null,
       synctexPath: null,
       sourceMapAvailable: false,
-      version: 0
+      version: 0,
+      jobId: null,
+      queuedJobs: 0,
+      isStale: false,
+      lastSuccessfulAt: null,
+      lastSuccessfulVersion: 0,
+      artifactId: null,
+      artifactRoot: null,
+      sourceSnapshotRoot: null
     },
+    compileArtifacts: new Map(),
+    projectCreations: new Map(),
     chat: [],
     ai: {
       models: null,
       sessions: null,
       guestSessions: new Map(),
+      runControllers: new Map(),
       changes: null,
       proposals: new Map(),
       cursorRunner: options.cursorAgentRunner || runCursorSdkAgent
@@ -1038,20 +1229,106 @@ function createInitialState(options = {}) {
   state.ai.sessions = options.aiSessionStore || createAiSessionStore({ root: options.aiSessionRoot });
   state.ai.changes = options.aiChangeStore || createAiChangeStore({ root: options.aiChangeRoot });
   state.synctexResolver = options.synctexResolver || null;
+  state.synctexForwardResolver = options.synctexForwardResolver || null;
+  state.synctexWorkerClient = options.synctexWorkerClient || createSynctexWorkerClient({
+    timeoutMs: SYNCTEX_LOOKUP_TIMEOUT_MS
+  });
+  state.ownsSynctexWorkerClient = !options.synctexWorkerClient;
+  state.synctexCommand = String(options.synctexCommand || "").trim();
+  state.synctexProcessRunner = options.synctexProcessRunner || ((processOptions) => runBoundedChildProcess(
+    processOptions.command,
+    processOptions.args,
+    processOptions
+  ));
+  state.synctexLookups = {
+    active: 0,
+    maxActive: Math.max(
+      1,
+      Math.min(16, Number(options.synctexMaxConcurrentLookups) || SYNCTEX_MAX_CONCURRENT_LOOKUPS)
+    )
+  };
   return state;
 }
 
 function publicCompileState(compile = {}) {
+  const pdfAvailable = isValidPdfArtifact(compile.pdfPath);
   return {
     status: compile.status,
     engine: compile.engine,
     mode: compile.mode,
     logs: compile.logs || [],
     previewHtml: compile.previewHtml || "",
-    pdfPath: compile.pdfPath || null,
+    pdfPath: pdfAvailable ? "/api/pdf" : null,
+    pdfAvailable,
     sourceMapAvailable: Boolean(compile.sourceMapAvailable && compile.synctexPath && fs.existsSync(compile.synctexPath)),
-    version: compile.version || 0
+    version: compile.version || 0,
+    jobId: compile.jobId || null,
+    queuedJobs: Math.max(0, Number(compile.queuedJobs || 0)),
+    isStale: Boolean(compile.isStale),
+    lastSuccessfulAt: compile.lastSuccessfulAt || null,
+    lastSuccessfulVersion: compile.lastSuccessfulVersion || 0,
+    artifactId: compile.artifactId || null
   };
+}
+
+function guestCompileState(compile = {}) {
+  const status = String(compile.status || "idle");
+  const summary = status === "running"
+    ? "[LocalLeaf] The host is compiling the project."
+    : status === "success"
+      ? "[LocalLeaf] The host finished compiling the project."
+      : status === "failed"
+        ? "[LocalLeaf] Compilation failed. Ask the host to review the detailed log."
+        : "[LocalLeaf] The host has not compiled the project yet.";
+  return {
+    ...compile,
+    logs: [summary],
+    previewHtml: ""
+  };
+}
+
+function registerCompileArtifact(state, compile = {}) {
+  if (!compile.pdfPath || !compile.artifactRoot) return;
+  const current = state.compileArtifacts.get(compile.pdfPath);
+  state.compileArtifacts.set(compile.pdfPath, {
+    pdfPath: compile.pdfPath,
+    artifactRoot: compile.artifactRoot,
+    readers: current?.readers || 0,
+    retired: false
+  });
+}
+
+function cleanupRetiredCompileArtifact(state, artifact) {
+  if (!artifact?.retired || artifact.readers > 0) return;
+  state.compileArtifacts.delete(artifact.pdfPath);
+  cleanupCompileArtifact(artifact.artifactRoot);
+}
+
+function retireCompileArtifact(state, pdfPath) {
+  const artifact = state.compileArtifacts.get(pdfPath);
+  if (!artifact) return;
+  artifact.retired = true;
+  cleanupRetiredCompileArtifact(state, artifact);
+}
+
+function retainCompileArtifact(state, pdfPath) {
+  const artifact = state.compileArtifacts.get(pdfPath);
+  if (!artifact || artifact.retired) return () => {};
+  artifact.readers += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    artifact.readers = Math.max(0, artifact.readers - 1);
+    cleanupRetiredCompileArtifact(state, artifact);
+  };
+}
+
+function cleanupAllCompileArtifacts(state) {
+  for (const artifact of state.compileArtifacts.values()) {
+    artifact.retired = true;
+    cleanupRetiredCompileArtifact(state, artifact);
+  }
 }
 
 function aiSessionStoreForIdentity(state, identity) {
@@ -1063,8 +1340,29 @@ function aiSessionStoreForIdentity(state, identity) {
   return state.ai.guestSessions.get(identity.userId);
 }
 
+function validateAiSessionMutationProject(state, sessionStore, body = {}, originProjectKey = "") {
+  const suppliedProjectKey = String(body?.projectKey || "").trim();
+  const currentProjectKey = sessionStore.projectKeyForRoot(state.project.root);
+  const requestProjectKey = String(originProjectKey || currentProjectKey);
+  if (
+    suppliedProjectKey
+    && suppliedProjectKey === requestProjectKey
+    && suppliedProjectKey === currentProjectKey
+  ) return currentProjectKey;
+
+  const error = new Error(suppliedProjectKey
+    ? "The active project changed before this AI session action was applied."
+    : "The AI session action is missing its originating project.");
+  error.code = "AI_SESSION_PROJECT_MISMATCH";
+  error.statusCode = 409;
+  throw error;
+}
+
 function aiChangesForIdentity(state, identity) {
-  const changes = state.ai.changes?.list(state.project) || [];
+  const changes = (state.ai.changes?.list(state.project) || []).map((change) => ({
+    ...change,
+    actionable: state.ai.proposals.has(change.id)
+  }));
   if (identity.isHost) return changes;
   if (!identity.userId) return [];
   return changes.filter((change) => {
@@ -1096,7 +1394,7 @@ function publicGuestAiState(state, identity) {
       canDeleteRenameMoveUploadShell: false,
       textFilesOnly: true
     },
-    sessions: sessionStore ? sessionStore.publicState(state.project) : null,
+    sessions: sessionStore ? sessionStore.summaryState(state.project) : null,
     proposals: aiChangesForIdentity(state, identity),
     models: [],
     providerTemplates: [],
@@ -1109,7 +1407,7 @@ function publicAiState(state, identity) {
   if (identity.isHost) {
     return {
       ...state.ai.models.publicState(),
-      sessions: state.ai.sessions.publicState(state.project),
+      sessions: state.ai.sessions.summaryState(state.project),
       proposals: aiChangesForIdentity(state, identity)
     };
   }
@@ -1142,6 +1440,28 @@ function publicState(state, options = {}) {
     canEdit: Boolean(options.canEdit || isHost || options.user?.role === "editor")
   };
   const canRead = isHost || Boolean(options.canRead);
+
+  if (!canRead) {
+    return {
+      project: { name: "LocalLeaf project" },
+      session: {
+        status: state.session.status,
+        maxUsers: state.session.maxUsers
+      },
+      compiler: {
+        available: Boolean(state.compiler.available),
+        engine: state.compiler.engine || ""
+      },
+      compile: {
+        status: "idle",
+        mode: "html",
+        version: state.compile.version || 0
+      },
+      ai: {},
+      chat: []
+    };
+  }
+
   const users = state.session.users.map((user) => ({
     id: user.id,
     name: user.name,
@@ -1161,21 +1481,29 @@ function publicState(state, options = {}) {
     : [];
 
   return {
-    port: state.port,
+    ...(isHost ? { port: state.port } : {}),
     project: {
       id: state.project.id,
       name: state.project.name,
       root: isHost ? state.project.root : "Stored on host computer",
+      ...(isHost ? { defaultProjectsDirectory: path.resolve(getUserProjectsDir()) } : {}),
       mainFile: canRead ? state.project.mainFile : "",
       files: canRead ? state.project.files : [],
       size: canRead ? state.project.size : 0,
       sizeLabel: canRead ? formatBytes(state.project.size) : "Hidden until approved"
     },
     session: {
-      ...state.session,
-      activeTokens: undefined,
-      users: canRead ? users : [],
+      id: state.session.id,
+      status: state.session.status,
+      maxUsers: state.session.maxUsers,
+      users,
       joinRequests,
+      ...(isHost ? {
+        code: state.session.code,
+        inviteUrl: state.session.inviteUrl,
+        publicUrl: state.session.publicUrl,
+        network: state.session.network
+      } : {}),
       tunnel: {
         available: state.session.tunnel.available,
         status: state.session.tunnel.status,
@@ -1183,29 +1511,30 @@ function publicState(state, options = {}) {
         autoStart: state.session.tunnel.autoStart,
         providerId: state.session.tunnel.providerId,
         providerName: state.session.tunnel.providerName,
-        providers: (state.session.tunnel.providers || []).map((provider) => ({
-          id: provider.id,
-          name: provider.name,
-          hint: provider.hint
-        })),
-        attempts: state.session.tunnel.attempts || []
+        ...(isHost ? {
+          preferredProviderId: state.session.tunnel.preferredProviderId || null,
+          selectionMode: state.session.tunnel.selectionMode || "automatic",
+          previousLinkInvalidated: Boolean(state.session.tunnel.previousLinkInvalidated),
+          providers: (state.session.tunnel.providers || []).map((provider) => ({
+            id: provider.id,
+            name: provider.name,
+            hint: provider.hint
+          })),
+          attempts: state.session.tunnel.attempts || []
+        } : {})
       }
     },
-    compiler: state.compiler,
-    compile: canRead
-      ? publicCompileState(state.compile)
+    compiler: isHost
+      ? state.compiler
       : {
-          status: "idle",
-          engine: state.compile.engine,
-          mode: "html",
-          logs: [],
-          previewHtml: "",
-          pdfPath: null,
-          sourceMapAvailable: false,
-          version: state.compile.version
+          available: Boolean(state.compiler.available),
+          engine: state.compiler.engine || ""
         },
+    compile: isHost
+      ? publicCompileState(state.compile)
+      : guestCompileState(publicCompileState(state.compile)),
     ai: publicAiState(state, identity),
-    chat: canRead ? state.chat : []
+    chat: state.chat
   };
 }
 
@@ -1216,7 +1545,7 @@ function sendSse(response, event, payload) {
 
 function deleteSseClient(state, id, client = state.clients.get(id)) {
   if (client?.heartbeat) clearInterval(client.heartbeat);
-  state.clients.delete(id);
+  if (state.clients.get(id) === client) state.clients.delete(id);
 }
 
 function broadcast(state, event, payload) {
@@ -1285,10 +1614,21 @@ function broadcastProject(state, event, payload) {
   for (const [id, client] of state.clients) {
     if (!clientCanReadProject(state, client)) continue;
     try {
-      sendSse(client.response, event, payload);
+      sendSse(client.response, event, event === "compile" && !client.isHost ? guestCompileState(payload) : payload);
     } catch {
       deleteSseClient(state, id, client);
     }
+  }
+  if (event === "compile") {
+    for (const client of state.collabClients.values()) {
+      sendWs(client, {
+        type: "project_event",
+        event,
+        payload: client.isHost ? payload : guestCompileState(payload)
+      });
+    }
+  } else if (event === "chat") {
+    broadcastCollab(state, { type: "project_event", event, payload });
   }
 }
 
@@ -1373,6 +1713,8 @@ function attachCollabClient(state, socket, identity) {
     filePath: ""
   };
   state.collabClients.set(client.id, client);
+  const connectedUser = state.session.users.find((user) => user.id === client.userId);
+  if (connectedUser) connectedUser.online = true;
 
   const filePath = defaultCollabFile(state);
   let content = "";
@@ -1402,6 +1744,7 @@ function attachCollabClient(state, socket, identity) {
     }),
     presence: collabPresence(state)
   });
+  broadcastState(state);
 
   socket.on("message", (raw) => {
     let payload;
@@ -1416,6 +1759,12 @@ function attachCollabClient(state, socket, identity) {
 
   socket.on("close", () => {
     state.collabClients.delete(client.id);
+    const stillConnected = [...state.collabClients.values()].some((item) => item.userId === client.userId);
+    const disconnectedUser = state.session.users.find((user) => user.id === client.userId);
+    if (disconnectedUser && disconnectedUser.role !== "host" && !stillConnected) {
+      disconnectedUser.online = false;
+      broadcastState(state);
+    }
     broadcastPresence(state, client);
   });
 }
@@ -1485,22 +1834,50 @@ function handleCollabMessage(state, client, payload) {
   }
 
   if (type === "save") {
+    const requestId = String(payload.requestId || "").slice(0, 128);
     if (!client.canEdit) {
-      sendWs(client, { type: "error", message: "Editor access is required before saving files." });
+      sendWs(client, { type: "error", requestId, message: "Editor access is required before saving files." });
       return;
     }
     const filePath = String(payload.filePath || "").trim();
     try {
-      readTextFileForCollab(state, filePath);
+      const currentText = readTextFileForCollab(state, filePath);
+      const hasNewText = Object.prototype.hasOwnProperty.call(payload, "newText");
+      const newText = hasNewText ? String(payload.newText ?? "") : currentText;
+      const version = Date.now();
+      if (newText !== currentText) {
+        writeTextFileForCollab(state, filePath, newText);
+        client.filePath = filePath;
+        broadcastCollab(
+          state,
+          {
+            type: "file_updated",
+            filePath,
+            newText,
+            userId: client.userId,
+            name: client.name,
+            version
+          },
+          { excludeClientId: client.id }
+        );
+        broadcastProject(state, "file-update", {
+          path: filePath,
+          content: newText,
+          user: client.name,
+          version
+        });
+        broadcastPresence(state, client);
+      }
       broadcastCollab(state, {
         type: "file_saved",
         filePath,
         userId: client.userId,
         name: client.name,
-        version: Date.now()
+        requestId,
+        version
       });
     } catch (error) {
-      sendWs(client, { type: "error", message: error.message });
+      sendWs(client, { type: "error", requestId, message: error.message });
     }
     return;
   }
@@ -1533,6 +1910,20 @@ function broadcastState(state) {
     } catch {
       deleteSseClient(state, id, client);
     }
+  }
+  for (const client of state.collabClients.values()) {
+    const user = client.isHost
+      ? state.session.users.find((item) => item.id === "host")
+      : tokenUserByToken(state, client.token);
+    sendWs(client, {
+      type: "state_update",
+      state: publicState(state, {
+        isHost: client.isHost,
+        canRead: client.isHost || Boolean(client.token && state.session.activeTokens.has(client.token)),
+        canEdit: client.isHost || user?.role === "editor",
+        user
+      })
+    });
   }
 }
 
@@ -1581,12 +1972,49 @@ function inferAgentPath(state, requestedPath) {
   return { relativePath: normalizeRelativePath(candidate), fullPath };
 }
 
+const DETERMINISTIC_REWRITE_GUIDANCE = "I couldn't prepare a safe deterministic rewrite. Select the exact text you want changed, or give an exact replacement such as “change from … to …”.";
+
+function rewriteSelectedProse(selectedText) {
+  const source = String(selectedText || "");
+  if (!source || /\\(?:begin\{(?:verbatim|lstlisting|minted)\}|verb\*?\b)/iu.test(source)) return source;
+  const protectedLatex = /(?:``[^]*?''|“[^]*?”|"(?:\\.|[^"\\])*"|\\[A-Za-z@]+\*?(?:\s*\[[^\]\r\n]*\])?(?:\s*\{(?:[^{}]|\{[^{}]*\})*\})*|\\\([^]*?\\\)|\\\[[^]*?\\\]|\$\$?[^]*?\$\$?)/gu;
+  let cursor = 0;
+  let rewritten = "";
+  for (const match of source.matchAll(protectedLatex)) {
+    rewritten += source
+      .slice(cursor, match.index)
+      .replace(/\butilize\b/giu, "use")
+      .replace(/\bin order to\b/giu, "to");
+    rewritten += match[0];
+    cursor = match.index + match[0].length;
+  }
+  return rewritten + source
+    .slice(cursor)
+    .replace(/\butilize\b/giu, "use")
+    .replace(/\bin order to\b/giu, "to");
+}
+
+function deterministicSelectedRewrite(originalText, selectedText) {
+  const selection = String(selectedText || "");
+  if (!selection) return null;
+  const start = originalText.indexOf(selection);
+  if (start < 0 || originalText.indexOf(selection, start + selection.length) >= 0) return null;
+  const replacement = rewriteSelectedProse(selection);
+  if (replacement === selection) return null;
+  return `${originalText.slice(0, start)}${replacement}${originalText.slice(start + selection.length)}`;
+}
+
 function createDeterministicAgentProposal(state, body) {
   const message = String(body.message || "").trim().slice(0, 2000);
   if (!message) throw new Error("Message is required.");
 
-  let { relativePath, fullPath } = inferAgentPath(state, body.path);
-  let originalText = fs.readFileSync(fullPath, "utf8");
+  const sourceSnapshot = body._sourceSnapshot instanceof Map ? body._sourceSnapshot : null;
+  let sourceFile = sourceSnapshot
+    ? agentReadProjectFileFromSnapshot(state, body.path, sourceSnapshot)
+    : agentReadProjectFile(state, body.path);
+  let relativePath = sourceFile.path;
+  let fullPath = resolveProjectPath(state.project.root, relativePath);
+  let originalText = sourceFile.content;
   const lowerMessage = message.toLowerCase();
   let newText = originalText;
   let summary = "Prepared a safe text edit proposal.";
@@ -1597,14 +2025,15 @@ function createDeterministicAgentProposal(state, body) {
     runId: body.runId || "",
     sessionId: body.sessionId || "",
     requester: body.requester || null,
-    skipChangeLog: body.skipChangeLog === true
+    skipChangeLog: body.skipChangeLog === true,
+    sourceSnapshot
   });
   if (annotationReplacement) {
     annotationReplacement.modelId = "deterministic-fallback";
     return annotationReplacement;
   }
   if (replacementInstruction && !originalText.includes(replacementInstruction.find)) {
-    const found = findTextFileContaining(state, replacementInstruction.find, message);
+    const found = findTextFileContaining(state, replacementInstruction.find, message, sourceSnapshot);
     if (found) {
       relativePath = found.path;
       fullPath = found.fullPath;
@@ -1633,10 +2062,8 @@ function createDeterministicAgentProposal(state, body) {
     newText = `${originalText.replace(/\s*$/u, "")}\n\n${table}\n`;
     summary = "Append a small LaTeX table draft.";
   } else if (lowerMessage.includes("rewrite")) {
-    newText = originalText.replace(/\butilize\b/gi, "use").replace(/\bin order to\b/gi, "to");
-    if (newText === originalText) {
-      newText = `${originalText.replace(/\s*$/u, "")}\n\n% LocalLeaf AI rewrite note: tighten wording in this section.\n`;
-    }
+    newText = deterministicSelectedRewrite(originalText, body.selectedText);
+    if (!newText) return null;
     summary = "Rewrite common verbose phrases without changing project structure.";
   } else if (lowerMessage.includes("fix")) {
     newText = originalText
@@ -1653,6 +2080,7 @@ function createDeterministicAgentProposal(state, body) {
   }
 
   const proposal = createAiProposalRecord({
+    project: state.project,
     path: relativePath,
     originalText,
     newText,
@@ -1671,17 +2099,24 @@ function createDeterministicAgentProposal(state, body) {
 }
 
 function createAgentProposalFromText(state, body, newText, summary, metadata = {}) {
-  const { relativePath, fullPath } = inferAgentPath(state, body.path);
-  const originalText = fs.readFileSync(fullPath, "utf8");
+  const sourceFile = metadata.sourceSnapshot instanceof Map
+    ? agentReadProjectFileFromSnapshot(state, body.path, metadata.sourceSnapshot)
+    : agentReadProjectFile(state, body.path);
+  const relativePath = sourceFile.path;
+  const originalText = Object.prototype.hasOwnProperty.call(metadata, "originalText")
+    ? String(metadata.originalText || "")
+    : sourceFile.content;
   const cleanText = String(newText || "");
   if (!cleanText) throw new Error("AI provider did not return replacement text.");
   if (cleanText === originalText) throw new Error("AI provider returned the original file without changes.");
 
   const proposal = createAiProposalRecord({
+    project: state.project,
+    operation: "edit",
     path: relativePath,
     originalText,
     newText: cleanText,
-    summary: String(summary || "AI provider proposed a text edit.").slice(0, 220),
+    summary: boundedPlainText(summary || "AI provider proposed a text edit.") || "AI provider proposed a text edit.",
     userRequest: String(body.message || "").trim().slice(0, 2000),
     provider: metadata.provider || null,
     modelId: metadata.modelId || "",
@@ -1690,19 +2125,140 @@ function createAgentProposalFromText(state, body, newText, summary, metadata = {
     requester: body.requester || metadata.requester || null,
     skipChangeLog: body.skipChangeLog === true || metadata.skipChangeLog === true
   });
-  state.ai.proposals.set(proposal.id, proposal);
-  if (!proposal.skipChangeLog) recordAiProposalChange(state, proposal);
+  if (metadata.deferRegistration !== true) registerAiProposal(state, proposal);
   return proposal;
 }
 
-function createAiProposalRecord({ path: relativePath, originalText, newText, summary, userRequest, provider, modelId, runId, sessionId, requester, skipChangeLog }) {
+function registerAiProposal(state, proposal) {
+  state.ai.proposals.set(proposal.id, proposal);
+  if (!proposal.skipChangeLog) recordAiProposalChange(state, proposal);
+  const proposalBytes = (item) => Buffer.byteLength(String(item?.originalText || ""), "utf8")
+    + Buffer.byteLength(String(item?.newText || ""), "utf8");
+  const totalBytes = () => Array.from(state.ai.proposals.values())
+    .reduce((total, item) => total + proposalBytes(item), 0);
+  while (
+    state.ai.proposals.size > MAX_IN_MEMORY_AI_PROPOSALS
+    || totalBytes() > MAX_IN_MEMORY_AI_PROPOSAL_BYTES
+  ) {
+    const candidates = Array.from(state.ai.proposals.values()).filter((item) => item.id !== proposal.id);
+    const removable = candidates.find((item) => item.status !== "proposed") || candidates[0];
+    if (!removable) break;
+    state.ai.proposals.delete(removable.id);
+  }
+  return proposal;
+}
+
+function validateAiCreatedFile(state, requestedPath, content) {
+  const rawPath = String(requestedPath || "").trim();
+  const slashPath = rawPath.replace(/\\/gu, "/");
+  if (/^(?:\/|[A-Za-z]:\/)/u.test(slashPath) || path.isAbsolute(rawPath)) {
+    throw new Error("AI-created files must use a project-relative path.");
+  }
+  const relativePath = normalizeRelativePath(rawPath);
+  const pathParts = relativePath.split("/");
+  if (
+    relativePath.length > 512
+    || pathParts.some((part) => !part || part.length > 128 || part.startsWith(".") || part.toLowerCase() === "node_modules")
+  ) {
+    throw new Error("Choose a visible project-relative path with ordinary folder and file names.");
+  }
+  const extension = path.extname(relativePath).toLowerCase();
+  if (!AI_CREATABLE_TEXT_EXTENSIONS.has(extension)) {
+    throw new Error("LocalLeaf AI can only create text-based LaTeX source and support files.");
+  }
+  const cleanText = String(content ?? "");
+  if (cleanText.includes("\0")) {
+    throw new Error("AI-created text files cannot contain null bytes.");
+  }
+  if (Buffer.byteLength(cleanText, "utf8") > MAX_AI_CREATED_FILE_BYTES) {
+    throw new Error(`AI-created files must be ${Math.round(MAX_AI_CREATED_FILE_BYTES / 1024)} KB or smaller.`);
+  }
+  const fullPath = resolveProjectPath(state.project.root, relativePath);
+  return { relativePath, fullPath, cleanText };
+}
+
+function sameFileIdentity(left, right) {
+  if (!left || !right) return false;
+  const leftInode = String(left.ino ?? "0");
+  const rightInode = String(right.ino ?? "0");
+  return leftInode !== "0" && leftInode === rightInode && String(left.dev ?? "") === String(right.dev ?? "");
+}
+
+function writeNewTextFileExclusive(fullPath, content) {
+  const buffer = Buffer.from(String(content ?? ""), "utf8");
+  let descriptor = null;
+  let openedStats = null;
+  try {
+    descriptor = fs.openSync(fullPath, "wx");
+    openedStats = fs.fstatSync(descriptor);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const written = fs.writeSync(descriptor, buffer, offset, buffer.length - offset, null);
+      if (written < 1) throw new Error("LocalLeaf could not finish writing the new file.");
+      offset += written;
+    }
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = null;
+  } catch (error) {
+    if (descriptor !== null) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Cleanup below is guarded by the opened file identity.
+      }
+      descriptor = null;
+    }
+    if (openedStats) {
+      try {
+        const currentStats = fs.lstatSync(fullPath);
+        if (sameFileIdentity(openedStats, currentStats)) fs.unlinkSync(fullPath);
+      } catch {
+        // Preserve the original write error; never remove an unverified replacement.
+      }
+    }
+    throw error;
+  }
+}
+
+function createAgentFileProposal(state, body, requestedPath, content, summary, metadata = {}) {
+  const { relativePath, fullPath, cleanText } = validateAiCreatedFile(state, requestedPath, content);
+  if (fs.existsSync(fullPath)) {
+    throw new Error("LocalLeaf AI cannot create this file because that path already exists.");
+  }
+  const proposal = createAiProposalRecord({
+    project: state.project,
+    operation: "create",
+    path: relativePath,
+    originalText: "",
+    newText: cleanText,
+    summary: boundedPlainText(summary || `Create ${relativePath}.`) || `Create ${relativePath}.`,
+    userRequest: String(body.message || "").trim().slice(0, 2000),
+    provider: metadata.provider || null,
+    modelId: metadata.modelId || "",
+    runId: metadata.runId || body.runId || "",
+    sessionId: body.sessionId || metadata.sessionId || "",
+    requester: body.requester || metadata.requester || null,
+    skipChangeLog: body.skipChangeLog === true || metadata.skipChangeLog === true
+  });
+  proposal.approvalRequired = true;
+  if (metadata.deferRegistration !== true) registerAiProposal(state, proposal);
+  return proposal;
+}
+
+function createAiProposalRecord({ project, operation = "edit", path: relativePath, originalText, newText, summary, userRequest, provider, modelId, runId, sessionId, requester, skipChangeLog }) {
   const cleanOriginal = String(originalText || "");
   const cleanText = String(newText || "");
   const focus = firstChangedRange(cleanOriginal, cleanText);
+  const projectRoot = path.resolve(String(project?.root || ""));
   return {
     id: randomId(8),
     runId: String(runId || ""),
     sessionId: String(sessionId || ""),
+    projectKey: projectKeyForRoot(projectRoot),
+    projectRoot,
+    projectName: String(project?.name || path.basename(projectRoot) || "LocalLeaf Project").slice(0, 260),
+    operation: operation === "create" ? "create" : "edit",
     path: relativePath,
     baseHash: textHash(cleanOriginal),
     newHash: textHash(cleanText),
@@ -1718,7 +2274,7 @@ function createAiProposalRecord({ path: relativePath, originalText, newText, sum
     status: "proposed",
     approvalRequired: true,
     skipChangeLog: skipChangeLog === true,
-    summary: String(summary || "AI proposed a text edit.").slice(0, 220),
+    summary: boundedPlainText(summary || "AI proposed a text edit.") || "AI proposed a text edit.",
     userRequest: String(userRequest || "").slice(0, 2000),
     provider: provider ? {
       id: provider.id || "",
@@ -1808,11 +2364,102 @@ function agentPermissions(input = {}) {
 function requestedAgentCapabilities(message) {
   const text = String(message || "");
   return {
-    fileManagement: /\b(delete|rename|move|create\s+(?:a\s+)?(?:file|folder|directory)|new\s+(?:file|folder|directory))\b/iu.test(text),
+    fileManagement: /\b(delete|rename|move|create\s+(?:a\s+)?(?:file|folder|directory)|new\s+(?:file|folder|directory))\b/iu.test(text)
+      || /\b(?:create|make|write)\s+(?:a\s+)?(?:new\s+)?[^\s<>:"|?*]+\.(?:tex|bib|bst|cls|sty|clo|cfg|def|ldf|bbx|cbx|bbl|txt|md|latex|tikz|csv|dat)\b/iu.test(text),
     fileUploads: /\b(upload|import|attach|add\s+(?:an?\s+)?(?:image|asset|file|pdf))\b/iu.test(text),
     shellCommands: /\b(shell|terminal|command|execute|run\s+script|npm|node|powershell|cmd)\b/iu.test(text),
     binaryFiles: /\b(binary|png|jpe?g|gif|webp|eps)\b|(?:edit|modify|replace|write|change)\s+(?:the\s+)?(?:image|pdf|asset)\s+(?:file|asset|binary)\b/iu.test(text)
   };
+}
+
+function agentRequestForIdentity(state, identity, body = {}, extras = {}) {
+  const requestBody = {
+    ...(body && typeof body === "object" ? body : {}),
+    ...extras,
+    requester: requesterFromIdentity(identity)
+  };
+  if (identity.isHost) return requestBody;
+
+  delete requestBody.aiProviderId;
+  delete requestBody.providerId;
+  delete requestBody.aiModelId;
+  delete requestBody.modelId;
+  requestBody.aiPermissions = {
+    askBeforeEdits: true,
+    yoloMode: false,
+    localModelOnly: false,
+    rewriteTools: true,
+    multiFileEdits: false,
+    fileManagement: false,
+    fileUploads: false,
+    shellCommands: false,
+    binaryFiles: false
+  };
+  return requestBody;
+}
+
+function guestProviderMetadata(provider) {
+  if (!provider) return null;
+  return {
+    id: "host-ai",
+    name: "Host AI",
+    type: "host-mediated",
+    modelId: String(provider.modelId || "")
+  };
+}
+
+function agentResultForIdentity(result, identity) {
+  if (identity.isHost || !result || typeof result !== "object") return result;
+  return {
+    ...result,
+    provider: guestProviderMetadata(result.provider),
+    proposals: Array.isArray(result.proposals)
+      ? result.proposals.map((proposal) => ({
+        ...proposal,
+        provider: guestProviderMetadata(proposal.provider),
+        providerName: proposal.provider ? "Host AI" : proposal.providerName
+      }))
+      : []
+  };
+}
+
+function canManageAiProposal(identity, proposal) {
+  if (identity?.isHost) return true;
+  if (!identity?.userId || !proposal?.requester?.userId) return false;
+  return proposal.requester.userId === identity.userId;
+}
+
+function aiProposalRunIdentity(proposal = {}) {
+  return [
+    String(proposal.runId || ""),
+    String(proposal.sessionId || ""),
+    String(proposal.projectKey || ""),
+    String(proposal.requester?.userId || "host")
+  ].join("\u001f");
+}
+
+function aiProposalsShareRun(left, right) {
+  return Boolean(left?.runId && right?.runId)
+    && aiProposalRunIdentity(left) === aiProposalRunIdentity(right);
+}
+
+function normalizedProjectRoot(projectRoot) {
+  const resolved = path.resolve(String(projectRoot || ""));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function aiProposalMatchesCurrentProject(state, proposal) {
+  if (!proposal?.projectRoot || !proposal?.projectKey || !state?.project?.root) return false;
+  return proposal.projectKey === projectKeyForRoot(state.project.root)
+    && normalizedProjectRoot(proposal.projectRoot) === normalizedProjectRoot(state.project.root);
+}
+
+function assertAiProposalProject(state, proposal) {
+  if (aiProposalMatchesCurrentProject(state, proposal)) return;
+  const error = new Error("Open the project where this AI proposal was created before managing it.");
+  error.code = "AI_PROPOSAL_PROJECT_MISMATCH";
+  error.statusCode = 409;
+  throw error;
 }
 
 function blockedAgentCapabilities(message, permissions) {
@@ -1844,7 +2491,9 @@ function agentPermissionSummary(permissions) {
 
 function setProposalApprovalFromPermissions(proposal, permissions) {
   if (!proposal || typeof proposal !== "object") return proposal;
-  proposal.approvalRequired = permissions.askBeforeEdits && !permissions.yoloMode;
+  proposal.approvalRequired = proposal.operation === "create" || proposal.hostApprovalRequired === true
+    ? true
+    : permissions.askBeforeEdits && !permissions.yoloMode;
   return proposal;
 }
 
@@ -1874,6 +2523,21 @@ function agentReadProjectFile(state, requestedPath) {
   };
 }
 
+function agentReadProjectFileFromSnapshot(state, requestedPath, sourceSnapshot) {
+  if (!(sourceSnapshot instanceof Map)) return agentReadProjectFile(state, requestedPath);
+  const relativePath = normalizeRelativePath(String(requestedPath || state.project.mainFile || "").trim());
+  const fullPath = resolveProjectPath(state.project.root, relativePath);
+  if (!isTextFile(fullPath) || !sourceSnapshot.has(relativePath)) {
+    throw new Error("Choose a text file that existed when this AI response started.");
+  }
+  const content = String(sourceSnapshot.get(relativePath) || "");
+  return {
+    path: relativePath,
+    hash: textHash(content),
+    content
+  };
+}
+
 function agentTextFiles(state, limit = 80) {
   return (state.project.files || [])
     .filter((item) => item.type === "text" && /\.(tex|bib|sty|cls|txt|md)$/iu.test(item.path || ""))
@@ -1886,7 +2550,7 @@ function agentTextFiles(state, limit = 80) {
     .slice(0, limit);
 }
 
-function findTextFileContaining(state, needle, hint = "") {
+function findTextFileContaining(state, needle, hint = "", sourceSnapshot = null) {
   const target = String(needle || "");
   if (!target) return null;
   const hintText = String(hint || "").toLowerCase();
@@ -1898,7 +2562,9 @@ function findTextFileContaining(state, needle, hint = "") {
   for (const item of candidates) {
     const fullPath = resolveProjectPath(state.project.root, item.path);
     try {
-      const content = fs.readFileSync(fullPath, "utf8");
+      const content = sourceSnapshot instanceof Map && sourceSnapshot.has(item.path)
+        ? String(sourceSnapshot.get(item.path) || "")
+        : fs.readFileSync(fullPath, "utf8");
       if (content.includes(target)) return { path: item.path, fullPath, content };
     } catch {
       // Ignore unreadable project files while building AI context.
@@ -1917,24 +2583,35 @@ function agentProjectContext(state, currentPath, budget = 70000, options = {}) {
   });
   let remaining = budget;
   const chunks = [];
+  let originalChars = 0;
+  let truncated = false;
   for (const item of ordered) {
     if (options.skipSelected && item.path === selected) continue;
-    if (remaining <= 1200) break;
+    if (remaining <= 1200) {
+      originalChars += Math.max(0, Number(item.size || 0));
+      truncated = true;
+      continue;
+    }
     const fullPath = resolveProjectPath(state.project.root, item.path);
     let content = "";
     try {
-      content = fs.readFileSync(fullPath, "utf8");
+      content = options.sourceSnapshot instanceof Map && options.sourceSnapshot.has(item.path)
+        ? String(options.sourceSnapshot.get(item.path) || "")
+        : fs.readFileSync(fullPath, "utf8");
     } catch {
       continue;
     }
+    originalChars += content.length;
     const header = `--- FILE: ${item.path}${item.path === selected ? " (currently open)" : ""} ---\n`;
     const available = Math.max(0, remaining - header.length);
     const limit = options.perFileBudget ? Math.min(available, options.perFileBudget) : available;
     const slice = content.slice(0, limit);
+    if (slice.length < content.length) truncated = true;
     chunks.push(`${header}${slice}${slice.length < content.length ? "\n% ... LocalLeaf truncated this file for context ..." : ""}`);
     remaining -= header.length + slice.length;
   }
-  return chunks.join("\n\n");
+  const text = chunks.join("\n\n");
+  return { text, originalChars, includedChars: text.length, truncated };
 }
 
 function agentCompileLogs(state) {
@@ -2042,14 +2719,16 @@ function latexAnnotationBlockRange(text, mappedLine) {
   return { startLine: start + 1, endLine: end + 1, ...range, text: source.slice(range.start, range.end) };
 }
 
-function agentPdfAnnotationContext(state, body = {}, preferredPath = "") {
+function agentPdfAnnotationContext(state, body = {}, preferredPath = "", sourceSnapshot = null) {
   const annotation = body.pdfAnnotation && typeof body.pdfAnnotation === "object" ? body.pdfAnnotation : null;
   const source = annotation?.source && typeof annotation.source === "object" ? annotation.source : null;
   if (!annotation && !source) return null;
   const requestedPath = source?.path || preferredPath || body.path;
   if (!requestedPath) return null;
   try {
-    const file = agentReadProjectFile(state, requestedPath);
+    const file = sourceSnapshot instanceof Map
+      ? agentReadProjectFileFromSnapshot(state, requestedPath, sourceSnapshot)
+      : agentReadProjectFile(state, requestedPath);
     const line = Math.max(1, Number(source?.line || 1));
     const block = latexAnnotationBlockRange(file.content, line);
     return {
@@ -2155,7 +2834,7 @@ function replaceInstructionInScope(scopeText, instruction) {
 }
 
 function createAnnotationReplacementProposal(state, body, exactInstruction, metadata = {}) {
-  const annotation = agentPdfAnnotationContext(state, body);
+  const annotation = agentPdfAnnotationContext(state, body, "", metadata.sourceSnapshot);
   if (!annotation || !exactInstruction) return null;
   const replacementBlock = replaceInstructionInScope(annotation.text, exactInstruction);
   if (!replacementBlock) return null;
@@ -2301,14 +2980,22 @@ function cursorProviderPublic(modelId) {
   };
 }
 
-async function createCursorAgentResponse(state, body) {
+function throwIfAgentRunCancelled(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error("AI response was cancelled.");
+  error.code = "AI_RUN_CANCELLED";
+  throw error;
+}
+
+async function createCursorAgentResponse(state, body, options = {}) {
   const message = String(body.message || "").trim().slice(0, 2000);
   if (!message) throw new Error("Message is required.");
 
   const permissions = agentPermissions(body.aiPermissions || body.permissions);
   const { relativePath } = inferAgentPath(state, body.path);
-  const before = snapshotTextFiles(state.project.root);
   const scratchRoot = copyProjectToScratch(state.project.root);
+  const before = snapshotTextFiles(scratchRoot);
+  body._sourceSnapshot = before;
   const modelId = cursorModelId(body);
   const cursorConfig = await state.ai.models.cursorProviderConfig({
     providerId: body.aiProviderId || body.providerId || "cursor",
@@ -2320,15 +3007,39 @@ async function createCursorAgentResponse(state, body) {
       cwd: scratchRoot,
       modelId,
       apiKey: cursorConfig.apiKey,
-      prompt: cursorLatexPrompt(body, { currentPath: relativePath }),
+      prompt: cursorLatexPrompt(body, {
+        currentPath: relativePath,
+        fileManagementAllowed: permissions.fileManagement
+      }),
       body,
-      state
+      state,
+      signal: options.signal
     });
-    const changed = changedTextFiles(before, scratchRoot);
+    throwIfAgentRunCancelled(options.signal);
+    const changed = changedTextFiles(before, scratchRoot, {
+      includeCreated: permissions.fileManagement
+    });
+    const orderedChanges = requestedAgentCapabilities(message).fileManagement
+      ? [...changed].sort((left, right) => Number(right.operation === "create") - Number(left.operation === "create"))
+      : changed;
     const allowedChanges = permissions.multiFileEdits
-      ? changed
-      : changed.filter((item) => item.path === relativePath).slice(0, 1);
+      ? orderedChanges.slice(0, 8)
+      : orderedChanges.filter((item) => item.path === relativePath || item.operation === "create").slice(0, 1);
     const proposals = allowedChanges.map((change) => {
+      if (change.operation === "create") {
+        return createAgentFileProposal(
+          state,
+          body,
+          change.path,
+          change.newText,
+          `Cursor SDK proposed a new file at ${change.path}.`,
+          {
+            provider: cursorProviderPublic(cursorConfig.modelId || modelId),
+            modelId: cursorConfig.modelId || modelId,
+            deferRegistration: true
+          }
+        );
+      }
       return setProposalApprovalFromPermissions(createAgentProposalFromText(
         state,
         { ...body, path: change.path },
@@ -2336,14 +3047,41 @@ async function createCursorAgentResponse(state, body) {
         change.path === relativePath
           ? "Cursor SDK proposed an edit to the current LaTeX file."
           : `Cursor SDK proposed an edit to ${change.path}.`,
-        { provider: cursorProviderPublic(cursorConfig.modelId || modelId), modelId: cursorConfig.modelId || modelId }
+        {
+          provider: cursorProviderPublic(cursorConfig.modelId || modelId),
+          modelId: cursorConfig.modelId || modelId,
+          originalText: change.oldText,
+          sourceSnapshot: before,
+          deferRegistration: true
+        }
       ), permissions);
     });
+    if (requestedAgentCapabilities(message).fileManagement && !proposals.some((proposal) => proposal.operation === "create")) {
+      throw new Error("The Cursor response did not produce a safe file-management proposal, so LocalLeaf did not write anything.");
+    }
+    if (proposals.some((proposal) => proposal.operation === "create")) {
+      proposals.forEach((proposal) => {
+        proposal.approvalRequired = true;
+        proposal.hostApprovalRequired = true;
+      });
+    }
+    proposals.forEach((proposal) => registerAiProposal(state, proposal));
 
-    if (!proposals.length && wantsFileEdit(message)) {
+    if (!proposals.length && wantsFileEdit(message) && !requestedAgentCapabilities(message).fileManagement) {
       const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+      if (!proposal) {
+        return {
+          reply: `${result?.reply || "Cursor SDK completed the run, but did not change the editable file."}\n\n${DETERMINISTIC_REWRITE_GUIDANCE}`,
+          runtime: "cursor-sdk",
+          provider: cursorProviderPublic(cursorConfig.modelId || modelId),
+          proposals: []
+        };
+      }
       return {
-        reply: `${result?.reply || "Cursor SDK completed the run, but did not change the editable file."} I prepared a safe local fallback proposal instead.`,
+        reply: formatAgentReply(
+          `${result?.reply || "Cursor SDK completed the run, but did not change the editable file."}\n\nThe model did not return an editable patch, so LocalLeaf prepared a safe fallback.`,
+          [proposal]
+        ),
         runtime: "cursor-sdk",
         provider: cursorProviderPublic(cursorConfig.modelId || modelId),
         proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
@@ -2351,7 +3089,10 @@ async function createCursorAgentResponse(state, body) {
     }
 
     return {
-      reply: result?.reply || (proposals.length ? "Cursor SDK prepared a file-change proposal." : "Cursor SDK finished without file changes."),
+      reply: formatAgentReply(
+        result?.reply || (proposals.length ? "Cursor SDK prepared a file-change proposal." : "Cursor SDK finished without file changes."),
+        proposals
+      ),
       runtime: "cursor-sdk",
       provider: cursorProviderPublic(cursorConfig.modelId || modelId),
       proposals: proposals.map((proposal) => setProposalApprovalFromPermissions(publicProposal(proposal), permissions))
@@ -2362,36 +3103,85 @@ async function createCursorAgentResponse(state, body) {
 }
 
 function createProviderProposalsFromParsed(state, body, parsed, metadata, permissions) {
+  const sourceSnapshot = metadata.sourceSnapshot instanceof Map ? metadata.sourceSnapshot : null;
   const exactInstruction = exactReplacementInstruction(body.message || "");
+  let exactProposal = null;
   if (exactInstruction) {
-    const annotationProposal = createAnnotationReplacementProposal(state, body, exactInstruction, metadata);
+    const annotationProposal = createAnnotationReplacementProposal(state, body, exactInstruction, {
+      ...metadata,
+      deferRegistration: true
+    });
     if (annotationProposal) {
-      return [setProposalApprovalFromPermissions(annotationProposal, permissions)];
-    }
-    const found = findTextFileContaining(state, exactInstruction.find, body.message || "");
-    if (found) {
+      exactProposal = setProposalApprovalFromPermissions(annotationProposal, permissions);
+    } else {
+      const found = findTextFileContaining(state, exactInstruction.find, body.message || "", sourceSnapshot);
+      if (found) {
       const nextText = found.content.replace(exactInstruction.find, exactInstruction.replace);
-      return [setProposalApprovalFromPermissions(createAgentProposalFromText(
-        state,
-        { ...body, path: found.path },
-        nextText,
-        `Replace "${exactInstruction.find}" with "${exactInstruction.replace}".`,
-        metadata
-      ), permissions)];
+        exactProposal = setProposalApprovalFromPermissions(createAgentProposalFromText(
+          state,
+          { ...body, path: found.path },
+          nextText,
+          `Replace "${exactInstruction.find}" with "${exactInstruction.replace}".`,
+          { ...metadata, deferRegistration: true }
+        ), permissions);
+      }
     }
   }
-  const edits = Array.isArray(parsed.edits) && parsed.edits.length
+  const proposals = [];
+  const proposalLimit = permissions.multiFileEdits ? 8 : 1;
+  const creates = Array.isArray(parsed.creates) ? parsed.creates : [];
+  if (creates.length && !permissions.fileManagement) {
+    throw new Error("The provider requested file creation, but File management is off in AI Permissions.");
+  }
+  const proposedCreatePaths = new Set();
+  const validCreates = [];
+  for (const create of creates.slice(0, proposalLimit)) {
+    if (!create || typeof create !== "object") continue;
+    const hasContent = Object.prototype.hasOwnProperty.call(create, "content")
+      || Object.prototype.hasOwnProperty.call(create, "newText");
+    if (!hasContent) continue;
+    const content = Object.prototype.hasOwnProperty.call(create, "content") ? create.content : create.newText;
+    const validated = validateAiCreatedFile(state, create.path, content);
+    const normalizedCreatePath = validated.relativePath;
+    if (proposedCreatePaths.has(normalizedCreatePath)) {
+      throw new Error(`The provider proposed the same new file more than once: ${normalizedCreatePath}.`);
+    }
+    proposedCreatePaths.add(normalizedCreatePath);
+    if (fs.existsSync(validated.fullPath)) {
+      throw new Error(`LocalLeaf AI cannot create ${normalizedCreatePath} because that path already exists.`);
+    }
+    validCreates.push({
+      ...create,
+      path: normalizedCreatePath,
+      content: validated.cleanText
+    });
+  }
+  for (const create of validCreates) {
+    proposals.push(createAgentFileProposal(
+      state,
+      body,
+      create.path,
+      create.content,
+      create.summary || parsed.summary || `Create ${String(create.path || "a new file")}.`,
+      { ...metadata, deferRegistration: true }
+    ));
+  }
+  if (exactProposal && proposals.length < proposalLimit) proposals.push(exactProposal);
+  const edits = exactProposal
+    ? []
+    : Array.isArray(parsed.edits) && parsed.edits.length
     ? parsed.edits
     : [{
       path: parsed.path || body.path,
       replacements: parsed.replacements,
       newText: parsed.newText
     }];
-  const proposals = [];
-  for (const edit of edits.slice(0, permissions.multiFileEdits ? 8 : 1)) {
+  for (const edit of edits.slice(0, Math.max(0, proposalLimit - proposals.length))) {
     const targetPath = edit.path || body.path;
-    const targetFile = agentReadProjectFile(state, targetPath);
-    const annotationTarget = agentPdfAnnotationContext(state, body, targetFile.path);
+    const targetFile = sourceSnapshot
+      ? agentReadProjectFileFromSnapshot(state, targetPath, sourceSnapshot)
+      : agentReadProjectFile(state, targetPath);
+    const annotationTarget = agentPdfAnnotationContext(state, body, targetFile.path, sourceSnapshot);
     const replacementText = applyExactReplacementInstructions(targetFile.content, edit.replacements, {
       scope: annotationTarget && annotationTarget.path === targetFile.path
         ? { start: annotationTarget.start, end: annotationTarget.end }
@@ -2412,9 +3202,19 @@ function createProviderProposalsFromParsed(state, body, parsed, metadata, permis
       { ...body, path: targetFile.path },
       proposedText,
       edit.summary || parsed.summary || parsed.reply,
-      metadata
+      { ...metadata, deferRegistration: true }
     ), permissions));
   }
+  if (requestedAgentCapabilities(body.message || "").fileManagement && !proposals.some((proposal) => proposal.operation === "create")) {
+    throw new Error("The provider did not return a safe file-management proposal, so LocalLeaf did not write anything.");
+  }
+  if (proposals.some((proposal) => proposal.operation === "create")) {
+    proposals.forEach((proposal) => {
+      proposal.approvalRequired = true;
+      proposal.hostApprovalRequired = true;
+    });
+  }
+  proposals.forEach((proposal) => registerAiProposal(state, proposal));
   return proposals;
 }
 
@@ -2426,38 +3226,63 @@ async function createProviderAgentResponse(state, body, options = {}) {
     ...HOSTED_AGENT_PROMPT_LIMITS,
     ...(options.promptLimits || {})
   };
-  const annotationContext = agentPdfAnnotationContext(state, body);
-  const currentFile = agentReadProjectFile(state, annotationContext?.path || body.path);
+  const sourceSnapshot = body._sourceSnapshot instanceof Map
+    ? body._sourceSnapshot
+    : snapshotTextFiles(state.project.root);
+  body._sourceSnapshot = sourceSnapshot;
+  const annotationContext = agentPdfAnnotationContext(state, body, "", sourceSnapshot);
+  const currentFile = agentReadProjectFileFromSnapshot(state, annotationContext?.path || body.path, sourceSnapshot);
   const relativePath = currentFile.path;
   const originalText = currentFile.content;
-  const compileLogs = Array.isArray(body.compileLogs)
-    ? body.compileLogs.map((item) => String(item || "")).join("\n").slice(-limits.compileLogBudget)
+  const compileLogSource = Array.isArray(body.compileLogs)
+    ? body.compileLogs.map((item) => String(item || "")).join("\n")
     : "";
-  const selectedText = String(body.selectedText || "").slice(0, limits.selectedTextBudget);
-  const conversation = Array.isArray(body.conversation)
-    ? body.conversation.slice(-limits.conversationTurns).map((item) => `${String(item.role || "user").toUpperCase()}: ${String(item.message || "").slice(0, limits.conversationItemBudget)}`).join("\n")
-    : "";
-  const projectContext = agentProjectContext(state, relativePath, limits.projectContextBudget, {
+  const compileLogs = compileLogSource.slice(-limits.compileLogBudget);
+  const selectedTextSource = String(body.selectedText || "");
+  const selectedText = selectedTextSource.slice(0, limits.selectedTextBudget);
+  const conversationSource = Array.isArray(body.conversation)
+    ? body.conversation.map((item) => ({
+      role: String(item?.role || "user"),
+      message: String(item?.message || "")
+    }))
+    : [];
+  const lastConversationItem = conversationSource.at(-1);
+  if (lastConversationItem?.role === "user" && lastConversationItem.message.trim() === message) {
+    conversationSource.pop();
+  }
+  const includedConversation = conversationSource.slice(-limits.conversationTurns);
+  const conversation = includedConversation
+    .map((item) => `${item.role.toUpperCase()}: ${item.message.slice(0, limits.conversationItemBudget)}`)
+    .join("\n");
+  const projectContextResult = agentProjectContext(state, relativePath, limits.projectContextBudget, {
     skipSelected: true,
-    perFileBudget: limits.projectContextPerFileBudget
+    perFileBudget: limits.projectContextPerFileBudget,
+    sourceSnapshot
   });
+  const projectContext = projectContextResult.text;
+  const currentFileContext = compactAgentFileContext(originalText, limits.currentFileBudget);
+  const compactProjectContext = compactAgentFileContext(projectContext, limits.projectContextBudget);
   const prompt = [
     "You are LocalLeaf AI, a careful LaTeX project assistant.",
     "Return JSON only with this shape:",
-    '{"reply":"short explanation","summary":"short change summary","edits":[{"path":"relative/project/file.tex","replacements":[{"find":"exact text from that file","replace":"replacement text","all":false}],"newText":"full replacement file text or empty string"}]}',
+    '{"reply":"short explanation","summary":"short change summary","edits":[{"path":"relative/project/file.tex","replacements":[{"find":"exact text from that file","replace":"replacement text","all":false}],"newText":"full replacement file text or empty string"}],"creates":[{"path":"relative/project/new-file.tex","content":"complete UTF-8 file content","summary":"short creation summary"}]}',
+    aiResponsePromptGuidance({ jsonTransport: true }),
     "Prefer replacements for small edits. Only set newText for larger structural edits. Keep LaTeX valid. Do not delete unrelated content.",
     "Each replacement find value must exactly match text shown from the relevant project file.",
     "You may edit another text file if the user asks about content that lives outside the currently open file.",
+    permissions.fileManagement
+      ? "File management is enabled. Use creates only when the user explicitly asks for a new file. Use a new project-relative path with a LaTeX text/support extension, and never use creates to overwrite an existing file."
+      : "File management is disabled. Return an empty creates array and do not propose new files.",
     "For PDF annotation requests, treat the annotation target as the user's selection and avoid editing unrelated matching text elsewhere.",
     "Current AI Helper permissions:",
     agentPermissionSummary(permissions),
     "If an advanced action is allowed, explain the intended action clearly. For this MVP, file writes still happen through LocalLeaf proposals and approval cards.",
     `File path: ${relativePath}`,
     "Current file:",
-    compactAgentFileContext(originalText, limits.currentFileBudget),
+    currentFileContext,
     annotationPromptContext(annotationContext),
     "Project context:",
-    compactAgentFileContext(projectContext, limits.projectContextBudget),
+    compactProjectContext,
     conversation ? `Recent chat context:\n${conversation}` : "",
     selectedText ? `Selected text:\n${selectedText}` : "",
     compileLogs ? `Compile logs:\n${compileLogs}` : "",
@@ -2467,14 +3292,78 @@ async function createProviderAgentResponse(state, body, options = {}) {
   const requestedProviderId = String(body.aiProviderId || body.providerId || "").trim();
   const requestedModelId = String(body.aiModelId || body.modelId || "").trim();
   const askModel = options.askModel || state.ai.models.askActiveProvider;
-  const result = await askModel([
-    { role: "system", content: "You are a precise LaTeX editor. Respond with JSON only." },
+  const modelMessages = [
+    {
+      role: "system",
+      content: "You are a precise LaTeX editor. Return exactly one valid JSON object matching the requested schema. Do not wrap it in a Markdown fence or add commentary outside the object."
+    },
     { role: "user", content: prompt }
-  ], {
+  ];
+  const runtime = options.runtime || state.ai.models.publicState().runtime;
+  const modelState = state.ai.models.publicState();
+  const selectedModel = (modelState.modelChoices || []).find((choice) => {
+    const providerMatches = !requestedProviderId || choice.providerId === requestedProviderId
+      || (["local", "localleaf-local"].includes(requestedProviderId) && choice.local);
+    return providerMatches && (!requestedModelId || choice.modelId === requestedModelId);
+  }) || modelState.activeModel;
+  const truncationReasons = [];
+  const historyTruncated = conversationSource.length > includedConversation.length
+    || includedConversation.some((item) => item.message.length > limits.conversationItemBudget);
+  const projectContextTruncated = projectContextResult.truncated || projectContext.length > compactProjectContext.length;
+  if (historyTruncated) truncationReasons.push("history_limit");
+  if (originalText.length > currentFileContext.length) truncationReasons.push("current_file_limit");
+  if (projectContextTruncated) truncationReasons.push("project_context_limit");
+  if (selectedTextSource.length > selectedText.length) truncationReasons.push("selection_limit");
+  if (compileLogSource.length > compileLogs.length) truncationReasons.push("tool_limit");
+  const serializedModelRequest = JSON.stringify({
+    model: requestedModelId || selectedModel?.modelId || "",
+    messages: modelMessages,
+    max_tokens: limits.maxTokens,
+    temperature: 0.1
+  });
+  const contextMetadata = {
+    runId: body.runId || "",
+    sessionId: body.sessionId || "",
+    runtime,
+    messages: serializedModelRequest,
+    contextWindowTokens: selectedModel?.contextWindowTokens || null,
+    windowSource: selectedModel?.contextWindowTokens
+      ? (selectedModel.local ? "local_runtime" : "provider_model_config")
+      : "unknown",
+    maxOutputTokens: limits.maxTokens,
+    history: {
+      availableTurns: conversationSource.length,
+      includedTurns: includedConversation.length,
+      droppedTurns: Math.max(0, conversationSource.length - includedConversation.length)
+    },
+    truncation: { occurred: truncationReasons.length > 0, reasons: truncationReasons },
+    components: [
+      { key: "current_file", originalChars: originalText.length, includedChars: currentFileContext.length, truncated: originalText.length > currentFileContext.length },
+      { key: "project_context", originalChars: Math.max(projectContextResult.originalChars, projectContext.length), includedChars: compactProjectContext.length, truncated: projectContextTruncated },
+      { key: "history", originalChars: conversationSource.reduce((sum, item) => sum + item.message.length, 0), includedChars: conversation.length, truncated: historyTruncated },
+      { key: "selection", originalChars: selectedTextSource.length, includedChars: selectedText.length, truncated: selectedTextSource.length > selectedText.length },
+      { key: "tools", originalChars: compileLogSource.length, includedChars: compileLogs.length, truncated: compileLogSource.length > compileLogs.length },
+      { key: "request", originalChars: message.length, includedChars: message.length, truncated: false }
+    ]
+  };
+  const preparedContextUsage = buildContextUsage({ ...contextMetadata, status: "prepared" });
+  if (typeof options.onContextPrepared === "function") options.onContextPrepared(preparedContextUsage);
+  const result = await askModel(modelMessages, {
     providerId: requestedProviderId || undefined,
     modelId: requestedModelId || undefined,
     maxTokens: limits.maxTokens,
-    temperature: 0.1
+    temperature: 0.1,
+    signal: options.signal
+  });
+  throwIfAgentRunCancelled(options.signal);
+  const contextUsage = buildContextUsage({
+    ...contextMetadata,
+    status: "complete",
+    runtime,
+    providerUsage: result?.usage,
+    estimatedInputTokens: result?.requestInputTokensEstimate,
+    contextWindowTokens: result?.contextWindowTokens || contextMetadata.contextWindowTokens,
+    windowSource: result?.windowSource || contextMetadata.windowSource
   });
 
   const parsed = extractJsonObject(result?.content);
@@ -2484,30 +3373,45 @@ async function createProviderAgentResponse(state, body, options = {}) {
     reply = String(parsed.reply || "I prepared a response.");
     proposals.push(...createProviderProposalsFromParsed(state, body, parsed, {
       provider: result.provider,
-      modelId: result.modelId
+      modelId: result.modelId,
+      sourceSnapshot
     }, permissions));
-    if (!proposals.length && wantsFileEdit(message)) {
-      proposals.push(setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions));
-      reply = `${reply} I added a safe LocalLeaf fallback proposal because the model did not return an editable patch.`;
+    if (!proposals.length && wantsFileEdit(message) && !requestedAgentCapabilities(message).fileManagement) {
+      const fallbackProposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+      if (fallbackProposal) {
+        proposals.push(fallbackProposal);
+        reply = `${reply} I added a safe LocalLeaf fallback proposal because the model did not return an editable patch.`;
+      } else {
+        reply = `${reply}\n\n${DETERMINISTIC_REWRITE_GUIDANCE}`;
+      }
     }
-  } else if (wantsFileEdit(message)) {
-    proposals.push(setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions));
-    reply = `${reply}\n\nI drafted a file change and added it to Changes.`;
+  } else if (wantsFileEdit(message) && !requestedAgentCapabilities(message).fileManagement) {
+    const fallbackProposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+    if (fallbackProposal) {
+      proposals.push(fallbackProposal);
+      reply = `${reply}\n\nI drafted a file change and added it to Changes.`;
+    } else {
+      reply = `${reply}\n\n${DETERMINISTIC_REWRITE_GUIDANCE}`;
+    }
+  }
+  if (requestedAgentCapabilities(message).fileManagement && !proposals.some((proposal) => proposal.operation === "create")) {
+    throw new Error("The provider did not return a valid file-management proposal, so LocalLeaf did not write anything.");
   }
 
   return {
-    reply,
-    runtime: options.runtime || state.ai.models.publicState().runtime,
+    reply: formatAgentReply(reply, proposals),
+    runtime,
     provider: result?.provider ? {
       id: result.provider.id,
       name: result.provider.name,
       modelId: result.modelId
     } : null,
-    proposals: proposals.map((proposal) => setProposalApprovalFromPermissions(publicProposal(proposal), permissions))
+    proposals: proposals.map((proposal) => setProposalApprovalFromPermissions(publicProposal(proposal), permissions)),
+    contextUsage
   };
 }
 
-async function createAgentMessageResponse(state, body) {
+async function createAgentMessageResponse(state, body, options = {}) {
   const message = String(body.message || "").trim().slice(0, 2000);
   const permissions = agentPermissions(body.aiPermissions || body.permissions);
   if (!permissions.rewriteTools && /\b(rewrite|humanize|clarity|simplify)\b/iu.test(message)) {
@@ -2525,11 +3429,13 @@ async function createAgentMessageResponse(state, body) {
     throw new Error("Local model only is on. Disable it in Settings > AI Permissions or choose a local model in the AI chat.");
   }
   if (cursorProviderRequested(body)) {
-    return applyPermissionsToAgentResult(await createCursorAgentResponse(state, body), permissions);
+    return applyPermissionsToAgentResult(await createCursorAgentResponse(state, body, options), permissions);
   }
+  const fileManagementRequest = requestedAgentCapabilities(message).fileManagement;
   if ((!providerRequested || providerChoice === "local" || providerChoice === "localleaf-local") && state.ai.models.hasActiveLocalModel()) {
     try {
       return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body, {
+        ...options,
         runtime: "local-llama-cpp",
         promptLimits: LOCAL_AGENT_PROMPT_LIMITS,
         askModel: (messages, requestOptions) => state.ai.models.askLocalModel(messages, {
@@ -2538,14 +3444,26 @@ async function createAgentMessageResponse(state, body) {
         })
       }), permissions);
     } catch (error) {
+      throwIfAgentRunCancelled(options.signal);
       if (!permissions.localModelOnly && !hasExplicitChoice && activeAi) {
-        return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body), permissions);
+        return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body, options), permissions);
       }
-      if (wantsFileEdit(message) && /local model|runtime|malformed|json|empty|failed|context size|exceeds the available context/i.test(error.message || "")) {
+      if (!fileManagementRequest && wantsFileEdit(message) && /local model|runtime|malformed|json|empty|failed|context size|exceeds the available context/i.test(error.message || "")) {
         const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+        if (!proposal) {
+          return {
+            reply: `${error.message || "The local model could not respond."}\n\n${DETERMINISTIC_REWRITE_GUIDANCE}`,
+            runtime: "deterministic-fallback",
+            provider: null,
+            proposals: []
+          };
+        }
         return {
-          reply: `${error.message || "The local model could not respond."} I prepared a safe local fallback proposal so you can still review the change.`,
-          runtime: state.ai.models.publicState().runtime,
+          reply: formatAgentReply(
+            `${error.message || "The local model could not respond."}\n\nThe model could not produce a usable patch, so LocalLeaf prepared a safe fallback.`,
+            [proposal]
+          ),
+          runtime: "deterministic-fallback",
           provider: null,
           proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
         };
@@ -2555,16 +3473,28 @@ async function createAgentMessageResponse(state, body) {
   }
   if ((providerRequested || (!hasExplicitChoice && activeAi)) && !permissions.localModelOnly) {
     try {
-      return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body), permissions);
+      return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body, options), permissions);
     } catch (error) {
-      if (wantsFileEdit(message) && /timed out|malformed|json|unreadable|invalid|original file|without changes|replacement text/i.test(error.message || "")) {
+      throwIfAgentRunCancelled(options.signal);
+      if (!fileManagementRequest && wantsFileEdit(message) && /timed out|malformed|json|unreadable|invalid|original file|without changes|replacement text/i.test(error.message || "")) {
         const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
         const reason = /malformed|json|unreadable|invalid/i.test(error.message || "")
           ? "The provider response was not usable."
           : error.message;
+        if (!proposal) {
+          return {
+            reply: `${reason}\n\n${DETERMINISTIC_REWRITE_GUIDANCE}`,
+            runtime: "deterministic-fallback",
+            provider: null,
+            proposals: []
+          };
+        }
         return {
-          reply: `${reason} I prepared a safe local fallback proposal so you can still review the change.`,
-          runtime: state.ai.models.publicState().runtime,
+          reply: formatAgentReply(
+            `${reason}\n\nThe provider could not produce a usable patch, so LocalLeaf prepared a safe fallback.`,
+            [proposal]
+          ),
+          runtime: "deterministic-fallback",
           provider: null,
           proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
         };
@@ -2576,7 +3506,7 @@ async function createAgentMessageResponse(state, body) {
   if (hasAdvancedAgentRequest(message)) {
     return {
       reply: "That permission is enabled. The current local fallback can acknowledge advanced actions, but only text edits are automated in this MVP. Choose a hosted provider model for richer planning, or ask for a safe text edit I can propose now.",
-      runtime: state.ai.models.publicState().runtime,
+      runtime: "deterministic-fallback",
       provider: null,
       proposals: []
     };
@@ -2585,19 +3515,263 @@ async function createAgentMessageResponse(state, body) {
   if (!wantsFileEdit(message)) {
     return {
       reply: "I'm ready to help with LaTeX errors, rewrites, tables, and project edits. Tell me what you want changed or which compile issue to inspect.",
-      runtime: state.ai.models.publicState().runtime,
+      runtime: "deterministic-fallback",
       provider: null,
       proposals: []
     };
   }
 
   const proposal = setProposalApprovalFromPermissions(createDeterministicAgentProposal(state, body), permissions);
+  if (!proposal) {
+    return {
+      reply: DETERMINISTIC_REWRITE_GUIDANCE,
+      runtime: "deterministic-fallback",
+      provider: null,
+      proposals: []
+    };
+  }
   return {
-    reply: `${proposal.summary} Review the proposed edit in this chat before it is written.`,
-    runtime: state.ai.models.publicState().runtime,
+    reply: formatAgentReply("Review the proposal in this chat before it is written.", [proposal]),
+    runtime: "deterministic-fallback",
     provider: null,
     proposals: [setProposalApprovalFromPermissions(publicProposal(proposal), permissions)]
   };
+}
+
+function aiRunError(code, message, statusCode = 409, metadata = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.statusCode = statusCode;
+  Object.assign(error, metadata);
+  return error;
+}
+
+function aiRunIdentityKey(identity = {}) {
+  return identity.isHost ? "host" : `guest:${String(identity.userId || "anonymous")}`;
+}
+
+function aiRunControllerKey(identity, runId) {
+  return `${aiRunIdentityKey(identity)}:${String(runId || "")}`;
+}
+
+function contextUsageForRuntime(runtime, input = {}) {
+  return buildContextUsage({
+    runId: input.runId,
+    sessionId: input.sessionId,
+    status: input.status || "prepared",
+    runtime,
+    messages: input.messages || [],
+    providerUsage: input.providerUsage,
+    contextWindowTokens: input.contextWindowTokens,
+    maxOutputTokens: input.maxOutputTokens,
+    windowSource: input.windowSource,
+    history: input.history || { availableTurns: 0, includedTurns: 0, droppedTurns: 0 },
+    truncation: input.truncation || { occurred: false, reasons: [] },
+    components: input.components || []
+  });
+}
+
+async function runAgentForSession(state, identity, body = {}, options = {}) {
+  const sessionStore = aiSessionStoreForIdentity(state, identity);
+  if (!sessionStore) throw aiRunError("AI_SESSION_NOT_FOUND", "AI session was not found.", 404);
+  const runProject = {
+    ...state.project,
+    files: Array.isArray(state.project?.files) ? state.project.files.map((file) => ({ ...file })) : []
+  };
+  const runState = { ...state, project: runProject };
+  const currentSnapshot = sessionStore.publicState(runProject);
+  const suppliedSessionId = String(body.sessionId || "").trim();
+  const sessionId = suppliedSessionId || currentSnapshot.currentSessionId;
+  const originSession = sessionStore.getSession(runProject, sessionId);
+  if (!originSession) throw aiRunError("AI_SESSION_NOT_FOUND", "AI session was not found.", 404);
+
+  const runId = String(body.runId || randomId(8)).trim().slice(0, 80);
+  const clientMessageId = String(body.clientMessageId || `user-${runId}`).trim().slice(0, 80);
+  const message = String(body.message || "").trim().slice(0, 2000);
+  if (!message) throw aiRunError("AI_RUN_INVALID", "Message is required.", 400);
+  const existingRun = sessionStore.getRun(runProject, sessionId, runId);
+  if (existingRun) {
+    const originalUserMessage = existingRun.userMessage
+      || (originSession.messages || []).find((item) => item.id === existingRun.clientMessageId);
+    if (existingRun.clientMessageId !== clientMessageId || String(originalUserMessage?.message || "") !== message) {
+      throw aiRunError("AI_RUN_BUSY", "That AI run ID is already associated with another request.", 409, { runId, sessionId });
+    }
+    if (existingRun.status === "complete") {
+      const originSessionId = existingRun.sessionId || sessionId;
+      const assistantMessage = existingRun.assistantMessage || [...(originSession.messages || [])]
+        .reverse()
+        .find((item) => item.role === "assistant" && item.runId === runId) || {
+          id: `assistant-${runId}`,
+          role: "assistant",
+          message: "This AI run already completed.",
+          runId
+        };
+      const resultMetadata = existingRun.resultMetadata || {};
+      const replayContextUsage = existingRun.contextUsage || contextUsageForRuntime(
+        resultMetadata.runtime || "cursor-sdk",
+        {
+          runId,
+          sessionId: originSessionId,
+          status: "unavailable",
+          messages: [],
+          history: { availableTurns: 0, includedTurns: 0, droppedTurns: 0 }
+        }
+      );
+      if (typeof options.onRunStarted === "function") {
+        options.onRunStarted({ runId, sessionId: originSessionId, replayed: true });
+      }
+      if (typeof options.onContextPrepared === "function") options.onContextPrepared(replayContextUsage);
+      return {
+        ...resultMetadata,
+        runId,
+        sessionId: originSessionId,
+        reply: assistantMessage.message,
+        assistantMessage,
+        proposals: assistantMessage.proposals || [],
+        sessionRevision: existingRun.sessionRevision || originSession.revision,
+        contextUsage: replayContextUsage,
+        runtime: resultMetadata.runtime || replayContextUsage.runtime || "",
+        replayed: true
+      };
+    }
+    if (existingRun.status === "cancelled") {
+      throw aiRunError("AI_RUN_CANCELLED", "AI response was cancelled.", 409, { runId, sessionId });
+    }
+    throw aiRunError("AI_RUN_BUSY", "That AI run is already active or terminal.", 409, { runId, sessionId });
+  }
+  const effectiveBody = agentRequestForIdentity(runState, identity, {
+    ...body,
+    runId,
+    clientMessageId,
+    sessionId,
+    message,
+    conversation: (originSession.messages || [])
+      .filter((item) => item.id !== "welcome")
+      .map((item) => ({ role: item.role, message: item.message || "" }))
+  });
+  const activeModel = runState.ai.models.publicState().activeModel || {};
+  const permissions = agentPermissions(effectiveBody.aiPermissions || effectiveBody.permissions);
+  const metadata = identity.isHost ? {
+    providerId: effectiveBody.aiProviderId || effectiveBody.providerId || activeModel.providerId || "",
+    providerName: activeModel.providerName || "",
+    modelId: effectiveBody.aiModelId || effectiveBody.modelId || activeModel.modelId || "",
+    modelName: activeModel.name || "",
+    permissionMode: permissions.yoloMode ? "yolo" : "default"
+  } : {
+    providerId: "host-ai",
+    providerName: "Host AI",
+    modelId: activeModel.modelId || "host-model",
+    modelName: activeModel.name || "Host model",
+    permissionMode: "default"
+  };
+
+  sessionStore.beginRun(runProject, sessionId, {
+    runId,
+    clientMessageId,
+    message,
+    metadata
+  });
+  const controller = new AbortController();
+  const controllerKey = aiRunControllerKey(identity, runId);
+  const runControl = { controller, sessionId, runId, sessionStore, project: runProject, cancelled: false };
+  state.ai.runControllers.set(controllerKey, runControl);
+  if (typeof options.onRunStarted === "function") options.onRunStarted({ runId, sessionId });
+
+  let preparedContextUsage = null;
+  const announceContext = (contextUsage) => {
+    preparedContextUsage = contextUsage;
+    if (typeof options.onContextPrepared === "function") options.onContextPrepared(contextUsage);
+  };
+  const initialRuntime = cursorProviderRequested(effectiveBody)
+    ? "cursor-sdk"
+    : runState.ai.models.publicState().runtime || "deterministic-fallback";
+  if (["cursor-sdk", "deterministic-fallback"].includes(initialRuntime)) {
+    announceContext(contextUsageForRuntime(initialRuntime, {
+      runId,
+      sessionId,
+      status: "prepared",
+      messages: [{ role: "user", content: message }],
+      components: [{ key: "request", originalChars: message.length, includedChars: message.length, truncated: false }]
+    }));
+  }
+
+  try {
+    const rawResult = await createAgentMessageResponse(runState, effectiveBody, {
+      signal: controller.signal,
+      onContextPrepared: announceContext
+    });
+    if (runControl.cancelled || controller.signal.aborted) {
+      throw aiRunError("AI_RUN_CANCELLED", "AI response was cancelled.", 409, { runId, sessionId });
+    }
+    const result = agentResultForIdentity(rawResult, identity);
+    const runtime = result.runtime || initialRuntime;
+    const contextUsage = result.contextUsage || contextUsageForRuntime(runtime, {
+      runId,
+      sessionId,
+      status: "complete",
+      messages: [{ role: "user", content: message }],
+      components: [{ key: "request", originalChars: message.length, includedChars: message.length, truncated: false }]
+    });
+    if (!preparedContextUsage) announceContext(contextUsage);
+    const proposals = Array.isArray(result.proposals) ? result.proposals : [];
+    const assistantMessage = {
+      id: `assistant-${runId}`,
+      role: "assistant",
+      message: result.reply || "I prepared a response.",
+      proposals,
+      approvalCards: proposals
+        .filter((proposal) => proposal.status === "proposed" && proposal.approvalRequired !== false)
+        .map((proposal) => proposal.id),
+      runId,
+      createdAt: Date.now()
+    };
+    const completedSnapshot = sessionStore.finalizeRun(runProject, sessionId, {
+      runId,
+      assistantMessage,
+      contextUsage,
+      metadata,
+      result
+    });
+    const completedSummary = completedSnapshot.sessions.find((session) => session.id === sessionId);
+    return {
+      ...result,
+      runId,
+      sessionId,
+      assistantMessage,
+      sessionRevision: completedSummary?.revision || null,
+      contextUsage
+    };
+  } catch (error) {
+    if (runControl.cancelled || controller.signal.aborted || error?.code === "AI_RUN_CANCELLED") {
+      sessionStore.cancelRun(runProject, sessionId, { runId });
+      throw aiRunError("AI_RUN_CANCELLED", "AI response was cancelled.", 409, { runId, sessionId });
+    }
+    const failedContextUsage = preparedContextUsage
+      ? { ...preparedContextUsage, status: preparedContextUsage.status === "not_applicable" ? "not_applicable" : "failed" }
+      : contextUsageForRuntime(initialRuntime, {
+        runId,
+        sessionId,
+        status: "failed",
+        messages: [{ role: "user", content: message }]
+      });
+    sessionStore.failRun(runProject, sessionId, { runId, contextUsage: failedContextUsage });
+    throw error;
+  } finally {
+    if (state.ai.runControllers.get(controllerKey) === runControl) {
+      state.ai.runControllers.delete(controllerKey);
+    }
+  }
+}
+
+function createdFileDiff(content) {
+  const lines = String(content || "").split(/\r?\n/u);
+  if (lines.at(-1) === "") lines.pop();
+  if (!lines.length) return [];
+  return [{
+    oldStart: 0,
+    newStart: 1,
+    lines: lines.map((text, index) => ({ type: "added", lineNumber: index + 1, text }))
+  }];
 }
 
 function publicProposal(proposal) {
@@ -2605,6 +3779,9 @@ function publicProposal(proposal) {
     id: proposal.id,
     runId: proposal.runId || "",
     sessionId: proposal.sessionId || "",
+    operation: proposal.operation === "create" ? "create" : "edit",
+    actionable: true,
+    hostApprovalRequired: proposal.hostApprovalRequired === true || proposal.operation === "create",
     path: proposal.path,
     baseHash: proposal.baseHash,
     newHash: proposal.newHash || textHash(proposal.newText || ""),
@@ -2617,7 +3794,9 @@ function publicProposal(proposal) {
     modelId: proposal.modelId || "",
     requester: proposal.requester || null,
     approvalRequired: proposal.approvalRequired !== false,
-    diffHunks: compactLineDiff(proposal.originalText || "", proposal.newText || ""),
+    diffHunks: proposal.operation === "create"
+      ? createdFileDiff(proposal.newText || "")
+      : compactLineDiff(proposal.originalText || "", proposal.newText || ""),
     focus: proposal.focus || firstChangedRange(proposal.originalText || "", proposal.newText || ""),
     createdAt: proposal.createdAt,
     appliedAt: proposal.appliedAt || null,
@@ -2629,7 +3808,10 @@ function publicProposal(proposal) {
 function recordAiProposalChange(state, proposal) {
   if (!state.ai.changes || !proposal?.id || proposal.skipChangeLog) return;
   try {
-    state.ai.changes.upsert(state.project, publicProposal(proposal));
+    const originProject = proposal.projectRoot
+      ? { root: proposal.projectRoot, name: proposal.projectName || path.basename(proposal.projectRoot) }
+      : state.project;
+    state.ai.changes.upsert(originProject, publicProposal(proposal));
   } catch {
     // Change history is useful for review, but it should not block safe file application.
   }
@@ -2658,6 +3840,42 @@ function applyAgentProposalAndBroadcast(state, proposal) {
 }
 
 function applyAiProposalToFile(state, proposal) {
+  assertAiProposalProject(state, proposal);
+  if (proposal.operation === "create") {
+    const { fullPath, cleanText } = validateAiCreatedFile(state, proposal.path, proposal.newText);
+    if (fs.existsSync(fullPath)) {
+      proposal.status = "stale";
+      recordAiProposalChange(state, proposal);
+      const error = new Error("A file now exists at the path proposed by LocalLeaf AI.");
+      error.statusCode = 409;
+      error.proposal = publicProposal(proposal);
+      throw error;
+    }
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    try {
+      const checkedPath = validateAiCreatedFile(state, proposal.path, cleanText).fullPath;
+      writeNewTextFileExclusive(checkedPath, cleanText);
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        proposal.status = "stale";
+        recordAiProposalChange(state, proposal);
+        const conflict = new Error("A file was created at this path before the AI proposal could be applied.");
+        conflict.statusCode = 409;
+        conflict.proposal = publicProposal(proposal);
+        throw conflict;
+      }
+      throw error;
+    }
+    proposal.status = "applied";
+    proposal.appliedAt = Date.now();
+    proposal.newHash = textHash(cleanText);
+    refreshProject(state);
+    recordAiProposalChange(state, proposal);
+    return {
+      version: Date.now(),
+      proposal: publicProposal(proposal)
+    };
+  }
   const fullPath = resolveProjectPath(state.project.root, proposal.path);
   if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
     const error = new Error("Proposal target file was not found.");
@@ -2691,6 +3909,7 @@ function applyAiProposalToFile(state, proposal) {
 }
 
 function validateProposalRevertTarget(state, proposal) {
+  assertAiProposalProject(state, proposal);
   const fullPath = resolveProjectPath(state.project.root, proposal.path);
   if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
     const error = new Error("Proposal target file was not found.");
@@ -2712,12 +3931,16 @@ function validateProposalRevertTarget(state, proposal) {
     error.proposal = publicProposal(proposal);
     throw error;
   }
-  return { fullPath };
+  return { fullPath, currentText, removeOnRevert: proposal.operation === "create" };
 }
 
 function revertAiProposalToFile(state, proposal) {
-  const { fullPath } = validateProposalRevertTarget(state, proposal);
-  fs.writeFileSync(fullPath, proposal.originalText || "", "utf8");
+  const { fullPath, removeOnRevert } = validateProposalRevertTarget(state, proposal);
+  if (removeOnRevert) {
+    fs.unlinkSync(fullPath);
+    if (state.project.mainFile === proposal.path) state.project.mainFile = detectMainFile(state.project.root);
+  }
+  else fs.writeFileSync(fullPath, proposal.originalText || "", "utf8");
   proposal.status = "reverted";
   proposal.revertedAt = Date.now();
   refreshProject(state);
@@ -2732,42 +3955,140 @@ function revertAgentProposalAndBroadcast(state, proposal) {
   const reverted = revertAiProposalToFile(state, proposal);
   const actorId = proposal.requester?.userId || "host";
   const actorName = proposal.requester?.userName ? `${proposal.requester.userName} via LocalLeaf AI` : "LocalLeaf AI";
-  broadcastCollab(state, {
-    type: "file_updated",
-    filePath: proposal.path,
-    newText: proposal.originalText || "",
-    userId: actorId,
-    name: actorName,
-    version: reverted.version
-  });
-  broadcastProject(state, "file-update", {
-    path: proposal.path,
-    content: proposal.originalText || "",
-    user: actorName,
-    version: reverted.version
-  });
+  if (proposal.operation !== "create") {
+    broadcastCollab(state, {
+      type: "file_updated",
+      filePath: proposal.path,
+      newText: proposal.originalText || "",
+      userId: actorId,
+      name: actorName,
+      version: reverted.version
+    });
+    broadcastProject(state, "file-update", {
+      path: proposal.path,
+      content: proposal.originalText || "",
+      user: actorName,
+      version: reverted.version
+    });
+  }
   broadcastState(state);
   return reverted;
 }
 
+function revertAiRunAtomically(state, proposals) {
+  const targets = proposals.map((proposal) => ({
+    proposal,
+    ...validateProposalRevertTarget(state, proposal)
+  }));
+  const written = [];
+
+  try {
+    for (const target of targets) {
+      if (target.removeOnRevert) fs.unlinkSync(target.fullPath);
+      else fs.writeFileSync(target.fullPath, target.proposal.originalText || "", "utf8");
+      written.push(target);
+    }
+  } catch (writeError) {
+    const rollbackErrors = [];
+    for (const target of written.reverse()) {
+      try {
+        if (target.removeOnRevert) {
+          fs.mkdirSync(path.dirname(target.fullPath), { recursive: true });
+          writeNewTextFileExclusive(target.fullPath, target.currentText);
+        } else {
+          fs.writeFileSync(target.fullPath, target.currentText, "utf8");
+        }
+      } catch (rollbackError) {
+        rollbackErrors.push({ path: target.proposal.path, error: rollbackError });
+      }
+    }
+
+    const error = new Error(
+      rollbackErrors.length
+        ? `The AI run could not be undone, and ${rollbackErrors.length} file${rollbackErrors.length === 1 ? "" : "s"} could not be restored. Close the editor and recover those files from version control or a backup before continuing.`
+        : "The AI run could not be undone. LocalLeaf restored every file to its pre-undo content."
+    );
+    error.statusCode = 500;
+    error.cause = writeError;
+    error.rollbackErrors = rollbackErrors;
+    throw error;
+  }
+
+  const revertedAt = Date.now();
+  const version = Date.now();
+  for (const target of targets) {
+    target.proposal.status = "reverted";
+    target.proposal.revertedAt = revertedAt;
+  }
+  if (targets.some((target) => target.removeOnRevert && state.project.mainFile === target.proposal.path)) {
+    state.project.mainFile = detectMainFile(state.project.root);
+  }
+  refreshProject(state);
+  for (const target of targets) recordAiProposalChange(state, target.proposal);
+
+  for (const target of targets) {
+    const actorId = target.proposal.requester?.userId || "host";
+    const actorName = target.proposal.requester?.userName
+      ? `${target.proposal.requester.userName} via LocalLeaf AI`
+      : "LocalLeaf AI";
+    if (!target.removeOnRevert) {
+      broadcastCollab(state, {
+        type: "file_updated",
+        filePath: target.proposal.path,
+        newText: target.proposal.originalText || "",
+        userId: actorId,
+        name: actorName,
+        version
+      });
+      broadcastProject(state, "file-update", {
+        path: target.proposal.path,
+        content: target.proposal.originalText || "",
+        user: actorName,
+        version
+      });
+    }
+  }
+  broadcastState(state);
+
+  return targets.map(({ proposal }) => publicProposal(proposal));
+}
+
 function rejectAiProposal(state, proposal) {
+  assertAiProposalProject(state, proposal);
   proposal.status = "rejected";
   proposal.rejectedAt = Date.now();
   recordAiProposalChange(state, proposal);
   return publicProposal(proposal);
 }
 
-function sourcePathFromSynctexInput(projectRoot, inputPath) {
+function sourcePathFromSynctexInput(projectRoot, inputPath, sourceSnapshotRoot = "") {
   const raw = String(inputPath || "").trim();
   if (!raw) return "";
   const root = path.resolve(projectRoot);
-  const absolute = path.isAbsolute(raw) || /^[a-zA-Z]:[\\/]/.test(raw)
-    ? path.resolve(raw)
-    : path.resolve(projectRoot, raw);
-  const rootWithSeparator = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
-  if (absolute !== root && !absolute.startsWith(rootWithSeparator)) return "";
-  if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile() || !isTextFile(absolute)) return "";
-  return path.relative(root, absolute).replace(/\\/g, "/");
+  const absoluteInput = path.isAbsolute(raw) || /^[a-zA-Z]:[\\/]/.test(raw);
+  const absolute = absoluteInput ? path.resolve(raw) : path.resolve(root, raw);
+  const roots = [
+    { sourceRoot: root, targetRoot: root },
+    ...(sourceSnapshotRoot
+      ? [{ sourceRoot: path.resolve(sourceSnapshotRoot), targetRoot: root }]
+      : [])
+  ];
+
+  for (const candidate of roots) {
+    const sourceRootWithSeparator = candidate.sourceRoot.endsWith(path.sep)
+      ? candidate.sourceRoot
+      : `${candidate.sourceRoot}${path.sep}`;
+    if (absolute !== candidate.sourceRoot && !absolute.startsWith(sourceRootWithSeparator)) continue;
+    const relative = path.relative(candidate.sourceRoot, absolute);
+    const target = path.resolve(candidate.targetRoot, relative);
+    const targetRootWithSeparator = candidate.targetRoot.endsWith(path.sep)
+      ? candidate.targetRoot
+      : `${candidate.targetRoot}${path.sep}`;
+    if (target !== candidate.targetRoot && !target.startsWith(targetRootWithSeparator)) continue;
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile() || !isTextFile(target)) continue;
+    return relative.replace(/\\/g, "/");
+  }
+  return "";
 }
 
 function parseSynctexEditOutput(state, output) {
@@ -2776,7 +4097,11 @@ function parseSynctexEditOutput(state, output) {
   const line = Number.parseInt(text.match(/^Line:\s*(\d+)$/imu)?.[1] || "0", 10);
   const columnMatch = text.match(/^Column:\s*(-?\d+)$/imu);
   const column = columnMatch ? Math.max(0, Number.parseInt(columnMatch[1] || "0", 10)) : 0;
-  const relativePath = sourcePathFromSynctexInput(state.project.root, input);
+  const relativePath = sourcePathFromSynctexInput(
+    state.project.root,
+    input,
+    state.compile.sourceSnapshotRoot
+  );
   if (!relativePath || !Number.isFinite(line) || line < 1) return null;
   return {
     ok: true,
@@ -2786,7 +4111,25 @@ function parseSynctexEditOutput(state, output) {
   };
 }
 
-function synctexCommand() {
+function normalizePdfSourceResult(state, result) {
+  if (!result?.ok) {
+    return { ok: false, reason: result?.reason || "PDF source position could not be mapped." };
+  }
+  const relativePath = sourcePathFromSynctexInput(
+    state.project.root,
+    result.path,
+    state.compile.sourceSnapshotRoot
+  );
+  const line = Number.parseInt(result.line, 10);
+  const column = Math.max(0, Number.parseInt(result.column || 0, 10) || 0);
+  if (!relativePath || !Number.isFinite(line) || line < 1) {
+    return { ok: false, reason: "That PDF location is not mapped to editable project source." };
+  }
+  return { ok: true, path: relativePath, line, column };
+}
+
+function synctexCommand(state) {
+  if (state?.synctexCommand) return state.synctexCommand;
   const candidates = [
     process.env.LOCALLEAF_SYNCTEX_PATH,
     path.join(ROOT, "bin", process.platform === "win32" ? "synctex.exe" : "synctex"),
@@ -2799,49 +4142,737 @@ function synctexCommand() {
       // Continue to PATH fallback.
     }
   }
-  return commandExists("synctex") ? "synctex" : "";
+  return "synctex";
 }
 
-function resolvePdfSourcePosition(state, input = {}) {
-  if (typeof state.synctexResolver === "function") {
-    const result = state.synctexResolver({
-      page: input.page,
-      x: input.x,
-      y: input.y,
-      pdfPath: state.compile.pdfPath,
-      synctexPath: state.compile.synctexPath,
-      projectRoot: state.project.root
+function runBoundedChildProcess(command, args = [], options = {}) {
+  const timeoutMs = Math.max(25, Math.min(30000, Number(options.timeoutMs) || SYNCTEX_LOOKUP_TIMEOUT_MS));
+  const killGraceMs = Math.max(25, Math.min(5000, Number(options.killGraceMs) || 500));
+  const maxOutputBytes = Math.max(
+    1024,
+    Math.min(1024 * 1024, Number(options.maxOutputBytes) || SYNCTEX_LOOKUP_MAX_OUTPUT_BYTES)
+  );
+  const spawnImpl = typeof options.spawnImpl === "function" ? options.spawnImpl : spawn;
+  return new Promise((resolve) => {
+    let child;
+    let settled = false;
+    let outputBytes = 0;
+    const stdout = [];
+    const stderr = [];
+    let timer = null;
+    let killTimer = null;
+    let terminationResult = null;
+
+    const finish = (result = {}) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve({
+        ok: Boolean(result.ok),
+        timedOut: Boolean(result.timedOut),
+        outputLimitExceeded: Boolean(result.outputLimitExceeded),
+        spawnFailed: Boolean(result.spawnFailed),
+        killGraceExpired: Boolean(result.killGraceExpired),
+        errorCode: result.errorCode ? String(result.errorCode) : "",
+        exitCode: Number.isInteger(result.exitCode) ? result.exitCode : null,
+        signal: result.signal ? String(result.signal) : "",
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8")
+      });
+    };
+
+    const requestTermination = (result) => {
+      if (settled || terminationResult) return;
+      terminationResult = result;
+      if (timer) clearTimeout(timer);
+      try {
+        child?.kill?.("SIGKILL");
+      } catch {
+        // The bounded grace timer below prevents a platform-specific kill failure from hanging forever.
+      }
+      killTimer = setTimeout(() => {
+        try {
+          child?.kill?.("SIGKILL");
+        } catch {
+          // Resolve with the original bounded failure after the final kill attempt.
+        }
+        child?.stdout?.destroy?.();
+        child?.stderr?.destroy?.();
+        finish({ ...terminationResult, killGraceExpired: true });
+      }, killGraceMs);
+    };
+
+    const collect = (target, chunk) => {
+      if (settled || terminationResult) return;
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = maxOutputBytes - outputBytes;
+      if (remaining > 0) target.push(data.subarray(0, remaining));
+      outputBytes += data.length;
+      if (outputBytes <= maxOutputBytes) return;
+      requestTermination({ outputLimitExceeded: true });
+    };
+
+    try {
+      child = spawnImpl(command, args, {
+        cwd: options.cwd,
+        env: options.env,
+        windowsHide: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (error) {
+      finish({ spawnFailed: true, errorCode: error?.code || "SPAWN_ERROR" });
+      return;
+    }
+
+    child.stdout?.on("data", (chunk) => collect(stdout, chunk));
+    child.stderr?.on("data", (chunk) => collect(stderr, chunk));
+    child.once("error", (error) => {
+      if (terminationResult) return;
+      if (!child?.pid) {
+        finish({ spawnFailed: true, errorCode: error?.code || "SPAWN_ERROR" });
+        return;
+      }
+      requestTermination({ spawnFailed: true, errorCode: error?.code || "PROCESS_ERROR" });
     });
-    if (result?.ok) return { ok: true, path: result.path, line: result.line, column: result.column || 0 };
-    return { ok: false, reason: result?.reason || "PDF source position could not be mapped." };
+    child.once("close", (exitCode, signal) => {
+      finish({
+        ...(terminationResult || {}),
+        ok: !terminationResult && exitCode === 0,
+        exitCode,
+        signal
+      });
+    });
+    timer = setTimeout(() => {
+      requestTermination({ timedOut: true });
+    }, timeoutMs);
+  });
+}
+
+function pdfSourceLookupReadiness(state, input = {}) {
+  const page = Number(input.page);
+  const x = Number(input.x);
+  const y = Number(input.y);
+  if (
+    !Number.isFinite(page)
+    || page < 1
+    || !Number.isFinite(x)
+    || x < 0
+    || !Number.isFinite(y)
+    || y < 0
+  ) {
+    return { ok: false, state: "unavailable", reason: "A valid PDF page and coordinates are required." };
   }
-  const page = Number(input.page || 0);
-  const x = Number(input.x || 0);
-  const y = Number(input.y || 0);
-  if (!Number.isFinite(page) || page < 1 || !Number.isFinite(x) || !Number.isFinite(y)) {
-    return { ok: false, reason: "A valid PDF page and coordinates are required." };
+
+  const requestedArtifactId = String(input.artifactId || "").trim();
+  const currentArtifactId = String(state.compile.artifactId || "").trim();
+  const hasRequestedVersion = Object.hasOwn(input, "version") && input.version !== "" && input.version !== null;
+  const requestedVersion = hasRequestedVersion ? Number(input.version) : null;
+  const versionMismatch = hasRequestedVersion
+    && Number.isFinite(requestedVersion)
+    && requestedVersion !== Number(state.compile.version || 0);
+  if (
+    (requestedArtifactId && requestedArtifactId !== currentArtifactId)
+    || (!requestedArtifactId && versionMismatch)
+  ) {
+    return {
+      ok: false,
+      state: "stale",
+      retryable: true,
+      reason: "The PDF preview changed before this source location was mapped. Click the current preview again."
+    };
   }
-  if (!state.compile.pdfPath || !fs.existsSync(state.compile.pdfPath)) {
-    return { ok: false, reason: "Compile the project to PDF first." };
+
+  if (!isValidPdfArtifact(state.compile.pdfPath)) {
+    if (state.compile.status === "running") {
+      return {
+        ok: false,
+        state: "pending",
+        retryable: true,
+        reason: "The first PDF is still compiling. Try this click again when the preview is ready."
+      };
+    }
+    return { ok: false, state: "unavailable", reason: "Compile the project to PDF first." };
   }
   if (!state.compile.synctexPath || !fs.existsSync(state.compile.synctexPath)) {
-    return { ok: false, reason: "SyncTeX data is not available for this PDF. Recompile with SyncTeX support." };
+    return {
+      ok: false,
+      state: "unavailable",
+      reason: "SyncTeX data is not available for this PDF. Recompile with SyncTeX support."
+    };
   }
-  const command = synctexCommand();
+  return {
+    ok: true,
+    page,
+    x,
+    y,
+    previewState: state.compile.status === "running"
+      ? "pending"
+      : state.compile.isStale
+        ? "stale"
+        : ""
+  };
+}
+
+function pdfSourceResultForPreview(result, readiness) {
+  if (!result?.ok || !readiness.previewState) return result;
+  return { ...result, previewState: readiness.previewState };
+}
+
+function pdfSourceLookupSnapshot(state) {
+  return {
+    projectId: state.project.id,
+    artifactId: String(state.compile.artifactId || ""),
+    pdfPath: state.compile.pdfPath || "",
+    synctexPath: state.compile.synctexPath || "",
+    mappingState: {
+      project: { root: state.project.root },
+      compile: { sourceSnapshotRoot: state.compile.sourceSnapshotRoot }
+    }
+  };
+}
+
+function pdfSourceLookupSnapshotIsCurrent(state, snapshot) {
+  return state.project.id === snapshot.projectId
+    && String(state.compile.artifactId || "") === snapshot.artifactId
+    && String(state.compile.pdfPath || "") === snapshot.pdfPath
+    && String(state.compile.synctexPath || "") === snapshot.synctexPath;
+}
+
+function stalePdfSourceLookupResult() {
+  return {
+    ok: false,
+    state: "stale",
+    retryable: true,
+    reason: "The PDF preview changed before this source location was mapped. Click the current preview again."
+  };
+}
+
+async function resolvePdfSourcePosition(state, input = {}) {
+  const readiness = pdfSourceLookupReadiness(state, input);
+  if (!readiness.ok) return readiness;
+  const lookupSnapshot = pdfSourceLookupSnapshot(state);
+  if (typeof state.synctexResolver === "function") {
+    try {
+      const result = await state.synctexResolver({
+        page: readiness.page,
+        x: readiness.x,
+        y: readiness.y,
+        pdfPath: state.compile.pdfPath,
+        synctexPath: state.compile.synctexPath,
+        projectRoot: state.project.root
+      });
+      if (!pdfSourceLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfSourceLookupResult();
+      return pdfSourceResultForPreview(normalizePdfSourceResult(lookupSnapshot.mappingState, result), readiness);
+    } catch {
+      return { ok: false, state: "unavailable", reason: "SyncTeX lookup failed on the host." };
+    }
+  }
+  const { page, x, y } = readiness;
+  const command = synctexCommand(state);
   if (!command) {
-    return { ok: false, reason: "SyncTeX command was not found on this computer." };
+    return { ok: false, state: "unavailable", reason: "SyncTeX command was not found on this computer." };
   }
   const outputArg = `${Math.round(page)}:${Math.round(x)}:${Math.round(y)}:${state.compile.pdfPath}`;
-  const result = spawnSync(command, ["edit", "-o", outputArg], {
-    cwd: state.project.root,
-    encoding: "utf8",
-    timeout: 10000,
-    windowsHide: true
-  });
-  if (result.error) return { ok: false, reason: result.error.message || "SyncTeX lookup failed." };
-  const parsed = parseSynctexEditOutput(state, `${result.stdout || ""}\n${result.stderr || ""}`);
-  if (!parsed) return { ok: false, reason: "That PDF location is not mapped to editable source." };
-  return parsed;
+  const lookupTracker = state.synctexLookups;
+  if (lookupTracker.active >= lookupTracker.maxActive) {
+    return {
+      ok: false,
+      state: "busy",
+      retryable: true,
+      reason: "The host is already handling several PDF source lookups. Try this click again in a moment."
+    };
+  }
+  lookupTracker.active += 1;
+  let result;
+  let bundledResult = null;
+  let runnerFailed = false;
+  try {
+    try {
+      result = await state.synctexProcessRunner({
+        command,
+        args: ["edit", "-o", outputArg],
+        cwd: state.project.root,
+        timeoutMs: SYNCTEX_LOOKUP_TIMEOUT_MS,
+        maxOutputBytes: SYNCTEX_LOOKUP_MAX_OUTPUT_BYTES,
+        page,
+        x,
+        y
+      });
+    } catch {
+      runnerFailed = true;
+      result = null;
+    }
+    if (!pdfSourceLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfSourceLookupResult();
+    if (result?.ok) {
+      const parsed = parseSynctexEditOutput(lookupSnapshot.mappingState, `${result.stdout || ""}\n${result.stderr || ""}`);
+      if (parsed) return pdfSourceResultForPreview(parsed, readiness);
+    }
+
+    bundledResult = await state.synctexWorkerClient.lookup({
+      synctexPath: lookupSnapshot.synctexPath,
+      page,
+      x,
+      y
+    });
+    if (!pdfSourceLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfSourceLookupResult();
+    if (bundledResult?.ok) {
+      return pdfSourceResultForPreview(
+        normalizePdfSourceResult(lookupSnapshot.mappingState, bundledResult),
+        readiness
+      );
+    }
+  } catch {
+    runnerFailed = true;
+  } finally {
+    lookupTracker.active = Math.max(0, lookupTracker.active - 1);
+  }
+  if (bundledResult?.code === "WORKER_TIMEOUT") {
+    return {
+      ok: false,
+      state: "unavailable",
+      retryable: true,
+      reason: "The bundled SyncTeX lookup timed out on the host. Try again or recompile the PDF."
+    };
+  }
+  if (["WORKER_ERROR", "WORKER_EXIT", "WORKER_PROTOCOL_ERROR", "WORKER_RESTARTED"].includes(bundledResult?.code)) {
+    return {
+      ok: false,
+      state: "unavailable",
+      retryable: true,
+      reason: "The bundled SyncTeX reader restarted. Try this PDF location again."
+    };
+  }
+  if (runnerFailed) {
+    return { ok: false, state: "unavailable", reason: "SyncTeX lookup failed on the host." };
+  }
+  if (result?.timedOut) {
+    return {
+      ok: false,
+      state: "unavailable",
+      retryable: true,
+      reason: "SyncTeX lookup timed out on the host. Try again or recompile the PDF."
+    };
+  }
+  if (result?.outputLimitExceeded) {
+    return { ok: false, state: "unavailable", reason: "SyncTeX lookup returned too much output on the host." };
+  }
+  if (result?.spawnFailed) {
+    return { ok: false, state: "unavailable", reason: "SyncTeX lookup could not start on the host." };
+  }
+  if (!result?.ok) {
+    return { ok: false, state: "unavailable", reason: "SyncTeX could not map that PDF location." };
+  }
+  return { ok: false, reason: "That PDF location is not mapped to editable source." };
+}
+
+function parseSynctexViewOutput(output) {
+  const values = ["Page", "x", "y", "h", "v", "W", "H"];
+  const required = new Set(values);
+  let record = null;
+
+  function normalizedRecord(candidate) {
+    if (!candidate || [...required].some((key) => candidate[key] === undefined)) return null;
+    const page = Number(candidate.Page);
+    const height = Number(candidate.H);
+    const x = Number(candidate.h);
+    const y = Number(candidate.v) - height;
+    const width = Number(candidate.W);
+    if (
+      !Number.isSafeInteger(page)
+      || page < 1
+      || ![x, y, Number(candidate.h), Number(candidate.v), width, height].every(Number.isFinite)
+      || width < 0
+      || height < 0
+    ) {
+      return null;
+    }
+    return { ok: true, page, x, y, width, height };
+  }
+
+  for (const line of String(output || "").split(/\r?\n/u)) {
+    const match = /^\s*(Page|x|y|h|v|W|H):\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*$/u.exec(line);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    if (key === "Page") {
+      const completed = normalizedRecord(record);
+      if (completed) return completed;
+      record = {};
+    }
+    if (!record) continue;
+    if (record[key] === undefined) record[key] = Number(rawValue);
+    if (values.every((field) => record[field] !== undefined)) {
+      const completed = normalizedRecord(record);
+      if (completed) return completed;
+    }
+  }
+  return normalizedRecord(record);
+}
+
+function normalizePdfOutputResult(result) {
+  if (!result?.ok) {
+    return { ok: false, reason: result?.reason || "Source position could not be mapped to the PDF." };
+  }
+  const page = Number(result.page);
+  const x = Number(result.x ?? result.h);
+  const y = Number(result.y ?? result.v);
+  const width = Number(result.width ?? result.W ?? 0);
+  const height = Number(result.height ?? result.H ?? 0);
+  if (
+    !Number.isSafeInteger(page)
+    || page < 1
+    || !Number.isFinite(x)
+    || !Number.isFinite(y)
+    || !Number.isFinite(width)
+    || width < 0
+    || !Number.isFinite(height)
+    || height < 0
+  ) {
+    return { ok: false, reason: "SyncTeX returned an invalid PDF position." };
+  }
+  return { ok: true, page, x, y, width, height };
+}
+
+function pdfOutputLookupReadiness(state, input = {}) {
+  const rawPath = String(input.relativePath || input.path || input.sourcePath || "").trim();
+  if (!rawPath || path.isAbsolute(rawPath) || /^[a-zA-Z]:[\\/]/u.test(rawPath)) {
+    return { ok: false, state: "unavailable", reason: "Choose an editable project file to review." };
+  }
+
+  let relativePath;
+  let projectSourcePath;
+  try {
+    relativePath = normalizeRelativePath(rawPath);
+    projectSourcePath = resolveProjectPath(state.project.root, relativePath);
+  } catch {
+    return { ok: false, state: "unavailable", reason: "That source path is outside the editable project." };
+  }
+  if (
+    !relativePath
+    || !fs.existsSync(projectSourcePath)
+    || !fs.statSync(projectSourcePath).isFile()
+    || !isTextFile(projectSourcePath)
+  ) {
+    return { ok: false, state: "unavailable", reason: "That source path is not an editable project file." };
+  }
+
+  const line = Number(input.line);
+  const column = input.column === undefined || input.column === null ? 0 : Number(input.column);
+  if (
+    !Number.isSafeInteger(line)
+    || line < 1
+    || !Number.isSafeInteger(column)
+    || column < 0
+  ) {
+    return { ok: false, state: "unavailable", reason: "A valid source line and column are required." };
+  }
+
+  const requestedArtifactId = String(input.artifactId || "").trim();
+  const currentArtifactId = String(state.compile.artifactId || "").trim();
+  if (requestedArtifactId.length > 256) {
+    return { ok: false, state: "unavailable", reason: "The PDF artifact identifier is invalid." };
+  }
+  const hasRequestedVersion = Object.hasOwn(input, "version") && input.version !== "" && input.version !== null;
+  const requestedVersion = hasRequestedVersion ? Number(input.version) : null;
+  if (hasRequestedVersion && (!Number.isSafeInteger(requestedVersion) || requestedVersion < 0)) {
+    return { ok: false, state: "unavailable", reason: "The PDF version is invalid." };
+  }
+  if (
+    (requestedArtifactId && requestedArtifactId !== currentArtifactId)
+    || (!requestedArtifactId && hasRequestedVersion && requestedVersion !== Number(state.compile.version || 0))
+  ) {
+    return {
+      ok: false,
+      state: "stale",
+      retryable: true,
+      reason: "The PDF preview changed before this review location was mapped. Review the current PDF again."
+    };
+  }
+
+  if (!isValidPdfArtifact(state.compile.pdfPath)) {
+    if (state.compile.status === "running") {
+      return {
+        ok: false,
+        state: "pending",
+        retryable: true,
+        reason: "The first PDF is still compiling. Review this change when the preview is ready."
+      };
+    }
+    return { ok: false, state: "unavailable", reason: "Compile the project to PDF before reviewing this change." };
+  }
+  if (!state.compile.synctexPath || !fs.existsSync(state.compile.synctexPath)) {
+    return {
+      ok: false,
+      state: "unavailable",
+      recompileRequired: true,
+      reason: "SyncTeX data is unavailable for this PDF. Recompile before reviewing this change."
+    };
+  }
+
+  const sourceSnapshotRoot = String(state.compile.sourceSnapshotRoot || "").trim();
+  if (!sourceSnapshotRoot || !fs.existsSync(sourceSnapshotRoot) || !fs.statSync(sourceSnapshotRoot).isDirectory()) {
+    return {
+      ok: false,
+      state: "unavailable",
+      recompileRequired: true,
+      reason: "The compiled source snapshot is unavailable. Recompile before reviewing this change."
+    };
+  }
+  let sourcePath;
+  try {
+    sourcePath = resolveProjectPath(sourceSnapshotRoot, relativePath);
+  } catch {
+    return { ok: false, state: "unavailable", reason: "The compiled source path is invalid." };
+  }
+  if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile() || !isTextFile(sourcePath)) {
+    return {
+      ok: false,
+      state: "unavailable",
+      recompileRequired: true,
+      reason: "This file is not present in the displayed PDF snapshot. Recompile before reviewing this change."
+    };
+  }
+
+  const expectedSourceHash = String(input.expectedSourceHash || "").trim().toLowerCase();
+  if (expectedSourceHash && !/^[a-f0-9]{64}$/u.test(expectedSourceHash)) {
+    return { ok: false, state: "unavailable", reason: "The expected source version is invalid." };
+  }
+  return {
+    ok: true,
+    relativePath,
+    sourcePath,
+    sourceSnapshotRoot,
+    line,
+    column,
+    expectedSourceHash,
+    previewState: state.compile.status === "running"
+      ? "pending"
+      : state.compile.isStale
+        ? "stale"
+        : ""
+  };
+}
+
+function pdfOutputLookupSnapshot(state, readiness) {
+  return {
+    projectId: state.project.id,
+    artifactId: String(state.compile.artifactId || ""),
+    version: Number(state.compile.version || 0),
+    pdfPath: state.compile.pdfPath || "",
+    synctexPath: state.compile.synctexPath || "",
+    sourceSnapshotRoot: readiness.sourceSnapshotRoot,
+    sourcePath: readiness.sourcePath,
+    relativePath: readiness.relativePath,
+    line: readiness.line,
+    column: readiness.column
+  };
+}
+
+function pdfOutputLookupSnapshotIsCurrent(state, snapshot) {
+  return state.project.id === snapshot.projectId
+    && String(state.compile.artifactId || "") === snapshot.artifactId
+    && String(state.compile.pdfPath || "") === snapshot.pdfPath
+    && String(state.compile.synctexPath || "") === snapshot.synctexPath
+    && String(state.compile.sourceSnapshotRoot || "") === snapshot.sourceSnapshotRoot;
+}
+
+function stalePdfOutputLookupResult() {
+  return {
+    ok: false,
+    state: "stale",
+    retryable: true,
+    reason: "The PDF preview changed before this review location was mapped. Review the current PDF again."
+  };
+}
+
+function sourceHashMismatchResult(readiness) {
+  return {
+    ok: false,
+    state: readiness.previewState === "pending" ? "pending" : "stale",
+    retryable: true,
+    recompileRequired: true,
+    reason: "The displayed PDF was compiled from a different version of this file. Recompile before reviewing this change."
+  };
+}
+
+function pdfOutputSuccess(result, readiness, snapshot) {
+  const mapped = normalizePdfOutputResult(result);
+  if (!mapped.ok) return mapped;
+  return {
+    ...mapped,
+    path: snapshot.relativePath,
+    line: snapshot.line,
+    column: snapshot.column,
+    artifactId: snapshot.artifactId,
+    version: snapshot.version,
+    ...(readiness.previewState ? { previewState: readiness.previewState } : {})
+  };
+}
+
+async function resolvePdfOutputPosition(state, input = {}) {
+  const readiness = pdfOutputLookupReadiness(state, input);
+  if (!readiness.ok) return readiness;
+  const lookupSnapshot = pdfOutputLookupSnapshot(state, readiness);
+  const lookupTracker = state.synctexLookups;
+  if (lookupTracker.active >= lookupTracker.maxActive) {
+    return {
+      ok: false,
+      state: "busy",
+      retryable: true,
+      reason: "The host is already handling several PDF lookups. Try Review again in a moment."
+    };
+  }
+  lookupTracker.active += 1;
+
+  try {
+  let snapshotHash;
+  try {
+    const beforeStat = await fs.promises.stat(lookupSnapshot.sourcePath, { bigint: true });
+    if (!beforeStat.isFile()) throw new Error("Compiled source snapshot is not a file.");
+    const snapshotBytes = await fs.promises.readFile(lookupSnapshot.sourcePath);
+    const afterStat = await fs.promises.stat(lookupSnapshot.sourcePath, { bigint: true });
+    if (
+      !afterStat.isFile()
+      || beforeStat.size !== afterStat.size
+      || beforeStat.mtimeNs !== afterStat.mtimeNs
+    ) {
+      return {
+        ok: false,
+        state: "stale",
+        retryable: true,
+        recompileRequired: true,
+        reason: "The compiled source snapshot changed unexpectedly. Recompile before reviewing this change."
+      };
+    }
+    snapshotHash = crypto.createHash("sha256").update(snapshotBytes).digest("hex");
+  } catch {
+    if (!pdfOutputLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfOutputLookupResult();
+    return {
+      ok: false,
+      state: "unavailable",
+      recompileRequired: true,
+      reason: "The compiled source snapshot could not be read. Recompile before reviewing this change."
+    };
+  }
+  if (!pdfOutputLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfOutputLookupResult();
+  if (readiness.expectedSourceHash && snapshotHash !== readiness.expectedSourceHash) {
+    return sourceHashMismatchResult(readiness);
+  }
+
+  if (typeof state.synctexForwardResolver === "function") {
+    try {
+      const result = await state.synctexForwardResolver({
+        sourcePath: lookupSnapshot.sourcePath,
+        relativePath: lookupSnapshot.relativePath,
+        line: lookupSnapshot.line,
+        column: lookupSnapshot.column,
+        pdfPath: lookupSnapshot.pdfPath,
+        synctexPath: lookupSnapshot.synctexPath,
+        synctexDirectory: path.dirname(lookupSnapshot.synctexPath),
+        sourceSnapshotRoot: lookupSnapshot.sourceSnapshotRoot,
+        projectRoot: state.project.root,
+        artifactId: lookupSnapshot.artifactId,
+        version: lookupSnapshot.version
+      });
+      if (!pdfOutputLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfOutputLookupResult();
+      return pdfOutputSuccess(result, readiness, lookupSnapshot);
+    } catch {
+      if (!pdfOutputLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfOutputLookupResult();
+      return { ok: false, state: "unavailable", reason: "SyncTeX forward lookup failed on the host." };
+    }
+  }
+
+  let result;
+  let bundledResult = null;
+  let runnerFailed = false;
+  try {
+    try {
+      result = await state.synctexProcessRunner({
+        command: synctexCommand(state),
+        args: [
+          "view",
+          "-i",
+          `${lookupSnapshot.line}:${lookupSnapshot.column}:${lookupSnapshot.sourcePath}`,
+          "-o",
+          lookupSnapshot.pdfPath,
+          "-d",
+          path.dirname(lookupSnapshot.synctexPath)
+        ],
+        cwd: lookupSnapshot.sourceSnapshotRoot,
+        timeoutMs: SYNCTEX_LOOKUP_TIMEOUT_MS,
+        maxOutputBytes: SYNCTEX_LOOKUP_MAX_OUTPUT_BYTES,
+        sourcePath: lookupSnapshot.sourcePath,
+        relativePath: lookupSnapshot.relativePath,
+        line: lookupSnapshot.line,
+        column: lookupSnapshot.column
+      });
+    } catch {
+      runnerFailed = true;
+      result = null;
+    }
+    if (!pdfOutputLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfOutputLookupResult();
+    if (result?.ok) {
+      const parsed = parseSynctexViewOutput(`${result.stdout || ""}\n${result.stderr || ""}`);
+      if (parsed) return pdfOutputSuccess(parsed, readiness, lookupSnapshot);
+    }
+
+    bundledResult = typeof state.synctexWorkerClient.lookupSource === "function"
+      ? await state.synctexWorkerClient.lookupSource({
+        synctexPath: lookupSnapshot.synctexPath,
+        sourcePath: lookupSnapshot.sourcePath,
+        relativePath: lookupSnapshot.relativePath,
+        line: lookupSnapshot.line,
+        column: lookupSnapshot.column
+      })
+      : { ok: false, code: "WORKER_PROTOCOL_ERROR" };
+    if (!pdfOutputLookupSnapshotIsCurrent(state, lookupSnapshot)) return stalePdfOutputLookupResult();
+    if (bundledResult?.ok) return pdfOutputSuccess(bundledResult, readiness, lookupSnapshot);
+  } catch {
+    runnerFailed = true;
+  }
+
+  if (bundledResult?.code === "WORKER_TIMEOUT") {
+    return {
+      ok: false,
+      state: "unavailable",
+      retryable: true,
+      reason: "The bundled SyncTeX lookup timed out. Try Review again or recompile the PDF."
+    };
+  }
+  if (["WORKER_ERROR", "WORKER_EXIT", "WORKER_PROTOCOL_ERROR", "WORKER_RESTARTED"].includes(bundledResult?.code)) {
+    return {
+      ok: false,
+      state: "unavailable",
+      retryable: true,
+      reason: "The bundled SyncTeX reader restarted. Try Review again."
+    };
+  }
+  if (runnerFailed) {
+    return { ok: false, state: "unavailable", reason: "SyncTeX forward lookup failed on the host." };
+  }
+  if (result?.timedOut) {
+    return {
+      ok: false,
+      state: "unavailable",
+      retryable: true,
+      reason: "SyncTeX lookup timed out. Try Review again or recompile the PDF."
+    };
+  }
+  if (result?.outputLimitExceeded) {
+    return { ok: false, state: "unavailable", reason: "SyncTeX lookup returned too much output on the host." };
+  }
+  if (result?.spawnFailed) {
+    return { ok: false, state: "unavailable", reason: "SyncTeX lookup could not start on the host." };
+  }
+  return {
+    ok: false,
+    state: "unavailable",
+    reason: "That source position is not mapped in the displayed PDF. Recompile if this change is new."
+  };
+  } finally {
+    lookupTracker.active = Math.max(0, lookupTracker.active - 1);
+  }
 }
 
 function setProjectRoot(state, projectRoot) {
@@ -2850,7 +4881,7 @@ function setProjectRoot(state, projectRoot) {
   if (!mainFile) {
     throw new Error("Choose a LaTeX project folder that contains at least one .tex file.");
   }
-  state.project = {
+  const nextProject = {
     id: randomId(6),
     name: path.basename(root),
     root,
@@ -2858,6 +4889,8 @@ function setProjectRoot(state, projectRoot) {
     files: listProjectFiles(root),
     size: getProjectSize(root)
   };
+  retireCompileArtifact(state, state.compile.pdfPath);
+  state.project = nextProject;
   state.compile = {
     ...state.compile,
     status: "idle",
@@ -2866,8 +4899,33 @@ function setProjectRoot(state, projectRoot) {
     pdfPath: null,
     synctexPath: null,
     sourceMapAvailable: false,
-    version: state.compile.version + 1
+    version: state.compile.version + 1,
+    jobId: null,
+    queuedJobs: 0,
+    isStale: false,
+    lastSuccessfulAt: null,
+    lastSuccessfulVersion: 0,
+    artifactId: null,
+    artifactRoot: null,
+    sourceSnapshotRoot: null
   };
+}
+
+function blockProjectSwitchWhileSharing(state, response) {
+  if (state.session.status === "live") {
+    jsonResponse(response, 409, {
+      error: "Stop sharing before opening, creating, or importing another project."
+    });
+    return true;
+  }
+  if (state.ai?.runControllers?.size) {
+    jsonResponse(response, 409, {
+      error: "Stop the active AI response before opening, creating, or importing another project.",
+      code: "AI_RUN_BUSY"
+    });
+    return true;
+  }
+  return false;
 }
 
 function serveStatic(request, response, pathname) {
@@ -2896,6 +4954,28 @@ function serveStatic(request, response, pathname) {
 
 function activeTunnelProviders(state) {
   return state.session.tunnel.providers || [];
+}
+
+function resolveTunnelProviderPreference(state, body = {}) {
+  const provided = Object.prototype.hasOwnProperty.call(body, "providerId");
+  if (!provided) {
+    return {
+      provided: false,
+      providerId: state.session.tunnel.preferredProviderId || null
+    };
+  }
+  if (body.providerId === null) {
+    return { provided: true, providerId: null };
+  }
+  if (typeof body.providerId !== "string" || !body.providerId.trim()) {
+    throw new Error("providerId must be a non-empty available provider ID or null for automatic selection.");
+  }
+  const providerId = body.providerId.trim();
+  if (!activeTunnelProviders(state).some((provider) => provider.id === providerId)) {
+    const availableIds = activeTunnelProviders(state).map((provider) => provider.id).join(", ");
+    throw new Error(`Tunnel provider \"${providerId}\" is unavailable. Available providers: ${availableIds || "none"}.`);
+  }
+  return { provided: true, providerId };
 }
 
 function resetTunnelLink(state) {
@@ -2929,6 +5009,7 @@ function createTunnelRunner(state, provider, baseUrl, raceId, restartAttempt) {
     provider,
     baseUrl,
     raceId,
+    challenge: randomId(12),
     restartAttempt,
     code: state.session.code,
     child: null,
@@ -2982,8 +5063,15 @@ function stopLosingTunnelRunners(state, winnerProviderId) {
   }
 }
 
-function startPublicTunnel(state, baseUrl, restartAttempt = 0) {
-  const providers = activeTunnelProviders(state);
+function startPublicTunnel(state, baseUrl, restartAttempt = 0, options = {}) {
+  const availableProviders = activeTunnelProviders(state);
+  const preferredProviderId = state.session.tunnel.preferredProviderId || null;
+  const previousLinkInvalidated = options.previousLinkInvalidated === undefined
+    ? Boolean(state.session.tunnel.previousLinkInvalidated)
+    : Boolean(options.previousLinkInvalidated);
+  const providers = preferredProviderId
+    ? availableProviders.filter((provider) => provider.id === preferredProviderId)
+    : availableProviders;
   if (!providers.length) {
     resetTunnelLink(state);
     state.session.tunnel.status = "Error";
@@ -2999,10 +5087,17 @@ function startPublicTunnel(state, baseUrl, restartAttempt = 0) {
   state.session.tunnel.runners = new Map();
   state.session.tunnel.providerId = null;
   state.session.tunnel.providerName = null;
+  state.session.tunnel.selectionMode = preferredProviderId ? "preferred" : "automatic";
+  state.session.tunnel.previousLinkInvalidated = previousLinkInvalidated;
   state.session.tunnel.status = "Starting";
-  state.session.tunnel.detail = restartAttempt
-    ? `Racing tunnel providers again (${restartAttempt + 1}/${TUNNEL_RESTART_ATTEMPTS})`
-    : `Racing tunnel providers: ${providers.map((provider) => provider.name).join(", ")}`;
+  const startingDetail = preferredProviderId
+    ? `${restartAttempt ? "Retrying" : "Starting"} selected tunnel provider: ${providers[0].name}`
+    : restartAttempt
+      ? `Racing tunnel providers again (${restartAttempt + 1}/${TUNNEL_RESTART_ATTEMPTS})`
+      : `Racing tunnel providers: ${providers.map((provider) => provider.name).join(", ")}`;
+  state.session.tunnel.detail = previousLinkInvalidated
+    ? `Previous invite link was invalidated. ${startingDetail}`
+    : startingDetail;
   broadcastState(state);
 
   for (const provider of providers) {
@@ -3067,7 +5162,7 @@ function startProcessTunnelProvider(state, provider, baseUrl, raceId, restartAtt
     const text = chunk.toString();
     runner.outputTail = `${runner.outputTail}${text}`.slice(-4000);
     answerSshPrompt(child, text);
-    const publicUrl = parseProviderUrl(provider, text);
+    const publicUrl = parseProviderUrl(provider, runner.outputTail);
     if (!publicUrl || publicUrl === announcedUrl) return;
     announcedUrl = publicUrl;
     clearTimeout(runner.startTimer);
@@ -3133,7 +5228,11 @@ function acceptTunnelWinner(state, runner, publicUrl) {
   state.session.tunnel.providerId = provider.id;
   state.session.tunnel.providerName = provider.name;
   state.session.tunnel.status = "Connected";
-  state.session.tunnel.detail = `${provider.name} won the tunnel race and verified the public link`;
+  state.session.tunnel.detail = state.session.tunnel.previousLinkInvalidated
+    ? `${provider.name} verified the replacement invite link`
+    : state.session.tunnel.selectionMode === "preferred"
+      ? `${provider.name} verified the selected public link`
+      : `${provider.name} won the tunnel race and verified the public link`;
   state.session.tunnel.process = runner.child || null;
   state.session.tunnel.controller = runner.controller || null;
   recordTunnelAttempt(state, provider, "connected", "Won race and verified public link");
@@ -3168,13 +5267,17 @@ function failTunnelCandidate(state, runner, reason) {
   }
 
   if (runner.restartAttempt + 1 < TUNNEL_RESTART_ATTEMPTS && !/rate-limit|too many requests|429|1015/i.test(reason)) {
+    const originatingRaceId = runner.raceId;
     state.session.tunnel.status = "Retrying";
     state.session.tunnel.providerId = null;
     state.session.tunnel.providerName = null;
     state.session.tunnel.detail = `All tunnel providers failed. Racing them again...`;
     broadcastState(state);
     setTimeout(() => {
-      const canRetry = state.session.status === "live" && state.session.code === code && !state.session.inviteUrl;
+      const canRetry = state.session.status === "live" &&
+        state.session.code === code &&
+        state.session.tunnel.raceId === originatingRaceId &&
+        !state.session.inviteUrl;
       if (canRetry) {
         startPublicTunnel(state, runner.baseUrl, runner.restartAttempt + 1);
       }
@@ -3198,11 +5301,15 @@ function handleWinningTunnelStopped(state, runner, reason) {
   recordTunnelAttempt(state, provider, "failed", reason);
 
   if (runner.restartAttempt + 1 < TUNNEL_RESTART_ATTEMPTS && !/rate-limit|too many requests|429|1015/i.test(reason)) {
+    const originatingRaceId = runner.raceId;
     state.session.tunnel.status = "Retrying";
     state.session.tunnel.detail = `${provider.name} tunnel stopped. Racing tunnel providers again...`;
     broadcastState(state);
     setTimeout(() => {
-      const canRetry = state.session.status === "live" && state.session.code === runner.code && !state.session.inviteUrl;
+      const canRetry = state.session.status === "live" &&
+        state.session.code === runner.code &&
+        state.session.tunnel.raceId === originatingRaceId &&
+        !state.session.inviteUrl;
       if (canRetry) {
         startPublicTunnel(state, runner.baseUrl, runner.restartAttempt + 1);
       }
@@ -3252,7 +5359,22 @@ function schedulePublicTunnelStop(state, sessionId) {
   }, SESSION_END_TUNNEL_GRACE_MS);
 }
 
+function cancelGuestAiRuns(state) {
+  for (const [key, control] of [...state.ai.runControllers.entries()]) {
+    if (!key.startsWith("guest:")) continue;
+    control.cancelled = true;
+    control.controller.abort();
+    try {
+      control.sessionStore.cancelRun(control.project || state.project, control.sessionId, { runId: control.runId });
+    } catch {
+      // Guest teardown must continue even if a run already became terminal.
+    }
+    state.ai.runControllers.delete(key);
+  }
+}
+
 function applyEndedSessionState(state) {
+  cancelGuestAiRuns(state);
   state.session.status = "ended";
   state.session.inviteUrl = null;
   state.session.publicUrl = null;
@@ -3262,6 +5384,7 @@ function applyEndedSessionState(state) {
   state.session.users = state.session.users.map((user) => ({ ...user, online: user.role === "host" }));
   state.session.tunnel.providerId = null;
   state.session.tunnel.providerName = null;
+  state.session.tunnel.previousLinkInvalidated = false;
   state.session.tunnel.status = state.session.tunnel.available ? "Ready" : "Not installed";
   state.session.tunnel.detail = state.session.tunnel.available
     ? `Tunnel providers ready: ${activeTunnelProviders(state).map((provider) => provider.name).join(", ")}`
@@ -3301,17 +5424,30 @@ function lookupPublicHostname(hostname, options, callback) {
   });
 }
 
-function checkPublicTunnel(publicUrl) {
+function checkPublicTunnel(publicUrl, challenge) {
   return new Promise((resolve) => {
+    const checkUrl = new URL("/api/tunnel-check", publicUrl);
+    checkUrl.searchParams.set("challenge", challenge);
     const request = https.get(
-      `${publicUrl}/api/state`,
+      checkUrl,
       {
         timeout: 8000,
         lookup: lookupPublicHostname
       },
       (response) => {
-        response.resume();
-        resolve(response.statusCode === 200);
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          if (body.length < 1024) body += chunk;
+        });
+        response.on("end", () => {
+          try {
+            const payload = JSON.parse(body);
+            resolve(response.statusCode === 200 && payload.challenge === challenge);
+          } catch {
+            resolve(false);
+          }
+        });
       }
     );
     request.on("timeout", () => {
@@ -3323,7 +5459,7 @@ function checkPublicTunnel(publicUrl) {
 }
 
 function verifyTunnelCandidate(state, runner, publicUrl, attempt = 1) {
-  (state.tunnelCheck || checkPublicTunnel)(publicUrl).then((ok) => {
+  (state.tunnelCheck || checkPublicTunnel)(publicUrl, runner.challenge).then((ok) => {
     if (!raceStillActive(state, runner) || runner.publicUrl !== publicUrl) return;
 
     if (ok) {
@@ -3348,12 +5484,215 @@ function verifyTunnelCandidate(state, runner, publicUrl, attempt = 1) {
 
 function createLocalLeafServer(options = {}) {
   const state = createInitialState(options);
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
   const updateReleaseFetcher = typeof options.fetchLatestRelease === "function"
     ? options.fetchLatestRelease
     : fetchLatestRelease;
+  const compileRunner = typeof options.compileProject === "function"
+    ? options.compileProject
+    : compileProject;
+  const compileCoordinator = {
+    activeJobId: null,
+    nextJobNumber: 0,
+    queuedJobs: 0,
+    tail: Promise.resolve()
+  };
+
+  async function runCompileJob(job) {
+    compileCoordinator.queuedJobs = Math.max(0, compileCoordinator.queuedJobs - 1);
+    compileCoordinator.activeJobId = job.id;
+
+    if (state.project.id !== job.projectId) {
+      compileCoordinator.activeJobId = null;
+      return {
+        ...publicCompileState(state.compile),
+        jobId: job.id,
+        superseded: true
+      };
+    }
+
+    const previousCompile = state.compile;
+    const previousPdfAvailable = isValidPdfArtifact(previousCompile.pdfPath);
+    state.compile = {
+      ...previousCompile,
+      status: "running",
+      logs: ["[LocalLeaf] Compile started..."],
+      version: previousCompile.version + 1,
+      jobId: job.id,
+      queuedJobs: compileCoordinator.queuedJobs,
+      isStale: false
+    };
+    broadcastProject(state, "compile", publicCompileState(state.compile));
+
+    let result;
+    let compileSnapshot = null;
+    try {
+      compileSnapshot = await createCompileSnapshot(job.projectRoot);
+      result = await compileRunner(compileSnapshot.sourceSnapshotRoot, job.mainFile, (chunk) => {
+        if (compileCoordinator.activeJobId !== job.id || state.project.id !== job.projectId) return;
+        state.compile.logs = [
+          ...state.compile.logs,
+          ...String(chunk || "").split(/\r?\n/).filter(Boolean)
+        ].slice(-300);
+        broadcastProject(state, "compile", publicCompileState(state.compile));
+      }, {
+        compileSnapshot,
+        originalProjectRoot: job.projectRoot,
+        previousPdfPath: previousCompile.pdfPath,
+        previousSynctexPath: previousCompile.synctexPath,
+        previousArtifactRoot: previousCompile.artifactRoot,
+        previousSourceSnapshotRoot: previousCompile.sourceSnapshotRoot
+      });
+      if (result?.artifactRoot !== compileSnapshot.artifactRoot) {
+        cleanupCompileArtifact(compileSnapshot.artifactRoot);
+      }
+    } catch (error) {
+      cleanupCompileArtifact(compileSnapshot?.artifactRoot);
+      result = {
+        ok: false,
+        engine: previousCompile.engine,
+        mode: previousPdfAvailable ? "pdf" : "html",
+        logs: [
+          ...state.compile.logs,
+          `[LocalLeaf] Compile failed: ${error.message || "Unknown compiler error."}`
+        ],
+        previewHtml: previousCompile.previewHtml || "",
+        pdfPath: previousPdfAvailable ? previousCompile.pdfPath : null,
+        synctexPath: previousPdfAvailable ? previousCompile.synctexPath || null : null,
+        artifactRoot: previousPdfAvailable ? previousCompile.artifactRoot || null : null,
+        sourceSnapshotRoot: previousPdfAvailable ? previousCompile.sourceSnapshotRoot || null : null,
+        stale: previousPdfAvailable
+      };
+    }
+
+    if (result?.pdfPath && !isValidPdfArtifact(result.pdfPath)) {
+      if (result.artifactRoot && result.artifactRoot !== previousCompile.artifactRoot) {
+        cleanupCompileArtifact(result.artifactRoot);
+      }
+      result = {
+        ...result,
+        ok: false,
+        mode: "html",
+        logs: [
+          ...(result.logs || []),
+          "[LocalLeaf] The compiler produced an invalid or incomplete PDF, so LocalLeaf did not publish it."
+        ],
+        pdfPath: null,
+        synctexPath: null,
+        artifactRoot: null,
+        sourceSnapshotRoot: null,
+        stale: false
+      };
+    }
+
+    if (state.project.id !== job.projectId) {
+      if (result.artifactRoot && result.artifactRoot !== previousCompile.artifactRoot) {
+        cleanupCompileArtifact(result.artifactRoot);
+      }
+      compileCoordinator.activeJobId = null;
+      return {
+        ...publicCompileState(state.compile),
+        jobId: job.id,
+        superseded: true
+      };
+    }
+
+    if (!result.ok && previousPdfAvailable && result.pdfPath !== previousCompile.pdfPath) {
+      if (result.artifactRoot && result.artifactRoot !== previousCompile.artifactRoot) {
+        cleanupCompileArtifact(result.artifactRoot);
+      }
+      result = {
+        ...result,
+        mode: "pdf",
+        pdfPath: previousCompile.pdfPath,
+        synctexPath: previousCompile.synctexPath,
+        artifactRoot: previousCompile.artifactRoot,
+        sourceSnapshotRoot: previousCompile.sourceSnapshotRoot,
+        stale: true
+      };
+    }
+
+    if (!isValidPdfArtifact(result.pdfPath)) {
+      result = {
+        ...result,
+        mode: "html",
+        pdfPath: null,
+        synctexPath: null,
+        artifactRoot: null,
+        sourceSnapshotRoot: null,
+        stale: false
+      };
+    }
+
+    const completedAt = Date.now();
+    const nextVersion = state.compile.version + 1;
+    const hasSuccessfulPdf = Boolean(result.ok && result.mode === "pdf" && result.pdfPath);
+    const isStale = Boolean(result.stale || (!result.ok && result.pdfPath));
+    registerCompileArtifact(state, result);
+    if (previousCompile.pdfPath && previousCompile.pdfPath !== result.pdfPath) {
+      retireCompileArtifact(state, previousCompile.pdfPath);
+    }
+    state.compile = {
+      status: result.ok ? "success" : "failed",
+      engine: result.engine,
+      mode: result.mode,
+      logs: capCompilerLogs(result.logs?.length ? result.logs : state.compile.logs),
+      previewHtml: result.previewHtml || "",
+      pdfPath: result.pdfPath || null,
+      synctexPath: result.synctexPath || null,
+      sourceMapAvailable: Boolean(result.synctexPath && fs.existsSync(result.synctexPath)),
+      version: nextVersion,
+      jobId: job.id,
+      queuedJobs: compileCoordinator.queuedJobs,
+      isStale,
+      lastSuccessfulAt: hasSuccessfulPdf ? completedAt : previousCompile.lastSuccessfulAt,
+      lastSuccessfulVersion: hasSuccessfulPdf ? nextVersion : previousCompile.lastSuccessfulVersion,
+      artifactId: result.pdfPath ? (hasSuccessfulPdf ? job.id : previousCompile.artifactId) : null,
+      artifactRoot: result.pdfPath
+        ? result.artifactRoot || previousCompile.artifactRoot || null
+        : null,
+      sourceSnapshotRoot: result.pdfPath
+        ? result.sourceSnapshotRoot || previousCompile.sourceSnapshotRoot || null
+        : null
+    };
+    const responseState = publicCompileState(state.compile);
+    compileCoordinator.activeJobId = null;
+    broadcastProject(state, "compile", responseState);
+    broadcastState(state);
+    return responseState;
+  }
+
+  function enqueueCompile() {
+    const job = {
+      id: `compile-${++compileCoordinator.nextJobNumber}`,
+      projectId: state.project.id,
+      projectRoot: state.project.root,
+      mainFile: state.project.mainFile
+    };
+    compileCoordinator.queuedJobs += 1;
+    state.compile.queuedJobs = compileCoordinator.queuedJobs - (compileCoordinator.activeJobId ? 0 : 1);
+    if (compileCoordinator.activeJobId) {
+      broadcastProject(state, "compile", publicCompileState(state.compile));
+    }
+    const pending = compileCoordinator.tail.then(() => runCompileJob(job));
+    compileCoordinator.tail = pending.catch(() => undefined);
+    return pending;
+  }
 
   async function handleApi(request, response, url) {
+    if (request.method === "GET" && url.pathname === "/api/tunnel-check") {
+      const challenge = String(url.searchParams.get("challenge") || "");
+      const runner = [...tunnelRunners(state).values()].find((candidate) => (
+        candidate.challenge === challenge && raceStillActive(state, candidate)
+      ));
+      if (!runner) {
+        jsonResponse(response, 404, { error: "Tunnel verification challenge not found." });
+        return;
+      }
+      jsonResponse(response, 200, { challenge });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/state") {
       const isHost = isHostRequest(state, request, url);
       const user = getTokenUser(state, request, url);
@@ -3382,11 +5721,14 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Editor approval is required before creating LocalLeaf AI sessions.");
         return;
       }
+      const sessionStore = aiSessionStoreForIdentity(state, identity);
+      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
       const body = await readBody(request);
       try {
-        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).createSession(state.project, body));
+        validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
+        jsonResponse(response, 200, sessionStore.createSession(state.project, body));
       } catch (error) {
-        jsonResponse(response, 400, { error: error.message });
+        apiErrorResponse(response, error);
       }
       return;
     }
@@ -3397,11 +5739,14 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Editor approval is required before activating LocalLeaf AI sessions.");
         return;
       }
+      const sessionStore = aiSessionStoreForIdentity(state, identity);
+      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
       const body = await readBody(request);
       try {
-        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).activateSession(state.project, String(body.sessionId || body.id || "")));
+        validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
+        jsonResponse(response, 200, sessionStore.activateSession(state.project, String(body.sessionId || body.id || "")));
       } catch (error) {
-        jsonResponse(response, 404, { error: error.message });
+        apiErrorResponse(response, error, 404);
       }
       return;
     }
@@ -3412,17 +5757,36 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Editor approval is required before updating LocalLeaf AI sessions.");
         return;
       }
+      const sessionStore = aiSessionStoreForIdentity(state, identity);
+      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
       const body = await readBody(request);
       try {
-        const sessionStore = aiSessionStoreForIdentity(state, identity);
-        const currentProjectKey = sessionStore.projectKeyForRoot(state.project.root);
-        if (body.projectKey && body.projectKey !== currentProjectKey) {
-          jsonResponse(response, 409, { error: "AI session belongs to a different project." });
-          return;
-        }
+        validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
         jsonResponse(response, 200, sessionStore.updateSession(state.project, String(body.sessionId || body.id || ""), body));
       } catch (error) {
-        jsonResponse(response, 404, { error: error.message });
+        apiErrorResponse(response, error, 404);
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/ai/sessions/rename") {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.isHost && !identity.canEdit) {
+        deny(response, "Editor approval is required before renaming LocalLeaf AI sessions.");
+        return;
+      }
+      const sessionStore = aiSessionStoreForIdentity(state, identity);
+      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
+      const body = await readBody(request);
+      try {
+        validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
+        jsonResponse(response, 200, sessionStore.renameSession(
+          state.project,
+          String(body.sessionId || body.id || ""),
+          { title: body.title, expectedRevision: body.expectedRevision }
+        ));
+      } catch (error) {
+        apiErrorResponse(response, error);
       }
       return;
     }
@@ -3433,11 +5797,18 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Editor approval is required before deleting LocalLeaf AI sessions.");
         return;
       }
+      const sessionStore = aiSessionStoreForIdentity(state, identity);
+      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
       const body = await readBody(request);
       try {
-        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).deleteSession(state.project, String(body.sessionId || body.id || "")));
+        validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
+        jsonResponse(response, 200, sessionStore.deleteSession(
+          state.project,
+          String(body.sessionId || body.id || ""),
+          { expectedRevision: body.expectedRevision }
+        ));
       } catch (error) {
-        jsonResponse(response, 400, { error: error.message });
+        apiErrorResponse(response, error);
       }
       return;
     }
@@ -3448,11 +5819,18 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Editor approval is required before forking LocalLeaf AI sessions.");
         return;
       }
+      const sessionStore = aiSessionStoreForIdentity(state, identity);
+      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
       const body = await readBody(request);
       try {
-        jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).forkSession(state.project, String(body.sessionId || body.id || "")));
+        validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
+        jsonResponse(response, 200, sessionStore.forkSession(
+          state.project,
+          String(body.sessionId || body.id || ""),
+          { expectedRevision: body.expectedRevision }
+        ));
       } catch (error) {
-        jsonResponse(response, 404, { error: error.message });
+        apiErrorResponse(response, error, 404);
       }
       return;
     }
@@ -3462,11 +5840,14 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Only the host app can import LocalLeaf AI sessions.");
         return;
       }
+      const sessionStore = state.ai.sessions;
+      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
       const body = await readBody(request);
       try {
-        jsonResponse(response, 200, state.ai.sessions.importLegacySessions(state.project, body.sessions || [], body.currentSessionId || ""));
+        validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
+        jsonResponse(response, 200, sessionStore.importLegacySessions(state.project, body.sessions || [], body.currentSessionId || ""));
       } catch (error) {
-        jsonResponse(response, 400, { error: error.message });
+        apiErrorResponse(response, error);
       }
       return;
     }
@@ -3712,7 +6093,12 @@ function createLocalLeafServer(options = {}) {
         });
         fs.writeFileSync(smokePath, "\\documentclass{article}\n\\begin{document}\nWe utilize this draft.\n\\end{document}\n", "utf8");
         refreshProject(state);
-        proposal = createDeterministicAgentProposal(state, { path: smokeFile, message: "rewrite this section", skipChangeLog: true });
+        proposal = createDeterministicAgentProposal(state, {
+          path: smokeFile,
+          message: "rewrite this section",
+          selectedText: "We utilize this draft.",
+          skipChangeLog: true
+        });
         const applied = applyAiProposalToFile(state, proposal);
         const editOk = /We use this draft/.test(fs.readFileSync(smokePath, "utf8"));
         jsonResponse(response, editOk && provider.ok ? 200 : 400, {
@@ -3743,11 +6129,12 @@ function createLocalLeafServer(options = {}) {
       }
       const body = await readBody(request);
       try {
-        const result = await createAgentMessageResponse(state, { ...body, requester: requesterFromIdentity(identity) });
+        const result = await runAgentForSession(state, identity, body);
         broadcastState(state);
         jsonResponse(response, 200, result);
       } catch (error) {
-        jsonResponse(response, 400, { error: error.message });
+        broadcastState(state);
+        apiErrorResponse(response, error);
       }
       return;
     }
@@ -3760,16 +6147,54 @@ function createLocalLeafServer(options = {}) {
       }
       const body = await readBody(request);
       try {
-        const result = await createAgentMessageResponse(state, { ...body, steer: true, requester: requesterFromIdentity(identity) });
+        const result = await runAgentForSession(state, identity, {
+          ...body,
+          runId: `steer-${randomId(8)}`,
+          steer: true
+        });
         broadcastState(state);
         jsonResponse(response, 200, {
           ...result,
           steered: true,
-          runId: body.runId || null,
           queuedPromptId: body.queuedPromptId || null
         });
       } catch (error) {
-        jsonResponse(response, 400, { error: error.message });
+        broadcastState(state);
+        apiErrorResponse(response, error);
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/agent/run/cancel") {
+      const identity = requestIdentity(state, request, url);
+      if (!canUseAi(state, request, url)) {
+        deny(response, "Editor approval is required before cancelling LocalLeaf AI runs.");
+        return;
+      }
+      const body = await readBody(request);
+      const runId = String(body.runId || "").trim().slice(0, 80);
+      const sessionStore = aiSessionStoreForIdentity(state, identity);
+      const control = state.ai.runControllers.get(aiRunControllerKey(identity, runId));
+      const runProject = control?.project || state.project;
+      const currentSnapshot = sessionStore?.publicState(runProject);
+      const sessionId = String(body.sessionId || currentSnapshot?.currentSessionId || "").trim();
+      try {
+        if (!runId) throw aiRunError("AI_RUN_INVALID", "AI run ID is required.", 400);
+        if (!sessionStore?.getSession(runProject, sessionId)) {
+          throw aiRunError("AI_SESSION_NOT_FOUND", "AI session was not found.", 404);
+        }
+        if (control && control.sessionId !== sessionId) {
+          throw aiRunError("AI_SESSION_NOT_FOUND", "AI session was not found.", 404);
+        }
+        if (control) {
+          control.cancelled = true;
+          control.controller.abort();
+        }
+        const sessionState = sessionStore.cancelRun(runProject, sessionId, { runId });
+        broadcastState(state);
+        jsonResponse(response, 200, sessionState);
+      } catch (error) {
+        apiErrorResponse(response, error);
       }
       return;
     }
@@ -3782,47 +6207,93 @@ function createLocalLeafServer(options = {}) {
       }
       const body = await readBody(request);
       beginNdjsonResponse(response);
+      let streamRunId = String(body.runId || randomId(8));
+      let streamSessionId = String(body.sessionId || "");
       try {
-        const runId = body.runId || randomId(8);
         const files = agentListProjectFiles(state);
         const currentFile = agentReadProjectFile(state, body.path);
         const logs = agentCompileLogs(state);
-        sendNdjson(response, { type: "run_started", runId });
-        sendNdjson(response, {
-          type: "tool_call",
-          runId,
-          tool: "list_project_files",
-          status: "completed",
-          result: { count: files.length, files: files.slice(0, 40) }
+        const result = await runAgentForSession(state, identity, { ...body, runId: streamRunId }, {
+          onRunStarted: ({ runId, sessionId, replayed = false }) => {
+            streamRunId = runId;
+            streamSessionId = sessionId;
+            sendNdjson(response, { type: "run_started", runId, sessionId });
+            if (replayed) return;
+            sendNdjson(response, {
+              type: "tool_call",
+              runId,
+              sessionId,
+              tool: "list_project_files",
+              status: "completed",
+              result: { count: files.length, files: files.slice(0, 40) }
+            });
+            sendNdjson(response, {
+              type: "tool_call",
+              runId,
+              sessionId,
+              tool: "read_file",
+              status: "completed",
+              result: { path: currentFile.path, hash: currentFile.hash, bytes: currentFile.content.length }
+            });
+            if (logs.length) {
+              sendNdjson(response, {
+                type: "tool_call",
+                runId,
+                sessionId,
+                tool: "get_compile_logs",
+                status: "completed",
+                result: { lines: logs.length }
+              });
+            }
+          },
+          onContextPrepared: (contextUsage) => {
+            sendNdjson(response, {
+              type: "context_snapshot",
+              runId: streamRunId,
+              sessionId: streamSessionId,
+              contextUsage
+            });
+          }
         });
         sendNdjson(response, {
-          type: "tool_call",
-          runId,
-          tool: "read_file",
-          status: "completed",
-          result: { path: currentFile.path, hash: currentFile.hash, bytes: currentFile.content.length }
+          type: "assistant_delta",
+          runId: streamRunId,
+          sessionId: streamSessionId,
+          delta: result.reply || ""
         });
-        if (logs.length) {
-          sendNdjson(response, {
-            type: "tool_call",
-            runId,
-            tool: "get_compile_logs",
-            status: "completed",
-            result: { lines: logs.length }
-          });
-        }
-        const result = await createAgentMessageResponse(state, { ...body, runId, requester: requesterFromIdentity(identity) });
-        sendNdjson(response, { type: "assistant_delta", runId, delta: result.reply || "" });
         for (const proposal of result.proposals || []) {
-          sendNdjson(response, { type: "proposal_created", runId, proposal });
+          sendNdjson(response, {
+            type: "proposal_created",
+            runId: streamRunId,
+            sessionId: streamSessionId,
+            proposal
+          });
           if (proposal.approvalRequired !== false && proposal.status === "proposed") {
-            sendNdjson(response, { type: "approval_required", runId, proposal });
+            sendNdjson(response, {
+              type: "approval_required",
+              runId: streamRunId,
+              sessionId: streamSessionId,
+              proposal
+            });
           }
         }
         broadcastState(state);
-        sendNdjson(response, { type: "run_done", runId, result });
+        sendNdjson(response, {
+          type: "run_done",
+          runId: streamRunId,
+          sessionId: streamSessionId,
+          contextUsage: result.contextUsage,
+          result
+        });
       } catch (error) {
-        sendNdjson(response, { type: "run_error", error: error.message });
+        broadcastState(state);
+        sendNdjson(response, {
+          type: "run_error",
+          runId: streamRunId,
+          sessionId: error.sessionId || streamSessionId,
+          error: error.message,
+          code: error.code || "AI_RUN_FAILED"
+        });
       } finally {
         response.end();
       }
@@ -3830,7 +6301,8 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && (url.pathname === "/api/agent/proposal/apply" || url.pathname === "/api/agent/approval/approve")) {
-      if (!canEditProject(state, request, url)) {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.canEdit) {
         deny(response, "Editor approval is required before applying LocalLeaf AI proposals.");
         return;
       }
@@ -3840,9 +6312,46 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 404, { error: "AI proposal was not found." });
         return;
       }
+      if (proposal.operation === "create" && !identity.isHost) {
+        deny(response, "Only the host can approve creation of a new project file.");
+        return;
+      }
+      if (!canManageAiProposal(identity, proposal)) {
+        deny(response, "You can only manage AI proposals created by your session.");
+        return;
+      }
       if (proposal.status !== "proposed") {
         jsonResponse(response, 409, { error: `AI proposal is already ${proposal.status}.` });
         return;
+      }
+      if (proposal.operation !== "create") {
+        const createDependencies = Array.from(state.ai.proposals.values()).filter((candidate) => (
+          candidate.operation === "create"
+          && aiProposalsShareRun(candidate, proposal)
+        ));
+        const unresolvedCreate = createDependencies.find((candidate) => candidate.status !== "applied");
+        if (unresolvedCreate) {
+          jsonResponse(response, 409, {
+            error: `Create ${unresolvedCreate.path} before applying the related edit.`,
+            code: "AI_CREATE_DEPENDENCY_PENDING",
+            proposal: publicProposal(proposal)
+          });
+          return;
+        }
+        for (const dependency of createDependencies) {
+          try {
+            validateProposalRevertTarget(state, dependency);
+          } catch {
+            dependency.status = "stale";
+            recordAiProposalChange(state, dependency);
+            jsonResponse(response, 409, {
+              error: `The required new file ${dependency.path} is missing or changed. Prepare a fresh AI run before applying the related edit.`,
+              code: "AI_CREATE_DEPENDENCY_STALE",
+              proposal: publicProposal(proposal)
+            });
+            return;
+          }
+        }
       }
 
       try {
@@ -3851,6 +6360,7 @@ function createLocalLeafServer(options = {}) {
       } catch (error) {
         jsonResponse(response, error.statusCode || 400, {
           error: error.message,
+          ...(error.code ? { code: error.code } : {}),
           ...(error.proposal ? { proposal: error.proposal } : {})
         });
       }
@@ -3858,7 +6368,8 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/proposal/revert") {
-      if (!canEditProject(state, request, url)) {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.canEdit) {
         deny(response, "Editor approval is required before reverting LocalLeaf AI proposals.");
         return;
       }
@@ -3868,9 +6379,28 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 404, { error: "AI proposal was not found." });
         return;
       }
+      if (!canManageAiProposal(identity, proposal)) {
+        deny(response, "You can only manage AI proposals created by your session.");
+        return;
+      }
       if (proposal.status !== "applied") {
         jsonResponse(response, 409, { error: `AI proposal is ${proposal.status || "not applied"} and cannot be reverted.` });
         return;
+      }
+      if (proposal.operation === "create") {
+        const appliedDependents = Array.from(state.ai.proposals.values()).filter((candidate) => (
+          candidate.operation !== "create"
+          && candidate.status === "applied"
+          && aiProposalsShareRun(candidate, proposal)
+        ));
+        if (appliedDependents.length) {
+          jsonResponse(response, 409, {
+            error: "Undo the whole AI run, or revert its related edits, before removing this new file.",
+            code: "AI_CREATE_DEPENDENTS_APPLIED",
+            proposal: publicProposal(proposal)
+          });
+          return;
+        }
       }
       try {
         const reverted = revertAgentProposalAndBroadcast(state, proposal);
@@ -3878,6 +6408,7 @@ function createLocalLeafServer(options = {}) {
       } catch (error) {
         jsonResponse(response, error.statusCode || 400, {
           error: error.message,
+          ...(error.code ? { code: error.code } : {}),
           ...(error.proposal ? { proposal: error.proposal } : {})
         });
       }
@@ -3885,24 +6416,63 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/run/revert") {
-      if (!canEditProject(state, request, url)) {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.canEdit) {
         deny(response, "Editor approval is required before undoing LocalLeaf AI runs.");
         return;
       }
       const body = await readBody(request);
       const runId = String(body.runId || "").trim();
-      const proposals = Array.from(state.ai.proposals.values()).filter((proposal) => proposal.runId === runId && proposal.status === "applied");
-      if (!runId || !proposals.length) {
+      const anchorId = String(body.proposalId || body.anchorProposalId || "").trim();
+      const allRunProposals = Array.from(state.ai.proposals.values()).filter((proposal) => proposal.runId === runId);
+      if (!runId || !allRunProposals.length) {
         jsonResponse(response, 404, { error: "No applied AI proposals were found for that run." });
         return;
       }
+      let anchor = anchorId ? state.ai.proposals.get(anchorId) : null;
+      if (anchor && (anchor.runId !== runId || !allRunProposals.includes(anchor))) anchor = null;
+      if (!anchor) {
+        const identities = new Map();
+        for (const proposal of allRunProposals) {
+          const key = aiProposalRunIdentity(proposal);
+          if (!identities.has(key)) identities.set(key, proposal);
+        }
+        if (identities.size !== 1) {
+          jsonResponse(response, 409, {
+            error: "Choose the specific change group to undo.",
+            code: "AI_RUN_AMBIGUOUS"
+          });
+          return;
+        }
+        anchor = identities.values().next().value;
+      }
+      if (!canManageAiProposal(identity, anchor)) {
+        deny(response, "You can only manage AI runs created by your session.");
+        return;
+      }
+      const runProposals = allRunProposals.filter((proposal) => aiProposalsShareRun(proposal, anchor));
+      const proposals = runProposals.filter((proposal) => proposal.status === "applied" && aiProposalMatchesCurrentProject(state, proposal));
+      if (!proposals.length) {
+        try {
+          assertAiProposalProject(state, runProposals[0]);
+        } catch (error) {
+          jsonResponse(response, error.statusCode || 409, { error: error.message, code: error.code });
+          return;
+        }
+        jsonResponse(response, 404, { error: "No applied AI proposals were found for that change group." });
+        return;
+      }
+      if (!proposals.every((proposal) => canManageAiProposal(identity, proposal))) {
+        deny(response, "You can only manage AI runs created by your session.");
+        return;
+      }
       try {
-        for (const proposal of proposals) validateProposalRevertTarget(state, proposal);
-        const reverted = proposals.map((proposal) => revertAgentProposalAndBroadcast(state, proposal).proposal);
+        const reverted = revertAiRunAtomically(state, proposals);
         jsonResponse(response, 200, { ok: true, runId, proposals: reverted });
       } catch (error) {
         jsonResponse(response, error.statusCode || 400, {
           error: error.message,
+          ...(error.code ? { code: error.code } : {}),
           ...(error.proposal ? { proposal: error.proposal } : {})
         });
       }
@@ -3910,7 +6480,8 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/approval/reject") {
-      if (!canEditProject(state, request, url)) {
+      const identity = requestIdentity(state, request, url);
+      if (!identity.canEdit) {
         deny(response, "Editor approval is required before rejecting LocalLeaf AI proposals.");
         return;
       }
@@ -3920,13 +6491,25 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 404, { error: "AI proposal was not found." });
         return;
       }
+      if (!canManageAiProposal(identity, proposal)) {
+        deny(response, "You can only manage AI proposals created by your session.");
+        return;
+      }
       if (proposal.status !== "proposed") {
         jsonResponse(response, 409, { error: `AI proposal is already ${proposal.status}.` });
         return;
       }
-      const rejected = rejectAiProposal(state, proposal);
-      broadcastState(state);
-      jsonResponse(response, 200, { ok: true, proposal: rejected });
+      try {
+        const rejected = rejectAiProposal(state, proposal);
+        broadcastState(state);
+        jsonResponse(response, 200, { ok: true, proposal: rejected });
+      } catch (error) {
+        jsonResponse(response, error.statusCode || 400, {
+          error: error.message,
+          ...(error.code ? { code: error.code } : {}),
+          ...(error.proposal ? { proposal: error.proposal } : {})
+        });
+      }
       return;
     }
 
@@ -4037,6 +6620,7 @@ function createLocalLeafServer(options = {}) {
         deny(response);
         return;
       }
+      if (blockProjectSwitchWhileSharing(state, response)) return;
       const body = await readBody(request);
       const nextRoot = path.resolve(body.path || SAMPLE_PROJECT);
       if (!fs.existsSync(nextRoot) || !fs.statSync(nextRoot).isDirectory()) {
@@ -4054,9 +6638,70 @@ function createLocalLeafServer(options = {}) {
         deny(response);
         return;
       }
-      const projectRoot = createNewTemplateProject();
-      setProjectRoot(state, projectRoot);
-      state.compile.logs = [`[LocalLeaf] New project created from the starter template: ${state.project.name}`];
+      const body = await readBody(request);
+      const requestId = String(body.requestId || "").trim();
+      if (requestId && !/^[A-Za-z0-9_-]{8,100}$/u.test(requestId)) {
+        jsonResponse(response, 400, { error: "Project creation request ID is invalid." });
+        return;
+      }
+      const requestSignature = JSON.stringify({
+        projectName: body.projectName === undefined ? null : body.projectName,
+        destinationDirectory: body.destinationDirectory === undefined ? null : body.destinationDirectory
+      });
+      const previousCreation = requestId ? state.projectCreations.get(requestId) : null;
+      if (previousCreation) {
+        if (previousCreation.signature !== requestSignature) {
+          jsonResponse(response, 409, {
+            error: "This project creation request ID was already used with different details.",
+            code: "PROJECT_CREATE_IDEMPOTENCY_CONFLICT"
+          });
+          return;
+        }
+        let cachedProjectAvailable = false;
+        try {
+          cachedProjectAvailable = fs.statSync(previousCreation.projectRoot).isDirectory();
+        } catch {
+          cachedProjectAvailable = false;
+        }
+        if (cachedProjectAvailable) {
+          if (path.resolve(state.project.root) !== path.resolve(previousCreation.projectRoot)) {
+            if (blockProjectSwitchWhileSharing(state, response)) return;
+            setProjectRoot(state, previousCreation.projectRoot);
+            broadcastState(state);
+          }
+          jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
+          return;
+        }
+        state.projectCreations.delete(requestId);
+      }
+      if (blockProjectSwitchWhileSharing(state, response)) return;
+      let projectRoot;
+      let committed = false;
+      try {
+        projectRoot = createNewTemplateProject({
+          projectName: body.projectName,
+          destinationDirectory: body.destinationDirectory
+        });
+        setProjectRoot(state, projectRoot);
+        committed = true;
+        state.compile.logs = [`[LocalLeaf] New project created from the starter template: ${state.project.name}`];
+        if (requestId) {
+          state.projectCreations.set(requestId, { signature: requestSignature, projectRoot });
+          while (state.projectCreations.size > 50) {
+            state.projectCreations.delete(state.projectCreations.keys().next().value);
+          }
+        }
+      } catch (error) {
+        if (projectRoot && !committed) fs.rmSync(projectRoot, { recursive: true, force: true });
+        const message = error.message || "Could not create the project.";
+        const field = /destination|folder path|network path|starter template/iu.test(message)
+          ? "destinationDirectory"
+          : /project name|name is|required name|reserved/iu.test(message)
+            ? "projectName"
+            : "";
+        jsonResponse(response, 400, { error: message, ...(field ? { field } : {}) });
+        return;
+      }
       broadcastState(state);
       jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
       return;
@@ -4067,6 +6712,7 @@ function createLocalLeafServer(options = {}) {
         deny(response);
         return;
       }
+      if (blockProjectSwitchWhileSharing(state, response)) return;
 
       const filename = request.headers["x-file-name"] || "Imported Project.zip";
       const zipBuffer = await readRawBody(request);
@@ -4094,6 +6740,7 @@ function createLocalLeafServer(options = {}) {
         deny(response);
         return;
       }
+      if (blockProjectSwitchWhileSharing(state, response)) return;
 
       const payloadBuffer = await readRawBody(request, Math.ceil(MAX_IMPORT_UNCOMPRESSED_BYTES * 1.5));
       if (payloadBuffer.length === 0) {
@@ -4380,9 +7027,24 @@ function createLocalLeafServer(options = {}) {
         deny(response);
         return;
       }
+      if (state.session.status === "live") {
+        jsonResponse(response, 409, { error: "A sharing session is already live. Stop it before starting another." });
+        return;
+      }
+      const body = await readBody(request);
+      let providerPreference;
+      try {
+        providerPreference = resolveTunnelProviderPreference(state, body);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+        return;
+      }
+      if (providerPreference.provided) {
+        state.session.tunnel.preferredProviderId = providerPreference.providerId;
+      }
       const code = randomCode();
       const lan = getLanAddress();
-      const baseUrl = `http://localhost:${state.port}`;
+      const baseUrl = `http://127.0.0.1:${state.port}`;
       const shouldStartPublicTunnel = state.session.tunnel.available && state.session.tunnel.autoStart;
       stopPublicTunnel(state);
       state.session = {
@@ -4411,6 +7073,8 @@ function createLocalLeafServer(options = {}) {
           controller: null,
           providerId: null,
           providerName: null,
+          selectionMode: state.session.tunnel.preferredProviderId ? "preferred" : "automatic",
+          previousLinkInvalidated: false,
           attempts: [],
           status: shouldStartPublicTunnel
             ? "Starting"
@@ -4432,6 +7096,7 @@ function createLocalLeafServer(options = {}) {
         }
       };
       state.chat = [];
+      cancelGuestAiRuns(state);
       state.ai.guestSessions.clear();
 
       if (shouldStartPublicTunnel) {
@@ -4439,6 +7104,39 @@ function createLocalLeafServer(options = {}) {
       }
 
       broadcastState(state);
+      jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/session/tunnel/restart") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response);
+        return;
+      }
+      if (state.session.status !== "live") {
+        jsonResponse(response, 409, { error: "Start a live session before restarting its invite link." });
+        return;
+      }
+      if (!state.session.tunnel.available || activeTunnelProviders(state).length === 0) {
+        jsonResponse(response, 409, { error: "No tunnel providers are available on this computer." });
+        return;
+      }
+      const body = await readBody(request);
+      let providerPreference;
+      try {
+        providerPreference = resolveTunnelProviderPreference(state, body);
+      } catch (error) {
+        jsonResponse(response, 400, { error: error.message });
+        return;
+      }
+      if (providerPreference.provided) {
+        state.session.tunnel.preferredProviderId = providerPreference.providerId;
+      }
+      const previousLinkInvalidated = Boolean(state.session.inviteUrl);
+      if (previousLinkInvalidated) {
+        state.session.code = randomCode();
+      }
+      startPublicTunnel(state, `http://127.0.0.1:${state.port}`, 0, { previousLinkInvalidated });
       jsonResponse(response, 200, publicState(state, { isHost: true, canRead: true }));
       return;
     }
@@ -4475,6 +7173,10 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 429, { error: "This session is full." });
         return;
       }
+      if (state.session.joinRequests.filter((item) => item.status === "pending").length >= MAX_PENDING_JOIN_REQUESTS) {
+        jsonResponse(response, 429, { error: "Too many join requests are waiting for host approval." });
+        return;
+      }
 
       const requestRecord = {
         id: randomId(5),
@@ -4483,6 +7185,13 @@ function createLocalLeafServer(options = {}) {
         status: "pending",
         createdAt: Date.now()
       };
+      if (state.session.joinRequests.length >= MAX_RETAINED_JOIN_REQUESTS) {
+        const retainedPending = state.session.joinRequests.filter((item) => item.status === "pending");
+        const retainedHandled = state.session.joinRequests
+          .filter((item) => item.status !== "pending")
+          .slice(-(MAX_RETAINED_JOIN_REQUESTS - retainedPending.length - 1));
+        state.session.joinRequests = [...retainedHandled, ...retainedPending];
+      }
       state.session.joinRequests.push(requestRecord);
       broadcastHosts(state, "join-request", requestRecord);
       broadcastState(state);
@@ -4512,6 +7221,14 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 404, { error: "Join request not found." });
         return;
       }
+      if (requestRecord.status !== "pending") {
+        jsonResponse(response, 409, { error: "This join request was already handled." });
+        return;
+      }
+      if (state.session.users.length >= state.session.maxUsers) {
+        jsonResponse(response, 429, { error: "This session is full." });
+        return;
+      }
 
       const token = randomId(16);
       const user = {
@@ -4519,7 +7236,7 @@ function createLocalLeafServer(options = {}) {
         name: requestRecord.name,
         role: body.role === "viewer" ? "viewer" : "editor",
         color: "#d9976f",
-        online: true,
+        online: false,
         token
       };
       requestRecord.status = "approved";
@@ -4552,6 +7269,10 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 404, { error: "Join request not found." });
         return;
       }
+      if (requestRecord.status !== "pending") {
+        jsonResponse(response, 409, { error: "This join request was already handled." });
+        return;
+      }
       requestRecord.status = "denied";
       broadcastState(state);
       jsonResponse(response, 200, { ok: true });
@@ -4559,39 +7280,11 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/compile") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before compiling.");
+      if (!isHostRequest(state, request, url)) {
+        deny(response, "Compilation is only available to the local host app.");
         return;
       }
-      state.compile = {
-        ...state.compile,
-        status: "running",
-        logs: ["[LocalLeaf] Compile started..."],
-        version: state.compile.version + 1
-      };
-      broadcastProject(state, "compile", publicCompileState(state.compile));
-
-      const previousPdfPath = state.compile.pdfPath;
-      const previousSynctexPath = state.compile.synctexPath;
-      const result = await compileProject(state.project.root, state.project.mainFile, (chunk) => {
-        state.compile.logs = [...state.compile.logs, ...chunk.split(/\r?\n/).filter(Boolean)].slice(-300);
-        broadcastProject(state, "compile", publicCompileState(state.compile));
-      }, { previousPdfPath, previousSynctexPath });
-
-      state.compile = {
-        status: result.ok ? "success" : "failed",
-        engine: result.engine,
-        mode: result.mode,
-        logs: result.logs.length ? result.logs : state.compile.logs,
-        previewHtml: result.previewHtml,
-        pdfPath: result.pdfPath,
-        synctexPath: result.synctexPath || null,
-        sourceMapAvailable: Boolean(result.synctexPath && fs.existsSync(result.synctexPath)),
-        version: state.compile.version + 1
-      };
-      broadcastProject(state, "compile", publicCompileState(state.compile));
-      broadcastState(state);
-      jsonResponse(response, 200, publicCompileState(state.compile));
+      jsonResponse(response, 200, await enqueueCompile());
       return;
     }
 
@@ -4601,7 +7294,17 @@ function createLocalLeafServer(options = {}) {
         return;
       }
       const body = await readBody(request);
-      jsonResponse(response, 200, resolvePdfSourcePosition(state, body));
+      jsonResponse(response, 200, await resolvePdfSourcePosition(state, body));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/pdf/output-position") {
+      if (!canReadProject(state, request, url)) {
+        deny(response, "Join approval is required before mapping source positions to the PDF.");
+        return;
+      }
+      const body = await readBody(request);
+      jsonResponse(response, 200, await resolvePdfOutputPosition(state, body));
       return;
     }
 
@@ -4610,10 +7313,13 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Join approval is required before reading the PDF.");
         return;
       }
-      if (state.compile.pdfPath && fs.existsSync(state.compile.pdfPath)) {
+      if (isValidPdfArtifact(state.compile.pdfPath)) {
+        const releaseArtifact = retainCompileArtifact(state, state.compile.pdfPath);
         streamFileResponse(request, response, state.compile.pdfPath, "application/pdf", {
           "content-disposition": contentDisposition("inline", safeDownloadName(state.project.name, ".pdf")),
           "x-content-type-options": "nosniff"
+        }, {
+          onComplete: releaseArtifact
         });
         return;
       }
@@ -4626,13 +7332,15 @@ function createLocalLeafServer(options = {}) {
         deny(response, "Join approval is required before exporting the PDF.");
         return;
       }
-      if (state.compile.pdfPath && fs.existsSync(state.compile.pdfPath)) {
+      if (isValidPdfArtifact(state.compile.pdfPath)) {
+        const releaseArtifact = retainCompileArtifact(state, state.compile.pdfPath);
         streamFileResponse(
           request,
           response,
           state.compile.pdfPath,
           "application/pdf",
-          attachmentHeaders(safeDownloadName(state.project.name, ".pdf"), "application/pdf")
+          attachmentHeaders(safeDownloadName(state.project.name, ".pdf"), "application/pdf"),
+          { onComplete: releaseArtifact }
         );
         return;
       }
@@ -4711,19 +7419,20 @@ function createLocalLeafServer(options = {}) {
         response.write(": connected\n\n");
         const token = String(getAuthToken(request, url));
         const isHost = isHostRequest(state, request, url);
-        const heartbeat = setInterval(() => {
-          try {
-            response.write(": keepalive\n\n");
-          } catch {
-            deleteSseClient(state, clientId);
-          }
-        }, 5000);
-        state.clients.set(clientId, {
+        const client = {
           response,
           isHost,
           token,
-          heartbeat
-        });
+          heartbeat: null
+        };
+        client.heartbeat = setInterval(() => {
+          try {
+            response.write(": keepalive\n\n");
+          } catch {
+            deleteSseClient(state, clientId, client);
+          }
+        }, 5000);
+        state.clients.set(clientId, client);
         const user = tokenUserByToken(state, token);
         sendSse(
           response,
@@ -4736,7 +7445,7 @@ function createLocalLeafServer(options = {}) {
           })
         );
         request.on("close", () => {
-          deleteSseClient(state, clientId);
+          deleteSseClient(state, clientId, client);
         });
         return;
       }
@@ -4774,8 +7483,20 @@ function createLocalLeafServer(options = {}) {
 
   function start(port = state.port) {
     state.port = port;
-    return new Promise((resolve) => {
-      server.listen(port, () => resolve(server));
+    return new Promise((resolve, reject) => {
+      const handleError = (error) => {
+        server.off("listening", handleListening);
+        reject(error);
+      };
+      const handleListening = () => {
+        server.off("error", handleError);
+        const address = server.address();
+        if (address && typeof address === "object") state.port = address.port;
+        resolve(server);
+      };
+      server.once("error", handleError);
+      server.once("listening", handleListening);
+      server.listen(port, "127.0.0.1");
     });
   }
 
@@ -4793,7 +7514,12 @@ function createLocalLeafServer(options = {}) {
     stopPublicTunnel(state);
     closeCollabClients(state, "Host stopped the session.");
     wss.close();
-    return new Promise((resolve) => server.close(resolve));
+    if (state.ownsSynctexWorkerClient) await state.synctexWorkerClient.close();
+    const closePromise = new Promise((resolve) => server.close(resolve));
+    server.closeIdleConnections?.();
+    await closePromise;
+    cleanupAllCompileArtifacts(state);
+    return server;
   }
 
   return {
@@ -4818,5 +7544,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  createLocalLeafServer
+  createLocalLeafServer,
+  runBoundedChildProcess
 };

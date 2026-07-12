@@ -1,7 +1,54 @@
+const persistedDesktopPreferences = window.localleafDesktop?.preferences;
+if (persistedDesktopPreferences && typeof persistedDesktopPreferences === "object" && !Array.isArray(persistedDesktopPreferences)) {
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith("localleaf.")) localStorage.removeItem(key);
+  }
+  Object.entries(persistedDesktopPreferences).forEach(([key, value]) => {
+    if (key.startsWith("localleaf.") && typeof value === "string") localStorage.setItem(key, value);
+  });
+}
+
+function desktopPreferenceSnapshot() {
+  const values = {};
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith("localleaf.")) values[key] = localStorage.getItem(key) || "";
+  }
+  return values;
+}
+
+let lastDesktopPreferenceSnapshot = JSON.stringify(desktopPreferenceSnapshot());
+let hasSavedDesktopPreferences = persistedDesktopPreferences !== null;
+function persistDesktopPreferences() {
+  if (typeof window.localleafDesktop?.savePreferences !== "function") return;
+  const values = desktopPreferenceSnapshot();
+  const serialized = JSON.stringify(values);
+  if (serialized === lastDesktopPreferenceSnapshot && hasSavedDesktopPreferences) return;
+  lastDesktopPreferenceSnapshot = serialized;
+  hasSavedDesktopPreferences = true;
+  window.localleafDesktop.savePreferences(values);
+}
+
+if (typeof window.localleafDesktop?.savePreferences === "function") {
+  window.setInterval(persistDesktopPreferences, 750);
+  window.addEventListener("pagehide", persistDesktopPreferences);
+}
+
 const clientId = crypto.randomUUID();
 const initialParams = new URLSearchParams(location.search);
 const initialHostToken = initialParams.get("host") || initialParams.get("hostToken") || sessionStorage.getItem("localleaf.hostToken") || "";
+const initialGuestToken = initialParams.get("token") || sessionStorage.getItem("localleaf.guestToken") || "";
 if (initialHostToken) sessionStorage.setItem("localleaf.hostToken", initialHostToken);
+if (initialGuestToken) sessionStorage.setItem("localleaf.guestToken", initialGuestToken);
+if (initialParams.has("host") || initialParams.has("hostToken") || initialParams.has("token")) {
+  const visibleParams = new URLSearchParams(initialParams);
+  visibleParams.delete("host");
+  visibleParams.delete("hostToken");
+  visibleParams.delete("token");
+  const visibleQuery = visibleParams.toString();
+  history.replaceState({}, "", `${location.pathname}${visibleQuery ? `?${visibleQuery}` : ""}${location.hash}`);
+}
 const startsNarrow = window.matchMedia("(max-width: 1020px)").matches;
 const startsMobile = window.matchMedia("(max-width: 640px)").matches;
 const platformName = String(navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
@@ -21,6 +68,7 @@ const AI_PROVIDER_ENABLE_STORAGE_KEY = "localleaf.aiProviderEnabled.v1";
 const AI_MODEL_ENABLE_STORAGE_KEY = "localleaf.aiModelEnabled.v1";
 const AI_MODEL_GROUP_STORAGE_KEY = "localleaf.aiModelGroups.v1";
 const EDITOR_MODE_STORAGE_KEY = "localleaf.editorModeByFile.v1";
+const TUNNEL_PROVIDER_STORAGE_KEY = "localleaf.tunnelProvider.v1";
 const LOCALLEAF_SITE_URL = "https://sethwhenton.github.io/localleaf/";
 const AI_WELCOME_MESSAGE = "Ask me about LaTeX errors, rewrites, tables, or project structure. File edits will be tracked in Changes.";
 const SUPPORTED_PROJECT_FILE_EXTENSIONS = new Set([
@@ -169,7 +217,7 @@ const local = {
   joinRequestAudio: null,
   notifiedJoinRequests: new Set(),
   hostToken: initialHostToken,
-  guestToken: initialParams.get("token") || "",
+  guestToken: initialGuestToken,
   userName: initialParams.get("name") || "Host",
   userId: "",
   view: initialParams.get("view") || "",
@@ -181,6 +229,8 @@ const local = {
   collabHeartbeatTimer: null,
   collabLostTimer: null,
   collabPresence: [],
+  pendingCollabSaves: new Map(),
+  collabSaveSequence: 0,
   applyingRemoteEdit: false,
   shownJoinRequests: new Set(),
   saveStatus: "Saved",
@@ -228,6 +278,7 @@ const local = {
   pdfAnnotateMode: false,
   pdfAnnotationPopover: null,
   pdfSourceStatus: "",
+  pdfSourceNavigator: null,
   searchOpen: false,
   searchQuery: "",
   searchReplace: "",
@@ -253,6 +304,9 @@ const local = {
   pinnedCompileWarnings: [],
   compileDiagnostics: [],
   clearedWarningVersion: null,
+  compileBusy: false,
+  compilePhase: "",
+  compileRunId: 0,
   updateInfo: null,
   updateCheckStarted: false,
   updateChecking: false,
@@ -261,6 +315,12 @@ const local = {
   updateDismissedVersion: localStorage.getItem("localleaf.updateDismissedVersion") || "",
   autoUpdateChecks: localStorage.getItem("localleaf.autoUpdateChecks") !== "0",
   joinRequestSoundEnabled: localStorage.getItem("localleaf.joinRequestSoundEnabled") !== "0",
+  preferredTunnelProviderId: localStorage.getItem(TUNNEL_PROVIDER_STORAGE_KEY) || "",
+  tunnelProviderPreferenceLoaded: localStorage.getItem(TUNNEL_PROVIDER_STORAGE_KEY) !== null,
+  sessionTunnelProviderOverrideId: null,
+  tunnelProviderSwitchBusy: false,
+  sessionStartBusy: false,
+  sessionStopBusy: false,
   theme: initialTheme,
   hostRailCollapsed: localStorage.getItem("localleaf.hostRailCollapsed") === "1",
   settingsSection: "general",
@@ -270,6 +330,7 @@ const local = {
   aiActivityMessage: "",
   aiActiveRunCount: 0,
   aiActiveRunId: "",
+  aiActiveRunSessionId: "",
   aiRunControllers: new Set(),
   aiStopRequested: false,
   aiQuickAction: "",
@@ -278,7 +339,24 @@ const local = {
   activeCursorSdkModelId: localStorage.getItem("localleaf.activeCursorSdkModelId") || "",
   aiSessionMenuOpen: false,
   aiSessionMoreMenuOpen: false,
+  aiSessionActionMenuId: "",
   aiSessionSearch: "",
+  aiSessionCreating: false,
+  aiSessionCreateError: "",
+  aiSessionSwitchTargetId: "",
+  aiSessionNewId: "",
+  aiSessionRenamingId: "",
+  aiSessionRenameValue: "",
+  aiSessionRenameError: "",
+  aiSessionDeleteId: "",
+  aiSessionDeletingId: "",
+  aiSessionActivationRequestId: 0,
+  aiSessionProjectRequestGeneration: 0,
+  aiTranscriptSwitching: false,
+  aiAnnouncement: "",
+  aiContextPopoverOpen: false,
+  aiContextUpdating: false,
+  aiSessionState: window.LocalLeafAiSessionState?.createState(initialAiSessionState) || null,
   aiSessionsProjectKey: initialAiSessionState.projectKey || "",
   aiSessionsProjectName: initialAiSessionState.projectName || "",
   aiQueuedPromptMenuOpenId: "",
@@ -291,6 +369,9 @@ const local = {
   aiExpandedRuns: new Set(),
   aiExpandedChanges: new Set(),
   aiExpandedDiffs: new Set(),
+  aiReviewNavigator: null,
+  aiReviewOpenSequence: 0,
+  aiReviewStatus: null,
   aiCompileRepairAttempts: {},
   aiCompileVerifying: false,
   aiSessions: initialAiSessionState.sessions,
@@ -762,23 +843,112 @@ function aiSessionTitleFromPrompt(prompt = "") {
 
 function aiSessionSavePayload(session = currentAiSession()) {
   const active = activeAiProviderModel();
-  const messages = (session.messages || local.aiMessages || []).slice(-120).map((message) => ({ ...message }));
   return {
     projectKey: local.aiSessionsProjectKey || "",
     sessionId: session.id,
-    title: session.title || "New session",
-    messages,
     providerId: active.providerId || "",
     providerName: active.providerName || "",
     modelId: active.modelId || "",
     modelName: active.modelName || "",
     permissionMode: local.aiPermissions.yoloMode ? "yolo" : "default",
-    changeCount: aiHistoryItems().length,
-    lastPreview: sessionPreviewFromMessages(messages)
+    changeCount: aiHistoryItems().filter((proposal) => proposal.sessionId === session.id).length,
+    activate: false
   };
 }
 
-function applyAiSessionState(sessionState = {}) {
+function syncAiSessionLocalsFromReducer() {
+  const stateApi = window.LocalLeafAiSessionState;
+  if (stateApi && local.aiSessionState) {
+    const state = local.aiSessionState;
+    const activeDetail = stateApi.activeSession(state);
+    local.aiSessions = state.sessionOrder.map((id) => {
+      const summary = stateApi.sessionById(state, id) || { id };
+      return normalizeAiSession({
+        ...summary,
+        messages: id === state.currentSessionId && Array.isArray(activeDetail?.messages)
+          ? activeDetail.messages
+          : []
+      });
+    });
+    local.aiCurrentSessionId = state.currentSessionId;
+    local.aiSessionsProjectKey = state.projectKey;
+    local.aiSessionsProjectName = state.projectName || local.appState?.project?.name || "";
+    const messages = Array.isArray(activeDetail?.messages) ? activeDetail.messages : [];
+    local.aiMessages = (messages.length ? messages : [createAiWelcomeMessage()]).map((message) => ({ ...message }));
+    return true;
+  }
+  return false;
+}
+
+function reduceAiSessionState(event) {
+  const stateApi = window.LocalLeafAiSessionState;
+  if (!stateApi || !local.aiSessionState) return;
+  local.aiSessionState = stateApi.reduce(local.aiSessionState, event);
+  syncAiSessionLocalsFromReducer();
+}
+
+function invalidateAiSessionProjectRequests(nextProjectKey) {
+  const projectKey = String(nextProjectKey || "");
+  if (!projectKey || projectKey === local.aiSessionsProjectKey) return false;
+  local.aiSessionProjectRequestGeneration += 1;
+  local.aiSessionActivationRequestId += 1;
+  local.aiSessionCreating = false;
+  local.aiSessionCreateError = "";
+  local.aiSessionSwitchTargetId = "";
+  local.aiSessionNewId = "";
+  local.aiSessionRenamingId = "";
+  local.aiSessionRenameValue = "";
+  local.aiSessionRenameError = "";
+  local.aiSessionDeleteId = "";
+  local.aiSessionDeletingId = "";
+  local.aiTranscriptSwitching = false;
+  local.aiSessionMenuOpen = false;
+  local.aiSessionMoreMenuOpen = false;
+  local.aiSessionActionMenuId = "";
+  local.aiQueuedPrompts = [];
+  local.aiQueuedPromptMenuOpenId = "";
+  local.aiEditingQueuedPromptId = "";
+  return true;
+}
+
+function captureAiSessionProjectRequest() {
+  return {
+    projectKey: String(local.aiSessionsProjectKey || ""),
+    generation: local.aiSessionProjectRequestGeneration
+  };
+}
+
+function aiSessionProjectRequestIsCurrent(origin, sessionState = null) {
+  const projectKey = String(origin?.projectKey || "");
+  const responseProjectKey = sessionState == null ? projectKey : String(sessionState?.projectKey || "");
+  return Boolean(
+    projectKey
+    && origin?.generation === local.aiSessionProjectRequestGeneration
+    && projectKey === local.aiSessionsProjectKey
+    && responseProjectKey === projectKey
+  );
+}
+
+function applyAiSessionState(sessionState = {}, options = {}) {
+  const incomingProjectKey = String(sessionState?.projectKey || "");
+  const currentProjectKey = String(local.aiSessionsProjectKey || "");
+  const allowProjectChange = options.allowProjectChange === true;
+  if (!allowProjectChange && incomingProjectKey !== currentProjectKey) return false;
+  if (allowProjectChange && incomingProjectKey && incomingProjectKey !== currentProjectKey) {
+    invalidateAiSessionProjectRequests(incomingProjectKey);
+  }
+  const stateApi = window.LocalLeafAiSessionState;
+  if (stateApi) {
+    local.aiSessionState = local.aiSessionState
+      ? stateApi.reduce(local.aiSessionState, {
+        type: "SNAPSHOT_APPLIED",
+        snapshot: sessionState,
+        allowProjectChange
+      })
+      : stateApi.createState(sessionState);
+    syncAiSessionLocalsFromReducer();
+    return true;
+  }
   const sessions = Array.isArray(sessionState.sessions) ? sessionState.sessions.map(normalizeAiSession) : [];
   const fallback = fallbackAiSessionState();
   local.aiSessions = sessions.length ? sessions : fallback.sessions;
@@ -788,20 +958,49 @@ function applyAiSessionState(sessionState = {}) {
   local.aiSessionsProjectKey = sessionState.projectKey || "";
   local.aiSessionsProjectName = sessionState.projectName || local.appState?.project?.name || "";
   const active = currentAiSession();
-  local.aiMessages = (active.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
+  local.aiMessages = (active.messages?.length ? active.messages : [createAiWelcomeMessage()]).map((message) => ({ ...message }));
+  return true;
+}
+
+function applyAiSessionStatePreservingActive(sessionState = {}, options = {}) {
+  const currentId = local.aiCurrentSessionId;
+  const keepsCurrent = Array.isArray(sessionState.sessions)
+    && sessionState.sessions.some((session) => session.id === currentId);
+  if (!keepsCurrent) {
+    return applyAiSessionState(sessionState, options);
+  }
+  const current = currentAiSession();
+  return applyAiSessionState({
+    ...sessionState,
+    currentSessionId: currentId,
+    activeSession: {
+      ...current,
+      messages: (current.messages || local.aiMessages || []).map((message) => ({ ...message }))
+    }
+  }, options);
+}
+
+function announceAi(message) {
+  local.aiAnnouncement = String(message || "");
 }
 
 function syncAiSessionsFromAppState() {
   const sessionState = local.appState?.ai?.sessions;
   if (sessionState && Array.isArray(sessionState.sessions)) {
-    applyAiSessionState(sessionState);
+    applyAiSessionState(sessionState, { allowProjectChange: true });
+    const hasActiveDetail = local.aiSessionState?.activeDetail?.id === local.aiSessionState?.currentSessionId;
+    if (!sessionState.activeSession && !hasActiveDetail && (local.hostToken || local.guestToken)) {
+      setTimeout(() => refreshAiSessionsFromHost({ render: route().view === "editor" }), 0);
+    }
   }
 }
 
 async function refreshAiSessionsFromHost(options = {}) {
   if (!local.hostToken && !local.guestToken) return;
+  const projectRequest = captureAiSessionProjectRequest();
   try {
     const sessionState = await api("/api/ai/sessions");
+    if (!aiSessionProjectRequestIsCurrent(projectRequest, sessionState)) return;
     applyAiSessionState(sessionState);
     if (options.render !== false) refreshRightRailUi();
   } catch {
@@ -811,6 +1010,7 @@ async function refreshAiSessionsFromHost(options = {}) {
 
 async function importLegacyAiSessionsForProject() {
   if (isGuestClient() || !local.hostToken || !local.aiSessionsProjectKey) return;
+  const projectRequest = captureAiSessionProjectRequest();
   const rawMigrationState = localStorage.getItem(AI_SESSIONS_MIGRATION_STORAGE_KEY) || "";
   let migrated = {};
   try {
@@ -829,10 +1029,12 @@ async function importLegacyAiSessionsForProject() {
     const imported = await api("/api/ai/sessions/import-legacy", {
       method: "POST",
       body: {
+        projectKey: projectRequest.projectKey,
         sessions: legacy.sessions,
         currentSessionId: legacy.currentSessionId
       }
     });
+    if (!aiSessionProjectRequestIsCurrent(projectRequest, imported)) return;
     applyAiSessionState(imported);
     localStorage.setItem(AI_SESSIONS_MIGRATION_STORAGE_KEY, "1");
   } catch {
@@ -843,9 +1045,11 @@ async function importLegacyAiSessionsForProject() {
 function saveAiSessions() {
   if (!local.hostToken && !local.guestToken) return;
   const payload = aiSessionSavePayload();
+  const projectRequest = captureAiSessionProjectRequest();
+  if (!projectRequest.projectKey) return;
   api("/api/ai/sessions/update", { method: "POST", body: payload })
     .then((sessionState) => {
-      if (!sessionState.projectKey || sessionState.projectKey === local.aiSessionsProjectKey) applyAiSessionState(sessionState);
+      if (aiSessionProjectRequestIsCurrent(projectRequest, sessionState)) applyAiSessionState(sessionState);
     })
     .catch(() => {});
 }
@@ -855,133 +1059,284 @@ function syncCurrentAiSession(titleHint = "") {
   local.aiChangeHistory.forEach((proposal) => {
     if (proposal?.id && !proposal.sessionId) proposal.sessionId = session.id;
   });
-  session.messages = local.aiMessages.map((message) => ({ ...message }));
-  session.updatedAt = Date.now();
-  if (!firstUserPrompt(session.messages)) {
-    session.title = titleHint ? aiSessionTitleFromPrompt(titleHint) : session.title || "New session";
-  } else if (!session.title || session.title === "New session" || session.title === "First session") {
-    session.title = aiSessionTitleFromPrompt(firstUserPrompt(session.messages));
-  }
-  local.aiSessions = [session, ...local.aiSessions.filter((item) => item.id !== session.id)]
-    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
-    .slice(0, 30);
-  saveAiSessions();
+  return session;
 }
 
 async function startNewAiSession() {
-  syncCurrentAiSession();
-  local.aiSessionMenuOpen = false;
+  if (local.aiSessionCreating || local.aiSessions.length >= 30) return;
+  const projectRequest = captureAiSessionProjectRequest();
+  if (!projectRequest.projectKey) return;
+  const requestId = ++local.aiSessionActivationRequestId;
+  local.aiSessionCreating = true;
+  local.aiSessionCreateError = "";
   local.aiSessionMoreMenuOpen = false;
+  local.aiSessionActionMenuId = "";
   local.aiForceScrollBottom = true;
   local.aiChatNeedsJump = false;
+  announceAi("Creating a new AI session.");
+  refreshRightRailUi();
   try {
-    const sessionState = await api("/api/ai/sessions/create", { method: "POST", body: { title: "New session" } });
-    applyAiSessionState(sessionState);
-  } catch {
-    const session = createAiSession();
-    local.aiSessions.unshift(session);
-    local.aiCurrentSessionId = session.id;
-    local.aiMessages = session.messages.map((message) => ({ ...message }));
-    saveAiSessions();
+    const sessionState = await api("/api/ai/sessions/create", {
+      method: "POST",
+      body: { projectKey: projectRequest.projectKey }
+    });
+    if (
+      requestId === local.aiSessionActivationRequestId
+      && aiSessionProjectRequestIsCurrent(projectRequest, sessionState)
+    ) {
+      applyAiSessionState(sessionState);
+      local.aiSessionNewId = sessionState.currentSessionId;
+      local.aiSessionMenuOpen = false;
+      announceAi("New AI session created.");
+      setTimeout(() => {
+        if (local.aiSessionNewId === sessionState.currentSessionId) local.aiSessionNewId = "";
+      }, 200);
+      setTimeout(() => document.querySelector("#aiPrompt")?.focus(), 0);
+    }
+  } catch (error) {
+    if (requestId === local.aiSessionActivationRequestId && aiSessionProjectRequestIsCurrent(projectRequest)) {
+      local.aiSessionCreateError = error.message || "Could not create a new session.";
+      local.aiSessionMenuOpen = true;
+      announceAi(local.aiSessionCreateError);
+    }
+  } finally {
+    if (aiSessionProjectRequestIsCurrent(projectRequest)) local.aiSessionCreating = false;
   }
   refreshRightRailUi();
 }
 
 async function switchAiSession(sessionId) {
-  syncCurrentAiSession();
   const session = local.aiSessions.find((item) => item.id === sessionId);
   if (!session) return;
+  const projectRequest = captureAiSessionProjectRequest();
+  if (!projectRequest.projectKey) return;
+  const requestId = ++local.aiSessionActivationRequestId;
   local.aiSessionMenuOpen = false;
   local.aiSessionMoreMenuOpen = false;
+  local.aiSessionActionMenuId = "";
   local.aiForceScrollBottom = true;
   local.aiChatNeedsJump = false;
-  try {
-    const sessionState = await api("/api/ai/sessions/activate", { method: "POST", body: { sessionId: session.id } });
-    applyAiSessionState(sessionState);
-  } catch {
-    local.aiCurrentSessionId = session.id;
-    local.aiMessages = (session.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
-    saveAiSessions();
+  if (session.id === local.aiCurrentSessionId && !local.aiSessionCreating) {
+    refreshRightRailUi();
+    setTimeout(() => document.querySelector("#aiPrompt")?.focus(), 0);
+    return;
   }
+  local.aiSessionSwitchTargetId = session.id;
+  local.aiTranscriptSwitching = true;
   refreshRightRailUi();
+  try {
+    const sessionState = await api("/api/ai/sessions/activate", {
+      method: "POST",
+      body: { projectKey: projectRequest.projectKey, sessionId: session.id }
+    });
+    if (
+      requestId !== local.aiSessionActivationRequestId
+      || !aiSessionProjectRequestIsCurrent(projectRequest, sessionState)
+    ) return;
+    applyAiSessionState(sessionState);
+    announceAi(`Switched to ${session.title || "AI session"}.`);
+    refreshRightRailUi();
+  } catch (error) {
+    if (requestId === local.aiSessionActivationRequestId && aiSessionProjectRequestIsCurrent(projectRequest)) {
+      announceAi(error.message || "Could not switch AI sessions.");
+      showAppNotice(error.message || "Could not switch AI sessions.", { type: "error", title: "AI sessions" });
+    }
+  }
+  const motionDelay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 120;
+  setTimeout(() => {
+    if (requestId !== local.aiSessionActivationRequestId || !aiSessionProjectRequestIsCurrent(projectRequest)) return;
+    local.aiTranscriptSwitching = false;
+    local.aiSessionSwitchTargetId = "";
+    refreshRightRailUi();
+    document.querySelector("#aiPrompt")?.focus();
+  }, motionDelay);
 }
 
-async function deleteAiSession(sessionId, options = {}) {
+function requestDeleteAiSession(sessionId) {
   const targetId = String(sessionId || "");
   if (!targetId) return;
   const target = local.aiSessions.find((session) => session.id === targetId);
-  const hasWork = target && ((target.messages || []).some((message) => message.id !== "welcome") || Number(target.changeCount || 0) > 0);
-  if (hasWork && !confirm(`Delete "${target.title || "this session"}"?`)) return;
-  try {
-    const sessionState = await api("/api/ai/sessions/delete", { method: "POST", body: { sessionId: targetId } });
-    applyAiSessionState(sessionState);
-    local.aiSessionMenuOpen = options.keepMenu !== false;
-    local.aiSessionMoreMenuOpen = false;
-    local.aiForceScrollBottom = true;
-    local.aiChatNeedsJump = false;
+  if (!target) return;
+  local.aiSessionActionMenuId = "";
+  const queuedCount = local.aiQueuedPrompts.filter((item) => item.sessionId === targetId).length;
+  if (queuedCount) {
+    announceAi("Remove this session's queued messages before deleting it.");
     refreshRightRailUi();
     return;
-  } catch {
-    // Fall back to local deletion below.
   }
-  const nextSessions = local.aiSessions.filter((session) => session.id !== targetId);
-  if (!nextSessions.length) {
-    const session = createAiSession();
-    local.aiSessions = [session];
-    local.aiCurrentSessionId = session.id;
-    local.aiMessages = session.messages.map((message) => ({ ...message }));
-  } else {
-    local.aiSessions = nextSessions;
-    if (local.aiCurrentSessionId === targetId) {
-      const next = local.aiSessions[0];
-      local.aiCurrentSessionId = next.id;
-      local.aiMessages = (next.messages || [createAiWelcomeMessage()]).map((message) => ({ ...message }));
-    }
+  const untouchedBlank = Number(target.messageCount || 0) === 0
+    && Number(target.changeCount || 0) === 0
+    && !target.parentSessionId
+    && target.titleSource !== "manual"
+    && (target.title || "New session") === "New session";
+  if (!untouchedBlank) {
+    local.aiSessionDeleteId = targetId;
+    local.aiSessionMenuOpen = false;
+    refreshRightRailUi();
+    setTimeout(() => document.querySelector("#aiSessionDeleteCancel")?.focus(), 0);
+    return;
   }
-  local.aiSessionMenuOpen = options.keepMenu !== false;
-  local.aiSessionMoreMenuOpen = false;
-  local.aiForceScrollBottom = true;
-  local.aiChatNeedsJump = false;
-  saveAiSessions();
-  refreshRightRailUi();
+  deleteAiSession(targetId);
 }
 
-async function renameAiSession(sessionId = local.aiCurrentSessionId) {
-  const session = local.aiSessions.find((item) => item.id === sessionId) || currentAiSession();
-  const title = prompt("Session name", session.title || "New session");
-  if (title === null) return;
-  const clean = title.replace(/\s+/g, " ").trim();
-  if (!clean) return;
-  session.title = clean.slice(0, 64);
-  session.updatedAt = Date.now();
-  local.aiSessions = [session, ...local.aiSessions.filter((item) => item.id !== session.id)];
-  local.aiSessionMoreMenuOpen = false;
+function toggleAiSessionActions(sessionId) {
+  const id = String(sessionId || "");
+  if (!id) return;
+  local.aiSessionActionMenuId = local.aiSessionActionMenuId === id ? "" : id;
+  refreshRightRailUi();
+  if (local.aiSessionActionMenuId) {
+    setTimeout(() => document.querySelector("#aiSessionActionsMenu button:not(:disabled)")?.focus(), 0);
+  } else {
+    setTimeout(() => document.querySelector(`.ai-session-row[data-session-id="${CSS.escape(id)}"] .ai-session-row-main`)?.focus(), 0);
+  }
+}
+
+async function deleteAiSession(sessionId) {
+  const targetId = String(sessionId || "");
+  const target = local.aiSessions.find((session) => session.id === targetId);
+  if (!target || local.aiSessionDeletingId) return;
+  const projectRequest = captureAiSessionProjectRequest();
+  if (!projectRequest.projectKey) return;
+  const activationRequestId = ++local.aiSessionActivationRequestId;
+  local.aiSessionDeleteId = "";
+  local.aiSessionDeletingId = targetId;
+  let deleted = false;
+  refreshRightRailUi();
   try {
-    const sessionState = await api("/api/ai/sessions/update", {
+    const sessionState = await api("/api/ai/sessions/delete", {
       method: "POST",
-      body: { ...aiSessionSavePayload(session), sessionId: session.id, title: session.title }
+      body: {
+        projectKey: projectRequest.projectKey,
+        sessionId: targetId,
+        expectedRevision: target.revision
+      }
     });
-    applyAiSessionState(sessionState);
-  } catch {
-    saveAiSessions();
+    const motionDelay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 120;
+    await new Promise((resolve) => setTimeout(resolve, motionDelay));
+    if (!aiSessionProjectRequestIsCurrent(projectRequest, sessionState)) return;
+    if (activationRequestId === local.aiSessionActivationRequestId) {
+      applyAiSessionState(sessionState);
+      local.aiSessionMenuOpen = true;
+      local.aiSessionMoreMenuOpen = false;
+      local.aiSessionActionMenuId = "";
+      local.aiForceScrollBottom = true;
+      local.aiChatNeedsJump = false;
+    } else {
+      applyAiSessionStatePreservingActive(sessionState);
+    }
+    deleted = true;
+    announceAi(`Deleted ${target.title || "AI session"}.`);
+  } catch (error) {
+    if (!aiSessionProjectRequestIsCurrent(projectRequest)) return;
+    announceAi(error.message || "Could not delete the AI session.");
+    showAppNotice(error.message || "Could not delete the AI session.", { type: "error", title: "AI sessions" });
+  } finally {
+    if (aiSessionProjectRequestIsCurrent(projectRequest) && local.aiSessionDeletingId === targetId) {
+      local.aiSessionDeletingId = "";
+    }
+  }
+  refreshRightRailUi();
+  if (deleted) {
+    setTimeout(() => {
+      (document.querySelector(".ai-session-row.active .ai-session-row-main") || document.querySelector("#aiSessionMenuButton"))?.focus();
+    }, 0);
+  }
+}
+
+function beginRenameAiSession(sessionId = local.aiCurrentSessionId) {
+  const session = local.aiSessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  local.aiSessionRenamingId = session.id;
+  local.aiSessionRenameValue = session.title || "New session";
+  local.aiSessionRenameError = "";
+  local.aiSessionActionMenuId = "";
+  refreshRightRailUi();
+  setTimeout(() => {
+    const input = document.querySelector("#aiSessionRenameInput");
+    input?.focus();
+    input?.select();
+  }, 0);
+}
+
+function cancelAiSessionRename() {
+  const sessionId = local.aiSessionRenamingId;
+  local.aiSessionRenamingId = "";
+  local.aiSessionRenameValue = "";
+  local.aiSessionRenameError = "";
+  refreshRightRailUi();
+  setTimeout(() => document.querySelector(`.ai-session-row[data-session-id="${CSS.escape(sessionId)}"] .ai-session-row-main`)?.focus(), 0);
+}
+
+async function renameAiSession(sessionId = local.aiCurrentSessionId, value = local.aiSessionRenameValue) {
+  const session = local.aiSessions.find((item) => item.id === sessionId);
+  const activationRequestId = local.aiSessionActivationRequestId;
+  const clean = String(value || "").replace(/\s+/g, " ").trim().slice(0, 64);
+  if (!session || !clean) {
+    local.aiSessionRenameError = "Enter a session name.";
+    refreshRightRailUi();
+    setTimeout(() => document.querySelector("#aiSessionRenameInput")?.focus(), 0);
+    return;
+  }
+  const projectRequest = captureAiSessionProjectRequest();
+  if (!projectRequest.projectKey) return;
+  try {
+    const sessionState = await api("/api/ai/sessions/rename", {
+      method: "POST",
+      body: {
+        projectKey: projectRequest.projectKey,
+        sessionId: session.id,
+        title: clean,
+        expectedRevision: session.revision
+      }
+    });
+    if (!aiSessionProjectRequestIsCurrent(projectRequest, sessionState)) return;
+    if (activationRequestId === local.aiSessionActivationRequestId) applyAiSessionState(sessionState);
+    else applyAiSessionStatePreservingActive(sessionState);
+    local.aiSessionRenamingId = "";
+    local.aiSessionRenameValue = "";
+    local.aiSessionRenameError = "";
+    announceAi(`Renamed session to ${clean}.`);
+    setTimeout(() => document.querySelector(`.ai-session-row[data-session-id="${CSS.escape(sessionId)}"] .ai-session-row-main`)?.focus(), 0);
+  } catch (error) {
+    if (!aiSessionProjectRequestIsCurrent(projectRequest)) return;
+    local.aiSessionRenameError = error.message || "Could not rename the session.";
+    announceAi(local.aiSessionRenameError);
+    setTimeout(() => document.querySelector("#aiSessionRenameInput")?.focus(), 0);
   }
   refreshRightRailUi();
 }
 
 function renameCurrentAiSession() {
-  renameAiSession(local.aiCurrentSessionId);
+  beginRenameAiSession(local.aiCurrentSessionId);
 }
 
 async function forkAiSession(sessionId = local.aiCurrentSessionId) {
-  syncCurrentAiSession();
+  const session = local.aiSessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  const projectRequest = captureAiSessionProjectRequest();
+  if (!projectRequest.projectKey) return;
+  const activationRequestId = ++local.aiSessionActivationRequestId;
   try {
-    const sessionState = await api("/api/ai/sessions/fork", { method: "POST", body: { sessionId } });
-    applyAiSessionState(sessionState);
+    const sessionState = await api("/api/ai/sessions/fork", {
+      method: "POST",
+      body: {
+        projectKey: projectRequest.projectKey,
+        sessionId,
+        expectedRevision: session.revision
+      }
+    });
+    if (!aiSessionProjectRequestIsCurrent(projectRequest, sessionState)) return;
+    if (activationRequestId === local.aiSessionActivationRequestId) applyAiSessionState(sessionState);
+    else applyAiSessionStatePreservingActive(sessionState);
+    announceAi(`Forked ${session.title || "AI session"}.`);
   } catch (error) {
+    if (!aiSessionProjectRequestIsCurrent(projectRequest)) return;
     showAppNotice(error.message || "Could not fork session.", { type: "error", title: "AI sessions" });
+    announceAi(error.message || "Could not fork the AI session.");
   }
   local.aiSessionMenuOpen = false;
   local.aiSessionMoreMenuOpen = false;
+  local.aiSessionActionMenuId = "";
   local.aiForceScrollBottom = true;
   local.aiChatNeedsJump = false;
   refreshRightRailUi();
@@ -1024,6 +1379,8 @@ function connectCollab() {
   socket.addEventListener("open", () => {
     clearTimeout(local.collabLostTimer);
     local.collabLostTimer = null;
+    clearTimeout(local.eventDisconnectTimer);
+    local.eventDisconnectTimer = null;
     clearInterval(local.collabHeartbeatTimer);
     clearRemoteReconnectNotice();
     sendCollab("heartbeat");
@@ -1046,6 +1403,7 @@ function connectCollab() {
   socket.addEventListener("close", () => {
     clearInterval(local.collabHeartbeatTimer);
     local.collabHeartbeatTimer = null;
+    settlePendingCollabSaves(false);
     if (route().view === "editor" && local.appState?.session?.status !== "ended") {
       clearTimeout(local.collabLostTimer);
       local.collabLostTimer = setTimeout(async () => {
@@ -1074,6 +1432,30 @@ function sendCollab(type, payload = {}) {
   return true;
 }
 
+function settlePendingCollabSaves(saved = false) {
+  for (const pending of local.pendingCollabSaves.values()) {
+    clearTimeout(pending.timer);
+    pending.resolve(saved);
+  }
+  local.pendingCollabSaves.clear();
+}
+
+function requestCollabSave(filePath, newText = local.editorContent, timeoutMs = 5000) {
+  const requestId = `${clientId}-${Date.now()}-${++local.collabSaveSequence}`;
+  return new Promise((resolve) => {
+    const finish = (saved) => {
+      const pending = local.pendingCollabSaves.get(requestId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      local.pendingCollabSaves.delete(requestId);
+      resolve(saved);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    local.pendingCollabSaves.set(requestId, { resolve, timer, filePath });
+    if (!sendCollab("save", { filePath, requestId, newText })) finish(false);
+  });
+}
+
 function closeCollab() {
   clearTimeout(local.collabReconnectTimer);
   clearTimeout(local.collabLostTimer);
@@ -1081,6 +1463,7 @@ function closeCollab() {
   local.collabReconnectTimer = null;
   local.collabLostTimer = null;
   local.collabHeartbeatTimer = null;
+  settlePendingCollabSaves(false);
   if (local.collabSocket) {
     local.collabSocket.close();
     local.collabSocket = null;
@@ -1099,7 +1482,11 @@ function destroyVisualEditor() {
   local.visualEditor = null;
 }
 
-function destroyEditorSurfaces() {
+function destroyEditorSurfaces(options = {}) {
+  const previewPane = document.querySelector("#previewPane");
+  if (previewPane && options.cancelPdfPreview !== false) window.LocalLeafPdfPreview?.cancel?.(previewPane);
+  if (options.cancelPdfSourceNavigation !== false) local.pdfSourceNavigator?.cancel?.();
+  if (options.cancelPdfReviewNavigation !== false) local.aiReviewNavigator?.cancel?.();
   destroyCodeEditor();
   destroyVisualEditor();
 }
@@ -1196,6 +1583,12 @@ function handleCollabMessage(payload) {
   }
 
   if (payload.type === "file_saved") {
+    const pendingSave = local.pendingCollabSaves.get(payload.requestId);
+    if (pendingSave && payload.userId === local.userId) {
+      clearTimeout(pendingSave.timer);
+      local.pendingCollabSaves.delete(payload.requestId);
+      pendingSave.resolve(true);
+    }
     if (payload.filePath === local.selectedFile) {
       local.saveStatus = payload.userId === local.userId ? "Saved" : `Saved by ${payload.name || "collaborator"}`;
       const status = document.querySelector(".editor-subtitle");
@@ -1204,9 +1597,71 @@ function handleCollabMessage(payload) {
     return;
   }
 
+  if (payload.type === "error" && payload.requestId) {
+    const pendingSave = local.pendingCollabSaves.get(payload.requestId);
+    if (pendingSave) {
+      clearTimeout(pendingSave.timer);
+      local.pendingCollabSaves.delete(payload.requestId);
+      pendingSave.resolve(false);
+    }
+    return;
+  }
+
   if (payload.type === "presence_update") {
-    local.collabPresence = payload.presence || [];
+    local.collabPresence = Array.isArray(payload.presence) ? payload.presence : [];
+    const onlineUserIds = new Set(local.collabPresence.map((item) => item?.userId).filter(Boolean));
+    if (Array.isArray(local.appState?.session?.users)) {
+      local.appState.session.users = local.appState.session.users.map((user) => (
+        user.role === "host" ? user : { ...user, online: onlineUserIds.has(user.id) }
+      ));
+    }
     updateUsersPresenceUi();
+    return;
+  }
+
+  if (payload.type === "state_update" && payload.state) {
+    local.appState = payload.state;
+    const selectedFileMissing = Boolean(local.selectedFile)
+      && !(local.appState?.project?.files || []).some((file) => file.path === local.selectedFile);
+    if (isGuestClient() && local.appState?.session?.status === "ended") {
+      handleSessionEnded("The host has ended the session.");
+      return;
+    }
+    syncAiProposalsFromAppState();
+    if (selectedFileMissing) {
+      clearTimeout(local.saveTimer);
+      local.saveTimer = null;
+      void openSurvivingProjectFile();
+      showAppNotice("The file that was open is no longer in the project. LocalLeaf opened a surviving source file instead.", {
+        type: "warning",
+        title: "File removed"
+      });
+    }
+    if (route().view === "editor") {
+      (Array.isArray(local.appState?.session?.joinRequests) ? local.appState.session.joinRequests : [])
+        .filter((request) => request.status === "pending")
+        .forEach(showEditorJoinRequest);
+      updateSidebarUi();
+      refreshRightRailUi();
+      updateUsersPresenceUi();
+    }
+    return;
+  }
+
+  if (payload.type === "project_event") {
+    if (payload.event === "compile" && local.appState && shouldApplyCompileUpdate(payload.payload)) {
+      local.appState.compile = payload.payload;
+      if (route().view === "editor") {
+        const refreshPreview = local.appState.compile.status !== "running";
+        updateCompileUi({ refreshPreview, previewScroll: refreshPreview ? local.pendingPreviewScroll : null });
+        if (refreshPreview) local.pendingPreviewScroll = null;
+      }
+    }
+    if (payload.event === "chat" && local.appState && payload.payload) {
+      const existing = local.appState.chat.some((message) => message.id === payload.payload.id);
+      if (!existing) local.appState.chat.push(payload.payload);
+      if (route().view === "editor") updateChatPanel();
+    }
     return;
   }
 
@@ -1221,12 +1676,13 @@ function setView(view, extra = {}) {
   const previousView = route().view;
   const params = new URLSearchParams();
   params.set("view", view);
-  if (local.hostToken) params.set("host", local.hostToken);
-  if (extra.token) params.set("token", extra.token);
   if (extra.name) params.set("name", extra.name);
   history.pushState({}, "", `/?${params.toString()}`);
   local.view = view;
-  if (extra.token) local.guestToken = extra.token;
+  if (extra.token) {
+    local.guestToken = extra.token;
+    sessionStorage.setItem("localleaf.guestToken", extra.token);
+  }
   if (extra.name) local.userName = extra.name;
   if (extra.token) connectEvents();
   if (view !== "editor") closeCollab();
@@ -1257,6 +1713,108 @@ function escapeHtml(value) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function availableTunnelProviders(session = local.appState?.session) {
+  return Array.isArray(session?.tunnel?.providers)
+    ? session.tunnel.providers.filter((provider) => provider?.id && provider?.name)
+    : [];
+}
+
+function preferredTunnelProviderId(session = local.appState?.session) {
+  const providers = availableTunnelProviders(session);
+  const serverPreference = String(session?.tunnel?.preferredProviderId || "");
+  const requested = local.tunnelProviderPreferenceLoaded ? local.preferredTunnelProviderId : serverPreference;
+  return providers.some((provider) => provider.id === requested) ? requested : "";
+}
+
+function setPreferredTunnelProvider(providerId, session = local.appState?.session) {
+  const normalized = String(providerId || "");
+  const allowed = !normalized || availableTunnelProviders(session).some((provider) => provider.id === normalized);
+  if (!allowed) return false;
+  local.preferredTunnelProviderId = normalized;
+  local.tunnelProviderPreferenceLoaded = true;
+  localStorage.setItem(TUNNEL_PROVIDER_STORAGE_KEY, normalized);
+  return true;
+}
+
+function sessionTunnelProviderId(session = local.appState?.session) {
+  const providers = availableTunnelProviders(session);
+  const override = local.sessionTunnelProviderOverrideId;
+  if (override === null) return preferredTunnelProviderId(session);
+  if (!override || providers.some((provider) => provider.id === override)) return override;
+  return preferredTunnelProviderId(session);
+}
+
+function tunnelProviderOptionsMarkup(session = local.appState?.session, selectedProviderId = preferredTunnelProviderId(session)) {
+  const providers = availableTunnelProviders(session);
+  const selected = String(selectedProviderId || "");
+  if (!providers.length) return `<option value="">No public-link providers detected</option>`;
+  return [
+    `<option value="" ${selected ? "" : "selected"}>Automatic (recommended)</option>`,
+    ...providers.map((provider) => `<option value="${escapeHtml(provider.id)}" ${selected === provider.id ? "selected" : ""}>${escapeHtml(provider.name)}</option>`)
+  ].join("");
+}
+
+function selectedTunnelProvider(session = local.appState?.session) {
+  const selectedId = preferredTunnelProviderId(session);
+  return availableTunnelProviders(session).find((provider) => provider.id === selectedId) || null;
+}
+
+function selectedSessionTunnelProvider(session = local.appState?.session) {
+  const selectedId = sessionTunnelProviderId(session);
+  return availableTunnelProviders(session).find((provider) => provider.id === selectedId) || null;
+}
+
+function compactInviteUrl(value) {
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean);
+    const code = segments.at(-1) || "";
+    const compactCode = code.length > 13 ? `${code.slice(0, 5)}...${code.slice(-5)}` : code;
+    const joinPath = segments.includes("join") ? `/join/${compactCode}` : compactCode ? `/.../${compactCode}` : "";
+    return `${url.hostname}${joinPath}`;
+  } catch {
+    const text = String(value || "");
+    return text.length > 46 ? `${text.slice(0, 25)}...${text.slice(-16)}` : text;
+  }
+}
+
+function tunnelInviteState(session = local.appState?.session) {
+  const status = String(session?.tunnel?.status || "").toLowerCase();
+  const providerName = session?.tunnel?.providerName || selectedSessionTunnelProvider(session)?.name || "the selected provider";
+  const hasCurrentInvite = Boolean(session?.inviteUrl);
+  const previousLinkInvalidated = Boolean(session?.tunnel?.previousLinkInvalidated);
+  if (["error", "failed", "not installed", "unavailable"].includes(status)) {
+    return {
+      phase: "failed",
+      title: previousLinkInvalidated ? "Replacement link failed" : "Could not create a verified link",
+      detail: session?.tunnel?.detail || (previousLinkInvalidated ? "The previous invite link is no longer active. Choose another provider or try again." : "Choose another provider or try again."),
+      providerName
+    };
+  }
+  if (["checking", "verifying", "starting", "racing", "retrying"].includes(status)) {
+    return {
+      phase: "verifying",
+      title: previousLinkInvalidated ? `Verifying a ${providerName} replacement` : `Verifying ${providerName}`,
+      detail: session?.tunnel?.detail || (previousLinkInvalidated ? "The previous invite link is no longer active. Wait for this replacement to verify." : "LocalLeaf is checking that your friend can open the link."),
+      providerName
+    };
+  }
+  if (hasCurrentInvite) {
+    return {
+      phase: "ready",
+      title: "Verified link ready",
+      detail: `${providerName} verified this public link.`,
+      providerName
+    };
+  }
+  return {
+    phase: "pending",
+    title: "Generating your invite link",
+    detail: session?.tunnel?.detail || "LocalLeaf is waiting for a public-link provider.",
+    providerName
+  };
 }
 
 function downloadFileName(name, extension) {
@@ -1301,14 +1859,36 @@ function icon(name) {
   return icons[name] || "*";
 }
 
+const UI_GLYPH_MARKUP = {
+  plus: `<path d="M228,128a12,12,0,0,1-12,12H140v76a12,12,0,0,1-24,0V140H40a12,12,0,0,1,0-24h76V40a12,12,0,0,1,24,0v76h76A12,12,0,0,1,228,128Z"/>`,
+  home: `<path d="M222.14,105.85l-80-80a20,20,0,0,0-28.28,0l-80,80A19.86,19.86,0,0,0,28,120v96a12,12,0,0,0,12,12H216a12,12,0,0,0,12-12V120A19.86,19.86,0,0,0,222.14,105.85ZM204,204H52V121.65l76-76,76,76Z"/>`,
+  folder: `<path d="M216,68H132L105.33,48a20.12,20.12,0,0,0-12-4H40A20,20,0,0,0,20,64V200a20,20,0,0,0,20,20H216.89A19.13,19.13,0,0,0,236,200.89V88A20,20,0,0,0,216,68Zm-4,128H44V68H92l28.8,21.6A12,12,0,0,0,128,92h84Z"/>`,
+  file: `<path d="M216.49,79.52l-56-56A12,12,0,0,0,152,20H56A20,20,0,0,0,36,40V216a20,20,0,0,0,20,20H200a20,20,0,0,0,20-20V88A12,12,0,0,0,216.49,79.52ZM160,57l23,23H160ZM60,212V44h76V92a12,12,0,0,0,12,12h48V212Zm112-80a12,12,0,0,1-12,12H96a12,12,0,0,1,0-24h64A12,12,0,0,1,172,132Zm0,40a12,12,0,0,1-12,12H96a12,12,0,0,1,0-24h64A12,12,0,0,1,172,172Z"/>`,
+  users: `<path d="M164.38,181.1a52,52,0,1,0-72.76,0,75.89,75.89,0,0,0-30,28.89,12,12,0,0,0,20.78,12,53,53,0,0,1,91.22,0,12,12,0,1,0,20.78-12A75.89,75.89,0,0,0,164.38,181.1ZM100,144a28,28,0,1,1,28,28A28,28,0,0,1,100,144Zm147.21,9.59a12,12,0,0,1-16.81-2.39c-8.33-11.09-19.85-19.59-29.33-21.64a12,12,0,0,1-1.82-22.91,20,20,0,1,0-24.78-28.3,12,12,0,1,1-21-11.6,44,44,0,1,1,73.28,48.35,92.18,92.18,0,0,1,22.85,21.69A12,12,0,0,1,247.21,153.59Zm-192.28-24c-9.48,2.05-21,10.55-29.33,21.65A12,12,0,0,1,6.41,136.79,92.37,92.37,0,0,1,29.26,115.1a44,44,0,1,1,73.28-48.35,12,12,0,1,1-21,11.6,20,20,0,1,0-24.78,28.3,12,12,0,0,1-1.82,22.91Z"/>`,
+  network: `<path d="M87.5,151.52l64-64a12,12,0,0,1,17,17l-64,64a12,12,0,0,1-17-17Zm131-114a60.08,60.08,0,0,0-84.87,0L103.51,67.61a12,12,0,0,0,17,17l30.07-30.06a36,36,0,0,1,50.93,50.92L171.4,135.52a12,12,0,1,0,17,17l30.08-30.06A60.09,60.09,0,0,0,218.45,37.55ZM135.52,171.4l-30.07,30.08a36,36,0,0,1-50.92-50.93l30.06-30.07a12,12,0,0,0-17-17L37.55,133.58a60,60,0,0,0,84.88,84.87l30.06-30.07a12,12,0,0,0-17-17Z"/>`,
+  compile: `<path d="M176,128a12,12,0,0,1-5.17,9.87l-52,36A12,12,0,0,1,100,164V92a12,12,0,0,1,18.83-9.87l52,36A12,12,0,0,1,176,128Zm60,0A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Z"/>`,
+  external: `<path d="M228,104a12,12,0,0,1-24,0V69l-59.51,59.51a12,12,0,0,1-17-17L187,52H152a12,12,0,0,1,0-24h64a12,12,0,0,1,12,12Zm-44,24a12,12,0,0,0-12,12v64H52V84h64a12,12,0,0,0,0-24H48A20,20,0,0,0,28,80V208a20,20,0,0,0,20,20H176a20,20,0,0,0,20-20V140A12,12,0,0,0,184,128Z"/>`,
+  chat: `<path d="M120,128a16,16,0,1,1-16-16A16,16,0,0,1,120,128Zm32-16a16,16,0,1,0,16,16A16,16,0,0,0,152,112Zm84,16A108,108,0,0,1,78.77,224.15L46.34,235A20,20,0,0,1,21,209.66l10.81-32.43A108,108,0,1,1,236,128Zm-24,0A84,84,0,1,0,55.27,170.06a12,12,0,0,1,1,9.81l-9.93,29.79,29.79-9.93a12.1,12.1,0,0,1,3.8-.62,12,12,0,0,1,6,1.62A84,84,0,0,0,212,128Z"/>`,
+  download: `<path d="M228,144v64a12,12,0,0,1-12,12H40a12,12,0,0,1-12-12V144a12,12,0,0,1,24,0v52H204V144a12,12,0,0,1,24,0Zm-108.49,8.49a12,12,0,0,0,17,0l40-40a12,12,0,0,0-17-17L140,115V32a12,12,0,0,0-24,0v83L96.49,95.51a12,12,0,0,0-17,17Z"/>`,
+  upload: `<path d="M228,144v64a12,12,0,0,1-12,12H40a12,12,0,0,1-12-12V144a12,12,0,0,1,24,0v52H204V144a12,12,0,0,1,24,0ZM96.49,80.49,116,61v83a12,12,0,0,0,24,0V61l19.51,19.52a12,12,0,1,0,17-17l-40-40a12,12,0,0,0-17,0l-40,40a12,12,0,1,0,17,17Z"/>`,
+  stop: `<path d="M200,36H56A20,20,0,0,0,36,56V200a20,20,0,0,0,20,20H200a20,20,0,0,0,20-20V56A20,20,0,0,0,200,36Zm-4,160H60V60H196Z"/>`,
+  refresh: `<path d="M244,56v48a12,12,0,0,1-12,12H184a12,12,0,1,1,0-24H201.1l-19-17.38c-.13-.12-.26-.24-.38-.37A76,76,0,1,0,127,204h1a75.53,75.53,0,0,0,52.15-20.72,12,12,0,0,1,16.49,17.45A99.45,99.45,0,0,1,128,228h-1.37A100,100,0,1,1,198.51,57.06L220,76.72V56a12,12,0,0,1,24,0Z"/>`,
+  settings: `<path d="M40,92H70.06a36,36,0,0,0,67.88,0H216a12,12,0,0,0,0-24H137.94a36,36,0,0,0-67.88,0H40a12,12,0,0,0,0,24Zm64-24A12,12,0,1,1,92,80,12,12,0,0,1,104,68Zm112,96H201.94a36,36,0,0,0-67.88,0H40a12,12,0,0,0,0,24h94.06a36,36,0,0,0,67.88,0H216a12,12,0,0,0,0-24Zm-48,24a12,12,0,1,1,12-12A12,12,0,0,1,168,188Z"/>`,
+  ai: `<path d="M234.36,170A12,12,0,0,1,230,186.37l-96,56a12,12,0,0,1-12.1,0l-96-56a12,12,0,0,1,12.09-20.74l90,52.48L218,165.63A12,12,0,0,1,234.36,170ZM218,117.63,128,170.11,38.05,117.63A12,12,0,0,0,26,138.37l96,56a12,12,0,0,0,12.1,0l96-56A12,12,0,0,0,218,117.63ZM20,80a12,12,0,0,1,6-10.37l96-56a12.06,12.06,0,0,1,12.1,0l96,56a12,12,0,0,1,0,20.74l-96,56a12,12,0,0,1-12.1,0l-96-56A12,12,0,0,1,20,80Zm35.82,0L128,122.11,200.18,80,128,37.89Z"/>`,
+  help: `<path d="M144,180a16,16,0,1,1-16-16A16,16,0,0,1,144,180Zm92-52A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128ZM128,64c-24.26,0-44,17.94-44,40v4a12,12,0,0,0,24,0v-4c0-8.82,9-16,20-16s20,7.18,20,16-9,16-20,16a12,12,0,0,0-12,12v8a12,12,0,0,0,23.73,2.56C158.31,137.88,172,122.37,172,104,172,81.94,152.26,64,128,64Z"/>`,
+  info: `<path d="M108,84a16,16,0,1,1,16,16A16,16,0,0,1,108,84Zm128,44A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Zm-72,36.68V132a20,20,0,0,0-20-20,12,12,0,0,0-4,23.32V168a20,20,0,0,0,20,20,12,12,0,0,0,4-23.32Z"/>`,
+  template: `<path d="M216,36H40A20,20,0,0,0,20,56V200a20,20,0,0,0,20,20H216a20,20,0,0,0,20-20V56A20,20,0,0,0,216,36Zm-4,160H44V60H212ZM68,92A12,12,0,0,1,80,80h96a12,12,0,0,1,0,24H80A12,12,0,0,1,68,92Zm0,36a12,12,0,0,1,12-12h96a12,12,0,0,1,0,24H80A12,12,0,0,1,68,128Zm0,36a12,12,0,0,1,12-12h96a12,12,0,0,1,0,24H80A12,12,0,0,1,68,164Z"/>`,
+  play: `<path d="M234.49,111.07,90.41,22.94A20,20,0,0,0,60,39.87V216.13a20,20,0,0,0,30.41,16.93l144.08-88.13a19.82,19.82,0,0,0,0-33.86ZM84,208.85V47.15L216.16,128Z"/>`,
+  pause: `<path d="M200,28H160a20,20,0,0,0-20,20V208a20,20,0,0,0,20,20h40a20,20,0,0,0,20-20V48A20,20,0,0,0,200,28Zm-4,176H164V52h32ZM96,28H56A20,20,0,0,0,36,48V208a20,20,0,0,0,20,20H96a20,20,0,0,0,20-20V48A20,20,0,0,0,96,28ZM92,204H60V52H92Z"/>`
+};
+
 function uiGlyph(name) {
-  return `<span class="ui-glyph ui-glyph-${name}" aria-hidden="true"></span>`;
+  const markup = UI_GLYPH_MARKUP[name] || UI_GLYPH_MARKUP.info;
+  return `<svg class="ui-glyph ui-glyph-${name}" viewBox="0 0 256 256" aria-hidden="true" focusable="false">${markup}</svg>`;
 }
 
 const PROVIDER_LOGO_PATHS = {
-  openai: "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z",
-  openrouter: "M16.778 1.844v1.919q-.569-.026-1.138-.032-.708-.008-1.415.037c-1.93.126-4.023.728-6.149 2.237-2.911 2.066-2.731 1.95-4.14 2.75-.396.223-1.342.574-2.185.798-.841.225-1.753.333-1.751.333v4.229s.768.108 1.61.333c.842.224 1.789.575 2.185.799 1.41.798 1.228.683 4.14 2.75 2.126 1.509 4.22 2.11 6.148 2.236.88.058 1.716.041 2.555.005v1.918l7.222-4.168-7.222-4.17v2.176c-.86.038-1.611.065-2.278.021-1.364-.09-2.417-.357-3.979-1.465-2.244-1.593-2.866-2.027-3.68-2.508.889-.518 1.449-.906 3.822-2.59 1.56-1.109 2.614-1.377 3.978-1.466.667-.044 1.418-.017 2.278.02v2.176L24 6.014Z",
-  ollama: "M16.361 10.26a.894.894 0 0 0-.558.47l-.072.148.001.207c0 .193.004.217.059.353.076.193.152.312.291.448.24.238.51.3.872.205a.86.86 0 0 0 .517-.436.752.752 0 0 0 .08-.498c-.064-.453-.33-.782-.724-.897a1.06 1.06 0 0 0-.466 0zm-9.203.005c-.305.096-.533.32-.65.639a1.187 1.187 0 0 0-.06.52c.057.309.31.59.598.667.362.095.632.033.872-.205.14-.136.215-.255.291-.448.055-.136.059-.16.059-.353l.001-.207-.072-.148a.894.894 0 0 0-.565-.472 1.02 1.02 0 0 0-.474.007Zm4.184 2c-.131.071-.223.25-.195.383.031.143.157.288.353.407.105.063.112.072.117.136.004.038-.01.146-.029.243-.02.094-.036.194-.036.222.002.074.07.195.143.253.064.052.076.054.255.059.164.005.198.001.264-.03.169-.082.212-.234.15-.525-.052-.243-.042-.28.087-.355.137-.08.281-.219.324-.314a.365.365 0 0 0-.175-.48.394.394 0 0 0-.181-.033c-.126 0-.207.03-.355.124l-.085.053-.053-.032c-.219-.13-.259-.145-.391-.143a.396.396 0 0 0-.193.032zm.39-2.195c-.373.036-.475.05-.654.086-.291.06-.68.195-.951.328-.94.46-1.589 1.226-1.787 2.114-.04.176-.045.234-.045.53 0 .294.005.357.043.524.264 1.16 1.332 2.017 2.714 2.173.3.033 1.596.033 1.896 0 1.11-.125 2.064-.727 2.493-1.571.114-.226.169-.372.22-.602.039-.167.044-.23.044-.523 0-.297-.005-.355-.045-.531-.288-1.29-1.539-2.304-3.072-2.497a6.873 6.873 0 0 0-.855-.031zm.645.937a3.283 3.283 0 0 1 1.44.514c.223.148.537.458.671.662.166.251.26.508.303.82.02.143.01.251-.043.482-.08.345-.332.705-.672.957a3.115 3.115 0 0 1-.689.348c-.382.122-.632.144-1.525.138-.582-.006-.686-.01-.853-.042-.57-.107-1.022-.334-1.35-.68-.264-.28-.385-.535-.45-.946-.03-.192.025-.509.137-.776.136-.326.488-.73.836-.963.403-.269.934-.46 1.422-.512.187-.02.586-.02.773-.002z"
+  openai: "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"
 };
 
 const PROVIDER_LOGO_SVG_MARKUP = {
@@ -1317,26 +1897,39 @@ const PROVIDER_LOGO_SVG_MARKUP = {
   cursor: `<path d="M4 4.6 20 12 4 19.4l3.6-7.4L4 4.6Z"></path><path d="m7.6 12 6.7-.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>`
 };
 
+const PROVIDER_LOGO_ASSETS = {
+  openai: "/assets/provider-logos/openai.svg",
+  lmstudio: "/assets/provider-logos/lm-studio.svg",
+  opencode: "/assets/provider-logos/opencode.svg",
+  cursor: "/assets/provider-logos/cursor.svg"
+};
+
+const PROVIDER_LOGO_KEYS_BY_ID = {
+  openai: "openai",
+  openrouter: "openrouter",
+  ollama: "ollama",
+  lmstudio: "lmstudio",
+  "opencode-go": "opencode",
+  cursor: "cursor"
+};
+
 function providerLogoKey(provider = {}) {
-  const value = `${provider.id || ""} ${provider.name || ""}`.toLowerCase();
-  if (value.includes("openai")) return "openai";
-  if (value.includes("openrouter")) return "openrouter";
-  if (value.includes("ollama")) return "ollama";
-  if (value.includes("lmstudio") || value.includes("lm studio")) return "lmstudio";
-  if (value.includes("opencode")) return "opencode";
-  if (value.includes("cursor")) return "cursor";
-  return "custom";
+  if (provider.custom) return "custom";
+  const id = String(provider.id || "").trim().toLowerCase();
+  return PROVIDER_LOGO_KEYS_BY_ID[id] || "custom";
 }
 
 function providerLogoMarkup(provider = {}) {
   const key = providerLogoKey(provider);
-  const label = provider.name || "Provider";
+  const asset = PROVIDER_LOGO_ASSETS[key];
+  if (asset) {
+    return `<span class="provider-logo provider-logo-${key}" aria-hidden="true"><img src="${asset}" alt="" loading="lazy" decoding="async" /></span>`;
+  }
   const svgMarkup = PROVIDER_LOGO_SVG_MARKUP[key] || (PROVIDER_LOGO_PATHS[key] ? `<path d="${PROVIDER_LOGO_PATHS[key]}"></path>` : "");
   if (svgMarkup) {
     return `<span class="provider-logo provider-logo-${key}" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">${svgMarkup}</svg></span>`;
   }
-  const text = String(label).trim().slice(0, 2).toUpperCase() || "AI";
-  return `<span class="provider-logo provider-logo-${key}" aria-hidden="true"><span>${escapeHtml(text)}</span></span>`;
+  return `<span class="provider-logo provider-logo-${key}" aria-hidden="true">${uiGlyph("settings")}</span>`;
 }
 
 function downArrowIcon() {
@@ -1372,7 +1965,10 @@ function editorToolIcon(name) {
     delete: `<svg ${attrs}><path d="M5 7h14" /><path d="M9 7V5h6v2" /><path d="M8 10v8" /><path d="M12 10v8" /><path d="M16 10v8" /><path d="M7 7l1 14h8l1-14" /></svg>`,
     chat: `<svg ${attrs}><path d="M5 6h14v10H8l-3 3V6Z" /><path d="M9 10h6" /><path d="M9 13h4" /></svg>`,
     menu: `<svg ${attrs}><path d="M5 7h14" /><path d="M5 12h14" /><path d="M5 17h14" /></svg>`,
-    edit: `<svg ${attrs}><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" /><path d="m13.5 8.5 3 3" /></svg>`
+    edit: `<svg ${attrs}><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" /><path d="m13.5 8.5 3 3" /></svg>`,
+    chevronDown: `<svg ${attrs}><path d="m7 9.5 5 5 5-5" /></svg>`,
+    more: `<svg ${attrs}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></svg>`,
+    check: `<svg ${attrs}><path d="m5 12.5 4 4 10-10" /></svg>`
   };
   return icons[name] || "";
 }
@@ -1418,23 +2014,24 @@ function windowShell(content, options = {}) {
 function brand() {
   return `
     <div class="brand">
-      <img class="brand-mark" src="/assets/localleaf-logo.svg" alt="" />
+      ${logoMark("brand-mark")}
       <h1>LocalLeaf <span>Host</span></h1>
     </div>
   `;
 }
 
 function logoMark(className = "brand-mark") {
-  return `<img class="${className}" src="/assets/localleaf-logo.svg" alt="" />`;
+  return `<svg class="${className} brand-symbol" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><rect x="3" y="3" width="58" height="58" rx="17" class="brand-symbol-tile"/><path d="M17 41.5c.8-15.2 10.4-24.8 30-27.5-.2 15.7-8.9 27-25.8 31.7-2.2-.8-3.6-2.2-4.2-4.2Z" class="brand-symbol-leaf"/><path d="M17.5 48c7.2-14 16.2-23.3 27.5-29" class="brand-symbol-vein"/></svg>`;
 }
 
 function activeFileForUser(userId) {
   return local.collabPresence.find((item) => item.userId === userId)?.filePath || "";
 }
 
-function updateCheckButtonMarkup(id, label = "Check for updates", extraClass = "") {
+function updateCheckButtonMarkup(id, label = "Check for updates", extraClass = "", options = {}) {
+  const titleAttribute = options.menuItem ? "" : ' title="Check for updates"';
   return `
-    <button class="btn update-check-button ${extraClass} ${local.updateChecking ? "is-checking" : ""}" id="${escapeHtml(id)}" data-check-updates data-default-label="${escapeHtml(label)}" type="button" title="Check for updates" aria-label="Check for updates" aria-busy="${local.updateChecking ? "true" : "false"}">
+    <button class="btn update-check-button ${extraClass} ${local.updateChecking ? "is-checking" : ""}" id="${escapeHtml(id)}" data-check-updates data-default-label="${escapeHtml(label)}" type="button"${titleAttribute} aria-label="Check for updates" aria-busy="${local.updateChecking ? "true" : "false"}"${options.menuItem ? ' role="menuitem"' : ""}>
       <span class="update-check-icon">${icon("refresh")}</span>
       <span class="update-check-copy">
         <span data-update-label>${local.updateChecking ? "Checking for updates..." : escapeHtml(label)}</span>
@@ -1675,6 +2272,7 @@ function projectView() {
   const { project, compiler, session } = local.appState;
   const compilerReady = compiler.available;
   const tunnelReady = session.tunnel.available;
+  const defaultTunnelProvider = selectedTunnelProvider(session);
   return windowShell(`
     <div class="project-app-page">
       <header class="project-app-head">
@@ -1704,8 +2302,8 @@ function projectView() {
             </div>
             <div class="status-row project-status-row">
               ${uiGlyph("network")}
-              <div><strong>Network</strong><span>${escapeHtml(session.network.recommendation)}</span></div>
-              <b class="${tunnelReady ? "status-good" : "status-warn"}">${tunnelReady ? "Good" : "Local"}</b>
+              <div><strong>Public invite link</strong><span>${escapeHtml(defaultTunnelProvider?.name || "Automatic provider selection")}</span></div>
+              <b class="${tunnelReady ? "status-good" : "status-warn"}">${escapeHtml(session.tunnel.status)}</b>
             </div>
             <div class="status-row project-status-row">
               ${uiGlyph("file")}
@@ -1714,7 +2312,7 @@ function projectView() {
             </div>
             <div class="status-row project-status-row">
               ${uiGlyph("users")}
-              <div><strong>Recommended collaborators</strong><span>Based on current host checks</span></div>
+              <div><strong>Session capacity</strong><span>Friends still require host approval</span></div>
               <b>${session.maxUsers}</b>
             </div>
           </div>
@@ -1724,9 +2322,9 @@ function projectView() {
           <div class="section-title">Session Readiness</div>
           <div class="project-detail-list">
             <div><span>Tunnel</span><b class="${session.tunnel.available ? "status-good" : "status-warn"}">${escapeHtml(session.tunnel.status)}</b></div>
-            <div><span>Host quality</span><b class="${session.network.score >= 70 ? "status-good" : "status-warn"}">${escapeHtml(session.network.quality)}</b></div>
-            <div><span>Upload</span><b>${escapeHtml(session.network.upload)}</b></div>
-            <div><span>Latency</span><b>${escapeHtml(session.network.latency)}</b></div>
+            <div><span>Default provider</span><b>${escapeHtml(defaultTunnelProvider?.name || "Automatic")}</b></div>
+            <div><span>Access</span><b>Host approval</b></div>
+            <div><span>Compiler</span><b class="${compilerReady ? "status-good" : "status-warn"}">${compilerReady ? "Ready" : "Fallback"}</b></div>
           </div>
         </aside>
       </div>
@@ -1735,17 +2333,25 @@ function projectView() {
 }
 
 function sessionView() {
-  const { project, session, compiler } = local.appState;
+  const { project, session } = local.appState;
   const isLive = session.status === "live";
+  const wasEnded = session.status === "ended";
   const hasInvite = Boolean(session.inviteUrl);
-  const tunnelLabel = session.tunnel.providerName
-    ? `${session.tunnel.status} via ${session.tunnel.providerName}`
-    : session.tunnel.status;
-  const inviteStatusText = hasInvite
-    ? session.inviteUrl
-    : session.tunnel.status === "Error"
-      ? "Public invite link is not available."
-      : "Creating verified public invite link...";
+  const inviteState = tunnelInviteState(session);
+  const providers = availableTunnelProviders(session);
+  const selectedProviderId = sessionTunnelProviderId(session);
+  const activePreferenceId = String(session.tunnel?.preferredProviderId || "");
+  const selectedProvider = selectedSessionTunnelProvider(session);
+  const providerSelectionDiffers = selectedProviderId !== activePreferenceId;
+  const canRefreshInvite = providers.length > 0 && !local.tunnelProviderSwitchBusy;
+  const providerHint = providerSelectionDiffers
+    ? isLive
+      ? `Refresh to use ${selectedProvider?.name || "Automatic"}. Your Settings default stays unchanged.`
+      : `This session will use ${selectedProvider?.name || "Automatic"}. Your Settings default stays unchanged.`
+    : selectedProvider?.hint || (providers.length ? "Automatic uses the first provider that verifies." : "No public-link providers were detected.");
+  const refreshActionLabel = local.tunnelProviderSwitchBusy ? "Refreshing..." : "Refresh link";
+  const visibleInviteUrl = compactInviteUrl(session.inviteUrl || "");
+  const projectFileCount = project.files.filter((item) => item.type !== "directory").length;
   const pending = session.joinRequests.filter((item) => item.status === "pending");
   const pendingMarkup = pending.length
     ? `<div class="approval-strip">
@@ -1756,15 +2362,15 @@ function sessionView() {
   return windowShell(`
     <div class="session-share-page">
       <header class="session-share-head">
-        <button class="icon-button project-back-icon" id="backHome" title="Back to home" aria-label="Back to home">
-          <span class="chevron-left" aria-hidden="true"></span>
+        <button class="btn session-back-button" id="backHome" title="Back to home">
+          ${icon("back")} <span>Back to Home</span>
         </button>
-        <div>
-          <span class="pill ${isLive ? "" : "pill-warn"}">${isLive ? "Session Live" : "Session Idle"}</span>
-          <h2>Session Management</h2>
-          <p>${isLive ? `${escapeHtml(project.name)} is online. Copy the invite link or open the editor.` : `Start hosting when you are ready to invite collaborators into ${escapeHtml(project.name)}.`}</p>
+        <div class="session-share-heading">
+          <span class="pill ${isLive ? "" : "pill-warn"}">${isLive ? "Live" : wasEnded ? "Ended" : "Not started"}</span>
+          <h2>Host session</h2>
+          <p>${isLive ? `${escapeHtml(project.name)} is ready to share.` : wasEnded ? "Sharing has stopped. Your project is still open on this computer." : `Start sharing ${escapeHtml(project.name)} when you are ready.`}</p>
         </div>
-        ${!isLive ? `<button class="btn btn-primary" data-start-session>${uiGlyph("users")} Host Online Session</button>` : ""}
+        ${isLive ? `<button class="btn btn-primary session-header-editor-button" id="openEditorFromSession" ${project.mainFile ? "" : "disabled"}>Open Editor</button>` : ""}
       </header>
 
       ${pendingMarkup}
@@ -1772,74 +2378,87 @@ function sessionView() {
       <div class="session-share-grid">
         <main class="session-share-main">
           <section class="session-invite-panel">
-            <div class="session-panel-title">${isLive ? "Invite Link" : "Host Session"}</div>
+            <div class="session-panel-title">${isLive ? "Share one invite link" : wasEnded ? "Session ended" : "Start sharing"}</div>
             ${isLive
-              ? `<div class="copy-box session-copy-box">
-                  <div class="copy-row">
-                    <code>${escapeHtml(inviteStatusText)}</code>
-                    <button class="icon-button copy-icon" id="copyInvite" title="Copy invite link" aria-label="Copy invite link" ${hasInvite ? "" : "disabled"}></button>
+              ? `<div class="session-link-state phase-${inviteState.phase}" aria-live="polite">
+                  <span class="session-link-state-dot" aria-hidden="true"></span>
+                  <div>
+                    <strong>${escapeHtml(inviteState.title)}</strong>
+                    <span>${escapeHtml(inviteState.detail)}</span>
                   </div>
-                  ${hasInvite ? "" : `<p class="muted">${escapeHtml(session.tunnel.detail)}</p>`}
+                </div>
+                ${hasInvite ? `<div class="copy-box session-copy-box">
+                  <div class="copy-row">
+                    <code title="${escapeHtml(session.inviteUrl)}">${escapeHtml(visibleInviteUrl)}</code>
+                    <button class="btn session-copy-button" id="copyInvite" title="Copy full invite link" aria-label="Copy full invite link">Copy link</button>
+                  </div>
+                  <p class="session-link-meta">Shortened for display. Copy keeps the complete verified link.</p>
+                </div>` : ""}
+                <p class="session-share-instruction"><strong>Send only this link.</strong> Your friend asks to join, then you approve access.</p>
+                <div class="session-provider-control">
+                  <div class="session-provider-choice">
+                    <label class="session-provider-field" for="sessionTunnelProvider">
+                      <span>Link provider</span>
+                      <select id="sessionTunnelProvider" ${providers.length && !local.tunnelProviderSwitchBusy ? "" : "disabled"}>
+                        ${tunnelProviderOptionsMarkup(session, selectedProviderId)}
+                      </select>
+                    </label>
+                    <span class="session-provider-hint">${escapeHtml(providerHint)}</span>
+                  </div>
+                  <button class="btn session-refresh-button" id="refreshInviteLink" ${canRefreshInvite ? "" : "disabled"} aria-busy="${local.tunnelProviderSwitchBusy ? "true" : "false"}">${uiGlyph("refresh")} ${refreshActionLabel}</button>
                 </div>
                 <div class="session-invite-actions">
-                  <button class="btn" id="copyInviteBottom" ${hasInvite ? "" : "disabled"}>Copy Invite Link</button>
-                  <button class="btn btn-danger" id="stopSession">Stop Session</button>
+                  <p class="session-refresh-note">Refreshing replaces the current invite link immediately. Anyone with the old link will need the new one.</p>
+                  <div class="session-stop-row">
+                    <span>End access for everyone without leaving this screen.</span>
+                    <button class="btn btn-danger session-stop-button" id="stopSession" ${local.sessionStopBusy ? "disabled" : ""}>${uiGlyph("stop")} ${local.sessionStopBusy ? "Stopping..." : "Stop sharing"}</button>
+                  </div>
                 </div>`
               : `<div class="session-empty-panel">
                   <div class="session-empty-copy">
                     <div class="session-empty-icon">${uiGlyph("users")}</div>
                     <div>
-                      <strong>No session is running</strong>
-                      <span>Friends can join only after you start hosting. Your project files stay on this computer.</span>
+                      <strong>${wasEnded ? "Sharing is off" : "No session is running"}</strong>
+                      <span>${wasEnded ? "The old invite link no longer works. Start again when you want to share." : "LocalLeaf will show one link after it has been verified."}</span>
                     </div>
                   </div>
-                  <button class="btn btn-primary" data-start-session>${uiGlyph("users")} Host Online Session</button>
-                </div>`}
+                  <button class="btn btn-primary" data-start-session ${local.sessionStartBusy ? "disabled" : ""}>${uiGlyph("users")} ${local.sessionStartBusy ? "Starting..." : wasEnded ? "Host again" : "Start hosting"}</button>
+                </div>
+                <div class="session-provider-control session-provider-control-idle">
+                  <div class="session-provider-choice">
+                    <label class="session-provider-field" for="sessionTunnelProvider">
+                      <span>Link provider</span>
+                      <select id="sessionTunnelProvider" ${providers.length ? "" : "disabled"}>
+                        ${tunnelProviderOptionsMarkup(session, selectedProviderId)}
+                      </select>
+                    </label>
+                    <span class="session-provider-hint">${escapeHtml(providerHint)}</span>
+                  </div>
+                </div>
+                <p class="session-share-instruction"><strong>One verified link, one approval step.</strong> You decide who enters.</p>`}
           </section>
-
-          <section class="session-health-card">
-            <div class="session-panel-title">Session Health</div>
-            <div class="session-health-list">
-              <div class="session-health-row"><span>Host quality</span><b class="${session.network.score >= 70 ? "status-good" : "status-warn"}">${escapeHtml(session.network.quality)}</b><span class="bars"><i></i><i></i><i></i><i></i><i></i></span><small>${session.network.score}%</small></div>
-              <div class="session-health-row"><span>Users</span><b>${session.users.length} / ${session.maxUsers}</b></div>
-              <div class="session-health-row"><span>Compiler</span><b class="${compiler.available ? "status-good" : "status-warn"}">${compiler.available ? "Ready" : "Fallback"}</b></div>
-              <div class="session-health-row"><span>Tunnel</span><b class="${session.tunnel.available ? "status-good" : "status-warn"}">${escapeHtml(tunnelLabel)}</b></div>
-              <div class="session-health-row"><span>Upload</span><b>${escapeHtml(session.network.upload)}</b></div>
-              <div class="session-health-row"><span>Latency</span><b>${escapeHtml(session.network.latency)}</b></div>
-            </div>
-          </section>
-
         </main>
 
         <aside class="session-share-side">
           <section class="session-side-card">
-            <div class="session-panel-title">Project</div>
-            <div class="session-project-mini">
+            <div class="session-project-summary">
               <strong>${escapeHtml(project.name)}</strong>
-              <span>${escapeHtml(project.root)}</span>
+              <span>${projectFileCount} ${projectFileCount === 1 ? "file" : "files"} · ${escapeHtml(project.sizeLabel)}</span>
             </div>
-            <div class="project-detail-list">
-              <div><span>Project size</span><b>${escapeHtml(project.sizeLabel)}</b></div>
-              <div><span>Files</span><b>${project.files.filter((item) => item.type !== "directory").length}</b></div>
-              <div><span>Collaborators</span><b>${session.users.length} / ${session.maxUsers}</b></div>
-            </div>
-          </section>
-
-          <section class="session-side-card">
-            <div class="session-panel-title">Users (${session.users.length})</div>
-            <div class="session-user-list">
+            <div class="session-side-divider"></div>
+            <div class="session-panel-title">${isLive ? `People (${session.users.length} / ${session.maxUsers})` : "Shared access"}</div>
+            ${isLive ? `<div class="session-user-list">
               ${session.users.map((user) => `
                 <div class="session-user-row">
                   <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
                   <div><strong>${escapeHtml(user.name)}${user.role === "host" ? " (You)" : ""}</strong><span>${escapeHtml(user.role)}</span></div>
-                  <span class="online-dot"></span>
+                  <span class="online-dot ${user.online ? "" : "offline"}" title="${user.online ? "Online" : "Offline"}"></span>
                 </div>
               `).join("")}
-            </div>
+            </div>` : `<p class="session-inactive-access">No collaborators can access this project while sharing is off.</p>`}
           </section>
         </aside>
       </div>
-      ${isLive ? `<button class="btn btn-primary session-open-editor-wide" id="openEditorFromSession" ${project.mainFile ? "" : "disabled"}>Open Editor</button>` : ""}
     </div>
   `, { rail: true, active: "session", dashboard: true, wide: true });
 }
@@ -1925,7 +2544,7 @@ function updateToastMarkup() {
 function appNoticeMarkup(notice, belowUpdate = false) {
   if (!notice?.message) return "";
   const type = notice.type || "info";
-  const iconText = type === "error" ? "!" : type === "success" ? "âœ“" : "i";
+  const iconText = type === "error" ? "!" : type === "success" ? "✓" : "i";
   return `
     <section class="app-notice app-notice-${escapeHtml(type)} ${belowUpdate ? "below-update" : ""}" role="status" aria-live="polite">
       <div class="app-notice-icon" aria-hidden="true">${escapeHtml(iconText)}</div>
@@ -2050,13 +2669,14 @@ async function checkForUpdates(options = {}) {
 }
 
 async function manualCheckForUpdates(event) {
+  const button = event?.currentTarget;
   const result = await checkForUpdates({ manual: true });
   if (result === "current") {
-    markUpdateButtonFeedback(event?.currentTarget, "Up to date");
+    markUpdateButtonFeedback(button, "Up to date");
   } else if (result === "available") {
-    markUpdateButtonFeedback(event?.currentTarget, "Update ready");
+    markUpdateButtonFeedback(button, "Update ready");
   } else if (result === "silent") {
-    markUpdateButtonFeedback(event?.currentTarget, "Could not check");
+    markUpdateButtonFeedback(button, "Could not check");
   }
 }
 
@@ -2154,22 +2774,69 @@ function playJoinRequestSound(request) {
   }
 }
 
-function hideSettingsModal() {
-  document.querySelector(".settings-modal-backdrop")?.remove();
+function installModalFocusManagement(backdrop, returnFocus) {
+  if (!backdrop) return;
+  backdrop._localleafReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : null;
+  backdrop.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const focusable = [...backdrop.querySelectorAll(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
+    )].filter((element) => element.getClientRects().length > 0);
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !backdrop.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !backdrop.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+}
+
+function removeModal(backdrop, options = {}) {
+  if (!backdrop) return;
+  const returnFocus = backdrop._localleafReturnFocus;
+  backdrop.remove();
+  if (options.restoreFocus !== false && returnFocus?.isConnected) {
+    window.setTimeout(() => returnFocus.focus({ preventScroll: true }), 0);
+  }
+}
+
+function hideSettingsModal(options = {}) {
+  removeModal(document.querySelector(".settings-modal-backdrop"), options);
 }
 
 function settingsTabButton(section, label) {
-  return `<button type="button" class="settings-tab ${local.settingsSection === section ? "active" : ""}" data-settings-section="${escapeHtml(section)}">${escapeHtml(label)}</button>`;
+  const active = local.settingsSection === section;
+  return `<button type="button" class="settings-tab ${active ? "active" : ""}" id="settingsTab-${escapeHtml(section)}" role="tab" aria-selected="${active ? "true" : "false"}" aria-controls="settingsPanel-${escapeHtml(section)}" tabindex="${active ? "0" : "-1"}" data-settings-section="${escapeHtml(section)}">${escapeHtml(label)}</button>`;
 }
 
 function themeSwitchMarkup() {
   const isDark = local.theme === "dark";
   return `
-    <button class="settings-theme-switch ${isDark ? "is-dark" : "is-light"}" id="themeModeSwitch" type="button" role="switch" aria-checked="${isDark ? "true" : "false"}" title="Switch between light and dark mode">
-      <span class="settings-theme-option settings-theme-sun" aria-hidden="true"><span></span></span>
-      <span class="settings-theme-option settings-theme-moon" aria-hidden="true"><span></span></span>
+    <button class="settings-theme-switch ${isDark ? "is-dark" : "is-light"}" id="themeModeSwitch" type="button" role="switch" aria-checked="${isDark ? "true" : "false"}" aria-label="Dark mode" title="${isDark ? "Switch to light mode" : "Switch to dark mode"}">
       <span class="settings-theme-thumb" aria-hidden="true"></span>
-      <span class="sr-only" data-theme-current>${isDark ? "Dark mode" : "Light mode"}</span>
+      <span class="settings-theme-option settings-theme-sun" aria-hidden="true">
+        <span class="settings-theme-icon-bound">
+          <svg class="settings-theme-icon" data-theme-icon="sun" viewBox="0 0 24 24" width="18" height="18" fill="none" focusable="false" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.25"></circle>
+            <path d="M12 2.75v2M12 19.25v2M2.75 12h2M19.25 12h2M5.46 5.46l1.42 1.42M17.12 17.12l1.42 1.42M18.54 5.46l-1.42 1.42M6.88 17.12l-1.42 1.42"></path>
+          </svg>
+        </span>
+      </span>
+      <span class="settings-theme-option settings-theme-moon" aria-hidden="true">
+        <span class="settings-theme-icon-bound">
+          <svg class="settings-theme-icon" data-theme-icon="moon" viewBox="0 0 24 24" width="18" height="18" fill="none" focusable="false" aria-hidden="true">
+            <path d="M19.75 15.35A8 8 0 0 1 8.65 4.25a8 8 0 1 0 11.1 11.1Z"></path>
+          </svg>
+        </span>
+      </span>
+      <span class="sr-only" data-theme-current>${isDark ? "Dark mode is on" : "Dark mode is off"}</span>
     </button>
   `;
 }
@@ -2183,7 +2850,7 @@ function settingToggleMarkup(key, title, detail, options = {}) {
           <span>${escapeHtml(detail)}</span>
         </div>
       </div>
-      ${miniSwitchMarkup({ checked: local.aiPermissions[key], attrs: `data-ai-permission="${escapeHtml(key)}"` })}
+      ${miniSwitchMarkup({ checked: local.aiPermissions[key], label: title, attrs: `data-ai-permission="${escapeHtml(key)}" aria-labelledby="${escapeHtml(key)}Title"` })}
     </section>
   `;
 }
@@ -2191,22 +2858,24 @@ function settingToggleMarkup(key, title, detail, options = {}) {
 function miniSwitchMarkup({ checked = false, disabled = false, label = "", attrs = "" } = {}) {
   return `
     <label class="settings-mini-switch" ${label ? `title="${escapeHtml(label)}"` : ""}>
-      <input type="checkbox" ${attrs} ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
-      <span></span>
+      <input type="checkbox" ${label ? `aria-label="${escapeHtml(label)}"` : ""} ${attrs} ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
+      <span aria-hidden="true"></span>
     </label>
   `;
 }
 
 function settingsGeneralMarkup() {
+  const tunnelProviders = availableTunnelProviders();
+  const preferredProvider = selectedTunnelProvider();
   return `
     <section class="settings-general settings-compact-page">
-      <div class="settings-general-hero">
+      <header class="settings-general-hero settings-section-intro">
         <span class="settings-general-mark" aria-hidden="true">${uiGlyph("settings")}</span>
         <div>
-          <h3>General</h3>
-          <p>Basic workspace preferences for this computer.</p>
+          <h3>Workspace defaults</h3>
+          <p>Choose how LocalLeaf behaves on this computer.</p>
         </div>
-      </div>
+      </header>
       <div class="settings-list-card settings-general-card">
         <section class="settings-list-row settings-theme-row">
           <div class="settings-list-main">
@@ -2224,7 +2893,18 @@ function settingsGeneralMarkup() {
               <span>Play a soft chime when someone asks to join your hosted session.</span>
             </div>
           </div>
-          ${miniSwitchMarkup({ checked: local.joinRequestSoundEnabled, attrs: `id="joinRequestSound"` })}
+          ${miniSwitchMarkup({ checked: local.joinRequestSoundEnabled, label: "Join request sound", attrs: `id="joinRequestSound"` })}
+        </section>
+        <section class="settings-list-row settings-tunnel-provider-row">
+          <div class="settings-list-main">
+            <div>
+              <strong>Default invite-link provider</strong>
+              <span>${escapeHtml(preferredProvider?.hint || "Automatic keeps the first provider that produces a verified public link.")}</span>
+            </div>
+          </div>
+          <select class="settings-tunnel-provider-select" id="defaultTunnelProvider" aria-label="Default invite-link provider" ${tunnelProviders.length ? "" : "disabled"}>
+            ${tunnelProviderOptionsMarkup()}
+          </select>
         </section>
         <section class="settings-list-row">
           <div class="settings-list-main">
@@ -2233,7 +2913,7 @@ function settingsGeneralMarkup() {
               <span>Quietly check the LocalLeaf release page when the app opens.</span>
             </div>
           </div>
-          ${miniSwitchMarkup({ checked: local.autoUpdateChecks, attrs: `id="autoUpdateChecks"` })}
+          ${miniSwitchMarkup({ checked: local.autoUpdateChecks, label: "Auto-check updates", attrs: `id="autoUpdateChecks"` })}
         </section>
       </div>
     </section>
@@ -2312,7 +2992,7 @@ function providerRowMarkup(provider) {
         <div>
           <strong>${escapeHtml(provider.name)}</strong>
           <span>${escapeHtml(provider.baseUrl || provider.description || "Connected provider")}</span>
-          ${test?.message ? `<small class="provider-test-result ${escapeHtml(test.color || (test.ok ? "green" : "red"))}" data-provider-test-slot="${escapeHtml(provider.id)}">${escapeHtml(test.message)}</small>` : `<small class="provider-test-result muted" data-provider-test-slot="${escapeHtml(provider.id)}">Test result will appear here.</small>`}
+          ${test?.message ? `<small class="provider-test-result ${escapeHtml(test.color || (test.ok ? "green" : "red"))}" data-provider-test-slot="${escapeHtml(provider.id)}">${escapeHtml(test.message)}</small>` : `<small class="provider-test-result muted" data-provider-test-slot="${escapeHtml(provider.id)}" hidden></small>`}
         </div>
       </div>
       <div class="settings-list-actions">
@@ -2433,10 +3113,16 @@ function settingsModelsMarkup() {
   const providerGroups = connected.map(providerModelGroupMarkup).filter(Boolean).join("");
   return `
     <section class="settings-models settings-compact-page">
-      <input class="settings-model-search" id="settingsModelSearch" value="${escapeHtml(local.settingsModelSearch)}" placeholder="Search models" autocomplete="off" />
-      <div class="settings-model-toolbar">
-        <button class="btn" id="bringYourOwnKey" type="button">${uiGlyph("plus")} Connect provider</button>
-        <button class="btn" id="configureCustomModel" type="button">${uiGlyph("settings")} Custom</button>
+      <div class="settings-model-tools">
+        <label class="settings-model-search-wrap" for="settingsModelSearch">
+          <span class="sr-only">Search models</span>
+          ${editorToolIcon("search")}
+          <input class="settings-model-search" id="settingsModelSearch" type="search" value="${escapeHtml(local.settingsModelSearch)}" placeholder="Search models" autocomplete="off" />
+        </label>
+        <div class="settings-model-toolbar">
+          <button class="btn" id="bringYourOwnKey" type="button">${uiGlyph("plus")} Connect provider</button>
+          <button class="btn" id="configureCustomModel" type="button">${uiGlyph("settings")} Custom</button>
+        </div>
       </div>
       <h3 class="settings-model-heading">Provider models</h3>
       ${providerGroups || `<div class="settings-empty-row">Connect a provider to show hosted models here.</div>`}
@@ -2448,10 +3134,13 @@ function settingsModelsMarkup() {
 function settingsPermissionsMarkup() {
   return `
     <section class="settings-permission-page settings-compact-page">
-      <div class="settings-permission-note">
-        <strong>AI Helper permissions</strong>
-        <span>These controls are sent with each AI chat request and decide what the active model is allowed to propose or auto-apply.</span>
-      </div>
+      <header class="settings-permission-note settings-section-intro">
+        <span class="settings-general-mark" aria-hidden="true">${uiGlyph("ai")}</span>
+        <div>
+          <strong>AI Helper permissions</strong>
+          <span>Control what the active model may propose or apply for each request.</span>
+        </div>
+      </header>
       <h3 class="settings-model-heading">Edit Flow</h3>
       <div class="settings-permission-list settings-list-card">
         ${settingToggleMarkup("askBeforeEdits", "Default permissions", "Show approval cards before LocalLeaf writes any proposed file change.")}
@@ -2465,7 +3154,7 @@ function settingsPermissionsMarkup() {
       </div>
       <h3 class="settings-model-heading">Advanced Actions</h3>
       <div class="settings-permission-list settings-list-card">
-        ${settingToggleMarkup("fileManagement", "Create, rename, move, and delete", "Allow the AI Helper to handle project file-management requests.", { warning: true })}
+        ${settingToggleMarkup("fileManagement", "Create, rename, move, and delete", "Allow project file-management requests. New files always require host approval.", { warning: true })}
         ${settingToggleMarkup("fileUploads", "Uploads and imports", "Allow the AI Helper to discuss upload/import actions for project assets.", { warning: true })}
         ${settingToggleMarkup("shellCommands", "Shell commands", "Allow command or terminal requests to reach the active model.", { warning: true })}
         ${settingToggleMarkup("binaryFiles", "Binary files", "Allow binary-file requests such as images, PDFs, or other assets.", { warning: true })}
@@ -2475,19 +3164,21 @@ function settingsPermissionsMarkup() {
 }
 
 function showSettingsModal(section = "general") {
-  hideSettingsModal();
+  const existingModal = document.querySelector(".settings-modal-backdrop");
+  const returnFocus = existingModal?._localleafReturnFocus || document.activeElement;
+  removeModal(existingModal, { restoreFocus: false });
   const allowedSections = new Set(["general", "providers", "models", "permissions"]);
   local.settingsSection = allowedSections.has(section) ? section : "general";
   const shell = document.querySelector(".editor-shell") || app;
   shell.insertAdjacentHTML("beforeend", `
     <div class="settings-modal-backdrop" role="presentation">
-      <section class="settings-modal settings-modal-wide settings-preferences-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <section class="settings-modal settings-modal-wide settings-preferences-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" aria-describedby="settingsSubtitle">
         <div class="settings-modal-head">
           <div>
             <h2 id="settingsTitle">LocalLeaf Settings</h2>
-            <p>Simple workspace preferences for this app.</p>
+            <p id="settingsSubtitle">Workspace, provider, model, and AI preferences.</p>
           </div>
-          <button class="icon-button" data-close-settings title="Close settings" aria-label="Close settings">x</button>
+          <button class="icon-button dialog-close-button" data-close-settings title="Close settings" aria-label="Close settings"><svg class="dialog-close-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg></button>
         </div>
         <div class="settings-tabs" role="tablist" aria-label="Settings sections">
           ${settingsTabButton("general", "General")}
@@ -2496,16 +3187,16 @@ function showSettingsModal(section = "general") {
           ${settingsTabButton("permissions", "AI Permissions")}
         </div>
         <div class="settings-options">
-          <div class="settings-section" data-settings-panel="general" ${local.settingsSection === "general" ? "" : "hidden"}>
+          <div class="settings-section" id="settingsPanel-general" role="tabpanel" aria-labelledby="settingsTab-general" tabindex="0" data-settings-panel="general" ${local.settingsSection === "general" ? "" : "hidden"}>
             ${settingsGeneralMarkup()}
           </div>
-          <div class="settings-section" data-settings-panel="models" ${local.settingsSection === "models" ? "" : "hidden"}>
+          <div class="settings-section" id="settingsPanel-models" role="tabpanel" aria-labelledby="settingsTab-models" tabindex="0" data-settings-panel="models" ${local.settingsSection === "models" ? "" : "hidden"}>
             ${settingsModelsMarkup()}
           </div>
-          <div class="settings-section" data-settings-panel="providers" ${local.settingsSection === "providers" ? "" : "hidden"}>
+          <div class="settings-section" id="settingsPanel-providers" role="tabpanel" aria-labelledby="settingsTab-providers" tabindex="0" data-settings-panel="providers" ${local.settingsSection === "providers" ? "" : "hidden"}>
             ${settingsProvidersMarkup()}
           </div>
-          <div class="settings-section" data-settings-panel="permissions" ${local.settingsSection === "permissions" ? "" : "hidden"}>
+          <div class="settings-section" id="settingsPanel-permissions" role="tabpanel" aria-labelledby="settingsTab-permissions" tabindex="0" data-settings-panel="permissions" ${local.settingsSection === "permissions" ? "" : "hidden"}>
             ${settingsPermissionsMarkup()}
           </div>
         </div>
@@ -2514,19 +3205,42 @@ function showSettingsModal(section = "general") {
   `);
 
   const modal = document.querySelector(".settings-modal-backdrop");
+  installModalFocusManagement(modal, returnFocus);
   modal?.addEventListener("click", (event) => {
     if (event.target === modal) hideSettingsModal();
   });
-  modal?.querySelectorAll("[data-settings-section]").forEach((button) => {
-    button.addEventListener("click", () => {
-      local.settingsSection = button.dataset.settingsSection || "general";
-      modal.querySelectorAll("[data-settings-section]").forEach((tab) => tab.classList.toggle("active", tab === button));
-      modal.querySelectorAll("[data-settings-panel]").forEach((panel) => {
-        panel.hidden = panel.dataset.settingsPanel !== local.settingsSection;
-      });
+  modal?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideSettingsModal();
+  });
+  const settingsTabs = [...(modal?.querySelectorAll("[data-settings-section]") || [])];
+  const activateSettingsTab = (button) => {
+    local.settingsSection = button.dataset.settingsSection || "general";
+    settingsTabs.forEach((tab) => {
+      const active = tab === button;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+      tab.tabIndex = active ? 0 : -1;
+    });
+    modal.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.settingsPanel !== local.settingsSection;
+    });
+  };
+  settingsTabs.forEach((button, index) => {
+    button.addEventListener("click", () => activateSettingsTab(button));
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? settingsTabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + settingsTabs.length) % settingsTabs.length;
+      activateSettingsTab(settingsTabs[nextIndex]);
+      settingsTabs[nextIndex].focus();
     });
   });
   modal?.querySelector("[data-close-settings]")?.addEventListener("click", hideSettingsModal);
+  modal?.querySelector('[role="tab"][aria-selected="true"]')?.focus();
   modal?.querySelector("#themeModeSwitch")?.addEventListener("click", (event) => {
     const nextTheme = local.theme === "dark" ? "light" : "dark";
     applyTheme(nextTheme);
@@ -2535,14 +3249,24 @@ function showSettingsModal(section = "general") {
     switcher.classList.toggle("is-dark", isDark);
     switcher.classList.toggle("is-light", !isDark);
     switcher.setAttribute("aria-checked", isDark ? "true" : "false");
+    switcher.setAttribute("title", isDark ? "Switch to light mode" : "Switch to dark mode");
     const label = switcher.querySelector("[data-theme-current]");
-    if (label) label.textContent = isDark ? "Dark mode" : "Light mode";
+    if (label) label.textContent = isDark ? "Dark mode is on" : "Dark mode is off";
   });
   modal?.querySelector("#autoUpdateChecks")?.addEventListener("change", (event) => {
     setAutoUpdateChecks(event.currentTarget.checked);
   });
   modal?.querySelector("#joinRequestSound")?.addEventListener("change", (event) => {
     setJoinRequestSoundEnabled(event.currentTarget.checked);
+  });
+  modal?.querySelector("#defaultTunnelProvider")?.addEventListener("change", (event) => {
+    if (!setPreferredTunnelProvider(event.currentTarget.value)) return;
+    const provider = selectedTunnelProvider();
+    showAppNotice(provider ? `${provider.name} will be used for new invite links.` : "Invite links will use the first provider that verifies.", {
+      type: "success",
+      title: "Invite-link provider",
+      timeoutMs: 3200
+    });
   });
   modal?.querySelector("#chooseModelFolder")?.addEventListener("click", chooseModelFolder);
   modal?.querySelector("#bringYourOwnKey")?.addEventListener("click", () => showProviderDialog({ mode: "key" }));
@@ -2630,10 +3354,12 @@ function providerFormRows(items, name, keyName, valueName) {
   return rows.map((item) => {
     const key = typeof item === "string" ? item : item?.[keyName] || item?.id || item?.name || "";
     const value = typeof item === "string" ? "" : item?.[valueName] || item?.value || "";
+    const contextWindowTokens = typeof item === "string" ? "" : item?.contextWindowTokens || "";
     return `
       <div class="provider-form-row" data-provider-row="${escapeHtml(name)}">
         <input name="${escapeHtml(name)}-${escapeHtml(keyName)}" placeholder="${escapeHtml(keyName === "model" ? "Model name" : "Header")}" value="${escapeHtml(key)}" />
         <input name="${escapeHtml(name)}-${escapeHtml(valueName)}" placeholder="${escapeHtml(valueName === "value" ? "Value" : "Alias")}" value="${escapeHtml(value)}" />
+        ${name === "model" ? `<input name="model-context-window" type="number" inputmode="numeric" min="1024" max="10000000" step="1" placeholder="Context tokens (optional)" value="${escapeHtml(contextWindowTokens)}" aria-label="Context window tokens for ${escapeHtml(value || key || "model")}" />` : ""}
         <button class="icon-button" type="button" data-remove-provider-row title="Remove row" aria-label="Remove row">x</button>
       </div>
     `;
@@ -2648,14 +3374,22 @@ function providerTemplateOptions(selectedId = "") {
 }
 
 function showProviderDialog(options = {}) {
-  document.querySelector(".provider-modal-backdrop")?.remove();
+  const existingModal = document.querySelector(".provider-modal-backdrop");
+  const returnFocus = existingModal?._localleafReturnFocus || document.activeElement;
+  removeModal(existingModal, { restoreFocus: false });
   local.providerDialogTest = null;
+  const customMode = options.mode === "custom";
   const provider = options.providerId
     ? aiProviders().find((item) => item.id === options.providerId)
     : options.templateId
       ? aiProviders().find((item) => item.id === options.templateId)
-      : aiProviders().find((item) => item.id === "opencode-go") || null;
-  const title = options.mode === "key" ? "Connect Provider" : provider ? "Edit Provider" : "Configure Custom Model";
+      : customMode
+        ? null
+        : aiProviders().find((item) => item.id === "opencode-go") || null;
+  const title = options.mode === "key" ? "Connect Provider" : provider ? "Edit Provider" : "Add Custom Provider";
+  const subtitle = customMode
+    ? "Add an OpenAI-compatible endpoint and the model IDs you want LocalLeaf to show."
+    : "Connect a provider and choose the models LocalLeaf can show in the picker.";
   const shell = document.querySelector(".editor-shell") || app;
   shell.insertAdjacentHTML("beforeend", `
     <div class="settings-modal-backdrop provider-modal-backdrop" role="presentation">
@@ -2664,7 +3398,7 @@ function showProviderDialog(options = {}) {
           <div class="settings-modal-head">
             <div>
               <h2 id="providerDialogTitle">${escapeHtml(title)}</h2>
-              <p>Connect an OpenCode-style provider and choose the models LocalLeaf can show in the picker.</p>
+              <p>${escapeHtml(subtitle)}</p>
             </div>
             <button class="icon-button" data-close-provider type="button" title="Close provider dialog" aria-label="Close provider dialog">x</button>
           </div>
@@ -2672,7 +3406,7 @@ function showProviderDialog(options = {}) {
             <label>Provider preset
               <select name="templateId">
                 <option value="">Custom Provider</option>
-                ${providerTemplateOptions(provider?.id || "")}
+                ${providerTemplateOptions(provider?.builtin ? provider.id : "")}
               </select>
             </label>
             <label>Provider ID <input name="providerId" required value="${escapeHtml(provider?.id || "")}" placeholder="openai-compatible" /></label>
@@ -2685,7 +3419,7 @@ function showProviderDialog(options = {}) {
                 <button class="btn" type="button" data-add-model-row>${uiGlyph("plus")} Add model</button>
               </div>
               <div class="provider-form-rows" data-provider-rows="models">
-                ${providerFormRows(provider?.models || ["default"], "model", "model", "alias")}
+                ${providerFormRows(provider?.models || [""], "model", "model", "alias")}
               </div>
             </section>
             <section class="provider-form-section">
@@ -2708,11 +3442,16 @@ function showProviderDialog(options = {}) {
     </div>
   `);
   const modal = document.querySelector(".provider-modal-backdrop");
-  const close = () => modal?.remove();
+  installModalFocusManagement(modal, returnFocus);
+  const close = () => removeModal(modal);
   modal?.addEventListener("click", (event) => {
     if (event.target === modal) close();
   });
   modal?.querySelector("[data-close-provider]")?.addEventListener("click", close);
+  modal?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") close();
+  });
+  modal?.querySelector('input[name="displayName"]')?.focus();
   modal?.querySelector("[data-add-model-row]")?.addEventListener("click", () => addProviderFormRow("models"));
   modal?.querySelector("[data-add-header-row]")?.addEventListener("click", () => addProviderFormRow("headers"));
   modal?.querySelector('select[name="templateId"]')?.addEventListener("change", (event) => {
@@ -2747,6 +3486,7 @@ function addProviderFormRow(group) {
     <div class="provider-form-row" data-provider-row="${isModel ? "model" : "header"}">
       <input name="${isModel ? "model-model" : "header-name"}" placeholder="${isModel ? "Model name" : "Header"}" />
       <input name="${isModel ? "model-alias" : "header-value"}" placeholder="${isModel ? "Alias" : "Value"}" />
+      ${isModel ? `<input name="model-context-window" type="number" inputmode="numeric" min="1024" max="10000000" step="1" placeholder="Context tokens (optional)" aria-label="Context window tokens" />` : ""}
       <button class="icon-button" type="button" data-remove-provider-row title="Remove row" aria-label="Remove row">x</button>
     </div>
   `);
@@ -2760,7 +3500,12 @@ function formProviderPayload() {
     .map((row) => {
       const id = row.querySelector('input[name="model-model"]')?.value.trim();
       const name = row.querySelector('input[name="model-alias"]')?.value.trim() || id;
-      return id ? { id, name } : null;
+      const contextValue = row.querySelector('input[name="model-context-window"]')?.value.trim() || "";
+      return id ? {
+        id,
+        name,
+        contextWindowTokens: contextValue ? Number(contextValue) : null
+      } : null;
     })
     .filter(Boolean);
   const headers = [...form.querySelectorAll('[data-provider-row="header"]')]
@@ -2769,15 +3514,17 @@ function formProviderPayload() {
       value: row.querySelector('input[name="header-value"]')?.value.trim()
     }))
     .filter((header) => header.name);
+  const templateId = String(formData.get("templateId") || "").trim();
   return {
     id: String(formData.get("providerId") || "").trim(),
-    templateId: String(formData.get("templateId") || "").trim(),
+    templateId,
     name: String(formData.get("displayName") || "").trim(),
     baseUrl: String(formData.get("baseUrl") || "").trim(),
     apiKey: String(formData.get("apiKey") || "").trim(),
     models: models.length ? models : [{ id: "default", name: "Default" }],
     headers,
     description: "Custom OpenAI-compatible provider.",
+    custom: !templateId,
     activate: true
   };
 }
@@ -2794,7 +3541,7 @@ async function saveProviderFromDialog() {
     const next = await api("/api/ai/providers/save", { method: "POST", body: payload });
     setProviderEnabled(provider.id, true);
     local.appState.ai = { ...(local.appState.ai || {}), ...next };
-    document.querySelector(".provider-modal-backdrop")?.remove();
+    removeModal(document.querySelector(".provider-modal-backdrop"));
     showAppNotice(`${provider.name} saved.`, { type: "success", title: "Provider", timeoutMs: 3200 });
     if (document.querySelector(".settings-modal-backdrop")) showSettingsModal("models");
     else render();
@@ -2975,62 +3722,82 @@ async function activateModel(modelId) {
 }
 
 function showInfoModal(kind) {
-  document.querySelector(".info-modal-backdrop")?.remove();
+  const existingModal = document.querySelector(".info-modal-backdrop");
+  const returnFocus = existingModal?._localleafReturnFocus || document.activeElement;
+  removeModal(existingModal, { restoreFocus: false });
   const isHelp = kind === "help";
   const shell = document.querySelector(".editor-shell") || app;
   const helpItems = [
-    ["Start collaborating", "Create or import a project, choose Host Online Session, then share the invite link after the tunnel is ready."],
-    ["Compile a project", "Open the editor and click Recompile. LocalLeaf tries bundled Tectonic, system Tectonic, latexmk, pdflatex, xelatex, and lualatex."],
-    ["Export work", "Use Export in the editor to download the source ZIP or the latest compiled PDF."],
-    ["Review AI edits", "AI Helper drafts file edits and lists them in Changes, where you can apply or reject each one."]
+    ["Share a project", "Open Session, choose an invite-link provider, and wait for the link to verify before sharing it with one friend."],
+    ["Compile and preview", "As the host, use Recompile in the editor. If a compile fails, LocalLeaf keeps the last good PDF available while you fix the source."],
+    ["Export your work", "Use Export in the editor to download the source ZIP or the latest compiled PDF."],
+    ["Review AI changes", "AI Helper drafts file edits and lists them in Changes, where you can review each proposal before it is applied."]
   ];
   shell.insertAdjacentHTML("beforeend", `
     <div class="settings-modal-backdrop info-modal-backdrop" role="presentation">
-      <section class="settings-modal info-modal" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
+      <section class="settings-modal info-modal info-modal-${isHelp ? "help" : "about"}" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle" aria-describedby="infoModalSubtitle">
         <div class="settings-modal-head">
           <div>
-            <h2 id="infoModalTitle">${isHelp ? "LocalLeaf Help" : "About LocalLeaf"}</h2>
-            <p>${isHelp ? "Fast answers for the flows you will use most." : "Private, host-powered LaTeX collaboration."}</p>
+            <h2 id="infoModalTitle">${isHelp ? "LocalLeaf help" : "About LocalLeaf"}</h2>
+            <p id="infoModalSubtitle">${isHelp ? "Short answers for the core desktop workflow." : "Private, host-powered LaTeX collaboration."}</p>
           </div>
-          <button class="icon-button" data-close-info title="Close" aria-label="Close">x</button>
+          <button class="icon-button dialog-close-button" data-close-info title="Close" aria-label="Close"><svg class="dialog-close-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg></button>
         </div>
         ${isHelp ? `
           <div class="info-modal-body help-qa-list">
             ${helpItems.map(([question, answer], index) => `
               <details ${index === 0 ? "open" : ""}>
                 <summary>
-                  <span>${String(index + 1).padStart(2, "0")}</span>
+                  <span class="help-step">${String(index + 1).padStart(2, "0")}</span>
                   <strong>${escapeHtml(question)}</strong>
+                  <span class="help-disclosure">
+                    <span class="help-disclosure-label help-disclosure-label-collapsed">Show answer</span>
+                    <span class="help-disclosure-label help-disclosure-label-expanded">Hide answer</span>
+                    <span class="help-disclosure-icon-bound" aria-hidden="true">
+                      <svg class="help-disclosure-icon" viewBox="0 0 24 24" focusable="false">
+                        <path d="m9 6 6 6-6 6"></path>
+                      </svg>
+                    </span>
+                  </span>
                 </summary>
-                <p>${escapeHtml(answer)}</p>
+                <div class="help-answer"><p>${escapeHtml(answer)}</p></div>
               </details>
             `).join("")}
           </div>
         ` : `
-          <div class="info-modal-body about-copy">
-            <div class="about-hero-card">
-              <div class="about-brand-card">
-                ${logoMark("about-brand-mark")}
-                <div>
-                  <strong>LocalLeaf Host</strong>
-                  <span>Overleaf-style editing, owned by the host computer.</span>
-                </div>
+          <div class="info-modal-body about-editorial">
+            <section class="about-intro" aria-labelledby="aboutProductName">
+              <div class="about-intro-heading">
+                <strong class="about-product-name" id="aboutProductName">LocalLeaf</strong>
+                <p class="about-product-line">A local writing room for LaTeX projects.</p>
               </div>
-              <div>
-                <span class="about-version-pill">Private by design</span>
-                <span class="about-version-pill">Host powered</span>
+              <div class="about-values" aria-label="Product principles">
+                <span>Private by design</span>
+                <span>Host powered</span>
               </div>
-            </div>
-            <p>LocalLeaf keeps LaTeX projects on the host machine while guests join from a browser to edit, chat, compile, and preview PDFs together.</p>
-            <div class="about-feature-grid">
-              <span><b>${uiGlyph("file")}</b><strong>Local files</strong><small>Projects stay on this computer.</small></span>
-              <span><b>${uiGlyph("users")}</b><strong>Browser guests</strong><small>Friends join from one invite link.</small></span>
-              <span><b>${uiGlyph("compile")}</b><strong>PDF compile</strong><small>Bundled compiler plus fallback engines.</small></span>
-              <span><b>${uiGlyph("chat")}</b><strong>Project chat</strong><small>Talk while editing the same LaTeX files.</small></span>
-            </div>
+              <p class="about-summary">Projects stay on the host computer. Approved guests join from a browser to write and chat while the host compiles the PDF everyone reviews.</p>
+            </section>
+            <dl class="about-detail-list">
+              <div class="about-detail">
+                <dt>Local files</dt>
+                <dd>Source remains on this computer.</dd>
+              </div>
+              <div class="about-detail">
+                <dt>Approved guests</dt>
+                <dd>Friends join from one verified link.</dd>
+              </div>
+              <div class="about-detail">
+                <dt>Host compile</dt>
+                <dd>The host creates the shared PDF.</dd>
+              </div>
+              <div class="about-detail">
+                <dt>Project chat</dt>
+                <dd>Conversation stays beside the work.</dd>
+              </div>
+            </dl>
             <div class="about-footer-row">
-              <a class="btn btn-primary about-website-link" href="${LOCALLEAF_SITE_URL}" target="_blank" rel="noopener">Open LocalLeaf website ${uiGlyph("external")}</a>
-              <span>Built for student groups and quick self-hosted sessions.</span>
+              <span>Built for focused, self-hosted writing sessions.</span>
+              <a class="btn about-website-link" href="${LOCALLEAF_SITE_URL}" target="_blank" rel="noopener">Visit website</a>
             </div>
           </div>
         `}
@@ -3038,10 +3805,16 @@ function showInfoModal(kind) {
     </div>
   `);
   const modal = document.querySelector(".info-modal-backdrop");
+  installModalFocusManagement(modal, returnFocus);
+  const closeInfo = () => removeModal(modal);
   modal?.addEventListener("click", (event) => {
-    if (event.target === modal) modal.remove();
+    if (event.target === modal) closeInfo();
   });
-  modal?.querySelector("[data-close-info]")?.addEventListener("click", () => modal.remove());
+  modal?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeInfo();
+  });
+  modal?.querySelector("[data-close-info]")?.addEventListener("click", closeInfo);
+  modal?.querySelector("[data-close-info]")?.focus();
 }
 
 function showHelpModal() {
@@ -4115,7 +4888,7 @@ function outlineTreeMarkup(outlineItems = [], currentTitle = "") {
         const active = currentTitle && item.title === currentTitle;
         return `
           <button class="outline-row ${active ? "active" : ""}" type="button" role="treeitem" style="--outline-depth:${item.level}">
-            <span class="outline-caret" aria-hidden="true">${hasChildren ? "âŒ„" : ""}</span>
+            <span class="outline-caret" aria-hidden="true">${hasChildren ? "⌄" : ""}</span>
             <span class="outline-title">${escapeHtml(item.title)}</span>
           </button>
         `;
@@ -4296,10 +5069,25 @@ function tablePickerMarkup() {
 
 function compiledPreviewMarkup() {
   const state = local.appState;
-  if (state.compile.mode === "pdf") {
-    return `<div class="pdf-preview-mount" data-pdf-url="${escapeHtml(authUrl(`/api/pdf?v=${state.compile.version}`))}"></div>`;
+  if (state.compile.mode === "pdf" && state.compile.pdfAvailable) {
+    return `<div class="pdf-preview-mount" data-pdf-url="${escapeHtml(authUrl(`/api/pdf?v=${state.compile.version}`))}" data-pdf-version="${Number(state.compile.version || 0)}" data-pdf-artifact-id="${escapeHtml(state.compile.artifactId || "")}"></div>`;
   }
   return state.compile.previewHtml || `<article class="paper-preview"><header class="paper-title"><h1>Compile to Preview</h1><p>Click Recompile to render the document preview.</p></header></article>`;
+}
+
+function compileUsesLastGoodPreview(compile = local.appState?.compile || {}) {
+  return Boolean(
+    compile.previewStale
+    || compile.usingPreviousPdf
+    || compile.isStale
+    || (compile.status === "failed" && compile.mode === "pdf" && compile.pdfPath)
+  );
+}
+
+function compileBusyLabel() {
+  return local.compilePhase === "saving"
+    ? "Saving changes before compile"
+    : `Compiling ${local.appState?.project?.mainFile || "project"}`;
 }
 
 function capturePreviewScroll(previewPane = document.querySelector("#previewPane")) {
@@ -4341,6 +5129,7 @@ function previewActionsMarkup(compile = local.appState?.compile || {}) {
     return `<span>${escapeHtml(compile.status || "")}</span>`;
   }
   return `
+    ${compileUsesLastGoodPreview(compile) ? `<span class="compile-stale-note" title="The latest compile failed. This PDF is from the last successful compile.">Last good PDF</span>` : ""}
     <div class="pdf-zoom-controls" aria-label="PDF zoom controls">
       <button class="pdf-zoom-button" id="pdfZoomOut" type="button" title="Zoom out" aria-label="Zoom out">-</button>
       <span class="pdf-zoom-value" id="pdfZoomValue">${Math.round(local.pdfScale * 100)}%</span>
@@ -4348,6 +5137,7 @@ function previewActionsMarkup(compile = local.appState?.compile || {}) {
     </div>
     <a class="pdf-link" href="${authUrl(`/api/pdf?v=${compile.version}`)}" target="_blank" rel="noopener">PDF</a>
     ${compile.sourceMapAvailable ? `<span class="pdf-source-chip">SyncTeX</span>` : ""}
+    <span class="pdf-source-status" id="pdfSourceStatus" role="status" aria-live="polite" title="${escapeHtml(pdfSourceStatusTitle())}">${escapeHtml(pdfSourceStatusLabel())}</span>
     <button class="pdf-annotate-button ${local.pdfAnnotateMode ? "active" : ""}" id="pdfAnnotateButton" type="button" title="Annotate PDF with AI" aria-label="Annotate PDF with AI" aria-pressed="${local.pdfAnnotateMode ? "true" : "false"}">
       ${editorToolIcon("annotate")}
       <span>Annotate</span>
@@ -4478,15 +5268,44 @@ function updatePdfZoomUi() {
   if (label) label.textContent = `${Math.round(local.pdfScale * 100)}%`;
 }
 
+function beginPdfPreviewMount(previewPane, pdfUrl, scrollState = null, identity = {}) {
+  if (!previewPane || !pdfUrl || !window.LocalLeafPdfPreview?.mount) return false;
+  const bindRetry = () => {
+    const retry = previewPane.querySelector("[data-pdf-retry]");
+    if (!retry) return;
+    const replacement = retry.cloneNode(true);
+    retry.replaceWith(replacement);
+    replacement.addEventListener("click", () => {
+      beginPdfPreviewMount(
+        previewPane,
+        pdfUrl,
+        window.LocalLeafPdfPreview?.captureScroll?.(previewPane),
+        identity
+      );
+    });
+  };
+
+  window.LocalLeafPdfPreview.mount(previewPane, {
+    url: pdfUrl,
+    scale: local.pdfScale,
+    scrollState,
+    artifactId: String(identity.artifactId || ""),
+    version: Number(identity.version || 0),
+    onError: () => {
+      setTimeout(bindRetry, 0);
+    }
+  });
+  return true;
+}
+
 function mountPdfPreview(scrollState = null) {
   const previewPane = document.querySelector("#previewPane");
   const marker = previewPane?.querySelector(".pdf-preview-mount");
   if (!previewPane || !marker || !window.LocalLeafPdfPreview?.mount) return false;
   if (local.appState?.compile?.status === "running") return false;
-  window.LocalLeafPdfPreview.mount(previewPane, {
-    url: marker.dataset.pdfUrl,
-    scale: local.pdfScale,
-    scrollState
+  beginPdfPreviewMount(previewPane, marker.dataset.pdfUrl, scrollState, {
+    artifactId: marker.dataset.pdfArtifactId,
+    version: marker.dataset.pdfVersion
   });
   updatePdfZoomUi();
   bindPdfPreviewInteractions();
@@ -4528,6 +5347,15 @@ function setPdfAnnotateMode(enabled, options = {}) {
   updatePdfAnnotateUi();
 }
 
+let pdfAnnotationPointerFrame = 0;
+let pendingPdfAnnotationPointer = null;
+
+function cancelPendingPdfAnnotationPointer() {
+  pendingPdfAnnotationPointer = null;
+  if (pdfAnnotationPointerFrame) cancelAnimationFrame(pdfAnnotationPointerFrame);
+  pdfAnnotationPointerFrame = 0;
+}
+
 function bindPdfPreviewControls() {
   document.querySelector("#pdfZoomOut")?.addEventListener("click", () => setPdfScale(local.pdfScale - 0.1));
   document.querySelector("#pdfZoomIn")?.addEventListener("click", () => setPdfScale(local.pdfScale + 0.1));
@@ -4554,6 +5382,7 @@ function bindPdfPreviewInteractions() {
   previewPane.addEventListener("click", handlePdfPreviewClick);
   previewPane.addEventListener("pointermove", handlePdfAnnotationPointerMove, { passive: true });
   previewPane.addEventListener("pointerleave", () => {
+    cancelPendingPdfAnnotationPointer();
     if (!local.pdfAnnotationPopover) removePdfAnnotationOutline();
   }, { passive: true });
   updatePdfAnnotateUi();
@@ -4562,20 +5391,23 @@ function bindPdfPreviewInteractions() {
 function pdfClickTarget(event) {
   const page = event.target.closest?.(".pdf-page[data-page-number]");
   if (!page) return null;
+  const previewMount = page.closest?.(".pdf-preview-mount");
   const rect = page.getBoundingClientRect();
   const pageNumber = Number(page.dataset.pageNumber || 1);
-  const targetPreview = pdfAnnotationTargetAtPoint(page, event.clientX, event.clientY);
+  const targetPreview = pdfAnnotationTargetAtPoint(page, event.clientX, event.clientY, rect);
   const x = Math.max(0, (event.clientX - rect.left) / Math.max(0.1, local.pdfScale));
   const y = Math.max(0, (event.clientY - rect.top) / Math.max(0.1, local.pdfScale));
   return {
     page: pageNumber,
     x,
     y,
+    version: Number(previewMount?.dataset.pdfVersion || local.appState?.compile?.version || 0),
+    artifactId: String(previewMount?.dataset.pdfArtifactId || local.appState?.compile?.artifactId || ""),
     clientX: event.clientX,
     clientY: event.clientY,
     elementType: targetPreview?.type || (targetPreview?.textPreview ? "text" : "page-area"),
     targetRect: targetPreview?.outline || null,
-    textPreview: targetPreview?.textPreview || pdfTextPreviewAtPoint(page, event.clientX, event.clientY),
+    textPreview: targetPreview?.textPreview || pdfTextPreviewAtPoint(page, event.clientX, event.clientY, rect),
     outline: targetPreview?.outline || null
   };
 }
@@ -4616,18 +5448,35 @@ function writeEditorModeForFile(filePath = local.selectedFile, mode = "code") {
   localStorage.setItem("localleaf.editorMode", nextMode);
 }
 
-function pdfTextPreviewAtPoint(page, clientX, clientY) {
-  const spans = Array.from(page.querySelectorAll(".pdf-text-layer span, .textLayer span"));
-  const nearby = spans.filter((span) => {
-    const rect = span.getBoundingClientRect();
-    return rect.bottom >= clientY - 18 && rect.top <= clientY + 18 && rect.right >= clientX - 90 && rect.left <= clientX + 90;
-  }).map((span) => String(span.textContent || "").trim()).filter(Boolean);
+function pdfTextPreviewAtPoint(page, clientX, clientY, pageRect = page.getBoundingClientRect()) {
+  const localX = clientX - pageRect.left;
+  const localY = clientY - pageRect.top;
+  const nearby = pdfAnnotationSpanRecords(page, pageRect)
+    .filter((record) => (
+      record.bottom >= localY - 18
+      && record.top <= localY + 18
+      && record.right >= localX - 90
+      && record.left <= localX + 90
+    ))
+    .map((record) => record.text);
   return nearby.join(" ").replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
-function pdfAnnotationSpanRecords(page) {
-  const pageRect = page.getBoundingClientRect();
-  return Array.from(page.querySelectorAll(".pdf-text-layer span, .textLayer span"))
+function pdfAnnotationSpanRecords(page, pageRect = page.getBoundingClientRect()) {
+  const spans = Array.from(page.querySelectorAll(".pdf-text-layer span, .textLayer span"));
+  const previewMount = page.closest?.(".pdf-preview-mount");
+  const cacheKey = [
+    previewMount?.dataset.pdfArtifactId || "",
+    previewMount?.dataset.pdfVersion || "",
+    local.pdfScale,
+    Math.round(pageRect.width),
+    Math.round(pageRect.height),
+    spans.length
+  ].join(":");
+  if (page.__localLeafAnnotationLayout?.key === cacheKey) {
+    return page.__localLeafAnnotationLayout.records;
+  }
+  const records = spans
     .map((span) => {
       const text = String(span.textContent || "").replace(/\s+/g, " ").trim();
       const rect = span.getBoundingClientRect();
@@ -4642,14 +5491,16 @@ function pdfAnnotationSpanRecords(page) {
         width: rect.width,
         height: rect.height,
         centerX: rect.left - pageRect.left + rect.width / 2,
-        centerY: rect.top - pageRect.top + rect.height / 2,
-        clientLeft: rect.left,
-        clientTop: rect.top,
-        clientRight: rect.right,
-        clientBottom: rect.bottom
+        centerY: rect.top - pageRect.top + rect.height / 2
       };
     })
     .filter(Boolean);
+  page.__localLeafAnnotationLayout = {
+    key: cacheKey,
+    records,
+    lines: groupPdfAnnotationLines(records)
+  };
+  return records;
 }
 
 function unionPdfRects(records) {
@@ -4717,7 +5568,14 @@ function pdfCanvasInkComponents(page) {
   const canvas = page.querySelector(".pdf-page-canvas");
   const context = canvas?.getContext?.("2d", { willReadFrequently: true });
   if (!canvas || !context || !canvas.width || !canvas.height) return [];
-  const key = `${canvas.width}x${canvas.height}`;
+  const rect = canvas.getBoundingClientRect();
+  const key = [
+    canvas.width,
+    canvas.height,
+    Math.round(rect.width * 10) / 10,
+    Math.round(rect.height * 10) / 10,
+    local.pdfScale
+  ].join("x");
   if (canvas.__localLeafInkTargetKey === key && Array.isArray(canvas.__localLeafInkTargets)) {
     return canvas.__localLeafInkTargets;
   }
@@ -4729,7 +5587,6 @@ function pdfCanvasInkComponents(page) {
     return [];
   }
 
-  const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / Math.max(1, rect.width);
   const scaleY = canvas.height / Math.max(1, rect.height);
   const step = Math.max(5, Math.round(Math.min(scaleX, scaleY) * 4));
@@ -4838,8 +5695,8 @@ function pdfCanvasAnnotationTargetAtPoint(page, clientX, clientY) {
   };
 }
 
-function pdfAnnotationTargetAtPoint(page, clientX, clientY) {
-  const records = pdfAnnotationSpanRecords(page);
+function pdfAnnotationTargetAtPoint(page, clientX, clientY, pageRect = page.getBoundingClientRect()) {
+  const records = pdfAnnotationSpanRecords(page, pageRect);
   if (!records.length) {
     return pdfCanvasAnnotationTargetAtPoint(page, clientX, clientY) || {
       type: "page-area",
@@ -4847,11 +5704,13 @@ function pdfAnnotationTargetAtPoint(page, clientX, clientY) {
       textPreview: ""
     };
   }
+  const localX = clientX - pageRect.left;
+  const localY = clientY - pageRect.top;
   const anchor = records
     .map((record) => {
-      const inside = clientX >= record.clientLeft - 5 && clientX <= record.clientRight + 5 && clientY >= record.clientTop - 7 && clientY <= record.clientBottom + 7;
-      const dx = clientX < record.clientLeft ? record.clientLeft - clientX : clientX > record.clientRight ? clientX - record.clientRight : 0;
-      const dy = clientY < record.clientTop ? record.clientTop - clientY : clientY > record.clientBottom ? clientY - record.clientBottom : 0;
+      const inside = localX >= record.left - 5 && localX <= record.right + 5 && localY >= record.top - 7 && localY <= record.bottom + 7;
+      const dx = localX < record.left ? record.left - localX : localX > record.right ? localX - record.right : 0;
+      const dy = localY < record.top ? record.top - localY : localY > record.bottom ? localY - record.bottom : 0;
       return { record, inside, distance: Math.hypot(dx, dy) };
     })
     .filter((item) => item.inside || item.distance <= 32)
@@ -4864,7 +5723,7 @@ function pdfAnnotationTargetAtPoint(page, clientX, clientY) {
     };
   }
 
-  const lines = groupPdfAnnotationLines(records);
+  const lines = page.__localLeafAnnotationLayout?.lines || groupPdfAnnotationLines(records);
   const anchorLineIndex = Math.max(0, lines.findIndex((line) => line.records.includes(anchor)));
   const selected = [lines[anchorLineIndex]];
   const avgHeight = Math.max(8, records.reduce((sum, item) => sum + item.height, 0) / records.length);
@@ -4886,7 +5745,6 @@ function pdfAnnotationTargetAtPoint(page, clientX, clientY) {
     selected.push(line);
   }
 
-  const pageRect = page.getBoundingClientRect();
   const rect = unionPdfRects(selected);
   const padX = 9;
   const padY = 7;
@@ -4914,24 +5772,46 @@ function renderPdfAnnotationOutline(target, options = {}) {
     removePdfAnnotationOutline();
     return;
   }
-  removePdfAnnotationOutline();
-  const marker = document.createElement("div");
+
+  let marker = document.querySelector(".pdf-annotation-target-outline");
+  if (marker && marker.parentElement !== page) {
+    marker.remove();
+    marker = null;
+  }
+  if (!marker) {
+    marker = document.createElement("div");
+    page.append(marker);
+  }
   marker.className = `pdf-annotation-target-outline ${options.selected ? "selected" : ""}`;
   marker.style.left = `${Math.round(outline.left)}px`;
   marker.style.top = `${Math.round(outline.top)}px`;
   marker.style.width = `${Math.max(16, Math.round(outline.width))}px`;
   marker.style.height = `${Math.max(16, Math.round(outline.height))}px`;
-  page.append(marker);
 }
 
 function handlePdfAnnotationPointerMove(event) {
-  if (!local.pdfAnnotateMode || local.pdfAnnotationPopover || event.target.closest?.(".pdf-annotation-popover")) return;
-  const target = pdfClickTarget(event);
-  if (!target) {
-    removePdfAnnotationOutline();
+  if (!local.pdfAnnotateMode || local.pdfAnnotationPopover || event.target.closest?.(".pdf-annotation-popover")) {
+    cancelPendingPdfAnnotationPointer();
     return;
   }
-  renderPdfAnnotationOutline(target);
+  pendingPdfAnnotationPointer = {
+    target: event.target,
+    clientX: event.clientX,
+    clientY: event.clientY
+  };
+  if (pdfAnnotationPointerFrame) return;
+  pdfAnnotationPointerFrame = requestAnimationFrame(() => {
+    pdfAnnotationPointerFrame = 0;
+    const pointer = pendingPdfAnnotationPointer;
+    pendingPdfAnnotationPointer = null;
+    if (!pointer || !pointer.target?.isConnected || !local.pdfAnnotateMode || local.pdfAnnotationPopover) return;
+    const target = pdfClickTarget(pointer);
+    if (!target) {
+      removePdfAnnotationOutline();
+      return;
+    }
+    renderPdfAnnotationOutline(target);
+  });
 }
 
 async function resolvePdfClickSource(target) {
@@ -4941,12 +5821,60 @@ async function resolvePdfClickSource(target) {
       body: {
         page: target.page,
         x: target.x,
-        y: target.y
+        y: target.y,
+        version: target.version,
+        artifactId: target.artifactId
       }
     });
   } catch (error) {
     return { ok: false, reason: error.message || "Could not map this PDF location." };
   }
+}
+
+function pdfSourceStatusLabel(status = local.pdfSourceStatus) {
+  if (!status) return "";
+  if (status.state === "mapping") return "Finding source...";
+  if (status.state === "ready" && status.source?.path) {
+    const context = status.source.previewState === "stale"
+      ? " (last good PDF)"
+      : status.source.previewState === "pending"
+        ? " (compile in progress)"
+        : "";
+    return `${status.source.path} · line ${status.source.line}${context}`;
+  }
+  if (status.state === "pending") return "Source map pending";
+  if (status.state === "busy") return "Source lookup busy";
+  if (status.state === "stale") return "PDF changed — click again";
+  if (status.state === "unavailable") return "No source for this spot";
+  return "";
+}
+
+function pdfSourceStatusTitle(status = local.pdfSourceStatus) {
+  if (status?.reason) return status.reason;
+  if (status?.state === "ready" && status.source?.path) {
+    return `Opened ${status.source.path} at line ${status.source.line}, column ${status.source.column || 0}.`;
+  }
+  return "Click the PDF to reveal its LaTeX source.";
+}
+
+function updatePdfSourceStatus(status) {
+  local.pdfSourceStatus = status || "";
+  const element = document.querySelector("#pdfSourceStatus");
+  if (!element) return;
+  element.textContent = pdfSourceStatusLabel();
+  element.title = pdfSourceStatusTitle();
+}
+
+function pdfSourceNavigator() {
+  if (local.pdfSourceNavigator) return local.pdfSourceNavigator;
+  const createController = window.LocalLeafPdfSourceNavigation?.createPdfSourceNavigationController;
+  if (typeof createController !== "function") return null;
+  local.pdfSourceNavigator = createController({
+    lookup: resolvePdfClickSource,
+    reveal: jumpToPdfSource,
+    onStatus: updatePdfSourceStatus
+  });
+  return local.pdfSourceNavigator;
 }
 
 function offsetForLineColumn(text, line, column = 0) {
@@ -4971,14 +5899,23 @@ function centerCodeEditorSelection() {
   scroller.scrollTop += targetMiddle - scrollerMiddle;
 }
 
-async function jumpToPdfSource(source) {
+async function jumpToPdfSource(source, navigation = {}) {
   if (!source?.ok || !source.path) {
-    return;
+    return false;
   }
+  if (navigation.isCurrent && !navigation.isCurrent()) return false;
+  const revealFile = window.LocalLeafPdfSourceNavigation?.revealPdfSourceFile;
+  if (typeof revealFile !== "function") return false;
+  const selected = await revealFile(source, {
+    isCurrent: navigation.isCurrent,
+    selectFile: selectProjectFile,
+    selectedPath: () => local.selectedFile
+  });
+  if (!selected) return false;
+  if (navigation.isCurrent && !navigation.isCurrent()) return false;
   local.sourcePaneVisible = true;
   localStorage.setItem("localleaf.sourcePaneVisible", "1");
-  setEditorMode("code");
-  await selectProjectFile(source.path);
+  applyEditorLayoutState();
   setEditorMode("code");
   requestAnimationFrame(() => {
     const offset = offsetForLineColumn(local.editorContent, source.line, source.column || 0);
@@ -4989,11 +5926,16 @@ async function jumpToPdfSource(source) {
     document.querySelector(".code-panel")?.classList.add("source-jump-highlight");
     setTimeout(() => document.querySelector(".code-panel")?.classList.remove("source-jump-highlight"), 1100);
   });
+  return true;
 }
 
 async function handlePdfPreviewClick(event) {
   if (event.target.closest?.(".pdf-annotation-popover")) return;
   if (local.appState?.compile?.mode !== "pdf") return;
+  if (
+    !local.pdfAnnotateMode
+    && window.LocalLeafPdfSourceNavigation?.isPdfHyperlinkTarget?.(event.target)
+  ) return;
   const target = pdfClickTarget(event);
   if (!target) return;
   if (local.pdfAnnotateMode) {
@@ -5004,8 +5946,14 @@ async function handlePdfPreviewClick(event) {
     return;
   }
   event.preventDefault();
+  const navigator = pdfSourceNavigator();
+  if (navigator) {
+    await navigator.navigate(target);
+    return;
+  }
   const source = await resolvePdfClickSource(target);
-  await jumpToPdfSource(source);
+  if (source?.ok) await jumpToPdfSource(source);
+  else updatePdfSourceStatus(source);
 }
 
 function closePdfAnnotationPopover() {
@@ -5143,12 +6091,14 @@ function layoutToggleMarkup(id, active, kind, title) {
   return `<button class="icon-button layout-toggle ${active ? "active" : ""}" id="${id}" title="${title}" aria-label="${title}">${layoutGlyph(kind)}</button>`;
 }
 
-function editorMoreMenuMarkup(state, selection) {
+function editorMoreMenuMarkup(state) {
   if (!local.editorMoreMenuOpen) return "";
   const menuButton = (action, label, detail = "", options = {}) => `
     <button type="button"
       class="editor-more-item ${options.active ? "active" : ""} ${options.danger ? "danger" : ""}"
+      role="menuitem"
       data-editor-more-action="${escapeHtml(action)}"
+      ${options.active !== undefined ? `aria-pressed="${options.active ? "true" : "false"}"` : ""}
       ${options.disabled ? "disabled" : ""}>
       ${options.icon ? `<span class="editor-menu-icon">${options.icon}</span>` : ""}
       <span class="editor-menu-copy">
@@ -5170,8 +6120,7 @@ function editorMoreMenuMarkup(state, selection) {
         ${menuButton("settings", "Settings", "Theme and update checks", { icon: icon("settings") })}
         ${menuButton("help", "Help", "Q&A and app guidance", { icon: icon("help") })}
         ${menuButton("about", "About", "Website and project info", { icon: icon("info") })}
-        ${updateCheckButtonMarkup("editorCheckUpdates", "Check for updates", "editor-more-update")}
-        ${menuButton("set-main", "Set as main file", state.project.mainFile || "No main file", { disabled: !selection.canSetMain, icon: editorToolIcon("ref") })}
+        ${updateCheckButtonMarkup("editorCheckUpdates", "Check for updates", "editor-more-update", { menuItem: true })}
         <a class="editor-more-item" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" role="menuitem">
           <span class="editor-menu-icon">${icon("download")}</span>
           <span class="editor-menu-copy">
@@ -5194,12 +6143,13 @@ function editorMoreMenuMarkup(state, selection) {
   `;
 }
 
-function closeEditorMoreMenuInPlace() {
+function closeEditorMoreMenuInPlace(options = {}) {
   local.editorMoreMenuOpen = false;
   document.querySelector(".editor-more-menu")?.remove();
   const button = document.querySelector("#editorMoreButton");
   button?.classList.remove("active");
   button?.setAttribute("aria-expanded", "false");
+  if (options.focus !== false) button?.focus({ preventScroll: true });
 }
 
 function openEditorMoreMenuInPlace() {
@@ -5213,13 +6163,38 @@ function openEditorMoreMenuInPlace() {
   local.editorMoreMenuOpen = true;
   button.classList.add("active");
   button.setAttribute("aria-expanded", "true");
-  const fallbackFile = local.appState.project.mainFile || local.appState.project.files.find((item) => item.type === "text" || item.type === "image")?.path || "";
-  const selection = selectedFileState(local.selectedFile || fallbackFile);
-  button.insertAdjacentHTML("afterend", editorMoreMenuMarkup(local.appState, selection));
+  button.insertAdjacentHTML("afterend", editorMoreMenuMarkup(local.appState));
   bindEditorMoreActions();
+  document.querySelector('.editor-more-menu [role="menuitem"]:not([disabled])')?.focus({ preventScroll: true });
 }
 
 function bindEditorMoreActions() {
+  const menu = document.querySelector(".editor-more-menu");
+  const updateButton = menu?.querySelector("[data-check-updates]");
+  if (updateButton && updateButton.dataset.updateCheckBound !== "1") {
+    updateButton.dataset.updateCheckBound = "1";
+    updateButton.addEventListener("click", manualCheckForUpdates);
+  }
+  if (menu && menu.dataset.keyboardBound !== "1") {
+    menu.dataset.keyboardBound = "1";
+    const enabledItems = () => [...menu.querySelectorAll('[role="menuitem"]:not([disabled])')];
+    menu.addEventListener("keydown", (event) => {
+      const items = enabledItems();
+      const currentIndex = items.indexOf(document.activeElement);
+      let nextIndex = -1;
+      if (event.key === "ArrowDown") nextIndex = (currentIndex + 1 + items.length) % items.length;
+      else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = items.length - 1;
+      else if (event.key === "Tab") {
+        closeEditorMoreMenuInPlace({ focus: false });
+        return;
+      }
+      if (nextIndex < 0 || !items[nextIndex]) return;
+      event.preventDefault();
+      items[nextIndex].focus();
+    });
+  }
   document.querySelectorAll("[data-editor-more-action]").forEach((button) => {
     if (button.dataset.editorMoreBound === "1") return;
     button.dataset.editorMoreBound = "1";
@@ -5236,10 +6211,6 @@ function bindEditorMoreActions() {
       }
       if (action === "about") {
         showAboutModal();
-        return;
-      }
-      if (action === "set-main") {
-        setMainFile();
         return;
       }
       if (action === "toggle-files") setSidebarVisible(!local.sidebarVisible);
@@ -5273,17 +6244,18 @@ function chatHeaderMarkup() {
 
 function chatMessageMarkup(message) {
   const isOwnMessage = message.author === local.userName;
+  const author = escapeHtml(message.author);
   return `
-    <div class="chat-message ${isOwnMessage ? "own" : ""}">
-      <div class="avatar">${escapeHtml(message.author[0] || "?")}</div>
+    <article class="chat-message ${isOwnMessage ? "own" : ""}" aria-label="Message from ${author}">
+      <div class="avatar" aria-hidden="true">${escapeHtml(message.author[0] || "?")}</div>
       <div class="chat-bubble">
         <div class="chat-meta">
-          <strong>${escapeHtml(message.author)}</strong>
+          <strong>${author}</strong>
           <time>${new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
         </div>
         <p>${escapeHtml(message.message)}</p>
       </div>
-    </div>
+    </article>
   `;
 }
 
@@ -5336,9 +6308,9 @@ function userRowMarkup(user) {
       <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
       <div>
         <strong>${escapeHtml(user.name)}</strong><br />
-        <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` Â· ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
+        <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` · ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
       </div>
-      <span class="online-dot"></span>
+      <span class="online-dot ${user.online ? "" : "offline"}" title="${user.online ? "Online" : "Offline"}"></span>
     </div>
   `;
 }
@@ -5396,19 +6368,30 @@ function aiRunIdForProposal(proposal) {
   return proposal?.runId || proposal?.id || "run";
 }
 
+function aiRunGroupKey(proposal) {
+  return [
+    aiRunIdForProposal(proposal),
+    proposal?.sessionId || "",
+    proposal?.requester?.userId || "host"
+  ].map((part) => encodeURIComponent(String(part))).join("::");
+}
+
 function aiChangeRuns(items) {
   const groups = new Map();
   items.forEach((proposal) => {
     const runId = aiRunIdForProposal(proposal);
-    if (!groups.has(runId)) {
-      groups.set(runId, {
-        id: runId,
+    const groupKey = aiRunGroupKey(proposal);
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, {
+        id: groupKey,
+        runId,
+        anchorProposalId: proposal.id,
         createdAt: proposal.createdAt || Date.now(),
         updatedAt: proposal.appliedAt || proposal.rejectedAt || proposal.revertedAt || proposal.createdAt || Date.now(),
         proposals: []
       });
     }
-    const group = groups.get(runId);
+    const group = groups.get(groupKey);
     group.proposals.push(proposal);
     group.createdAt = Math.min(group.createdAt, proposal.createdAt || group.createdAt);
     group.updatedAt = Math.max(group.updatedAt, proposal.appliedAt || proposal.rejectedAt || proposal.revertedAt || proposal.createdAt || group.updatedAt);
@@ -5429,19 +6412,20 @@ function aiRunStats(run) {
 
 function aiApprovalCardMarkup(proposal) {
   const status = proposal.status || "proposed";
-  const canApply = ["pending", "proposed"].includes(status);
+  const canApply = proposal.actionable !== false && ["pending", "proposed"].includes(status);
+  const createsFile = proposal.operation === "create";
   return `
     <article class="ai-change-card ai-approval-card ${escapeHtml(status)}" data-ai-proposal="${escapeHtml(proposal.id)}">
       <div class="ai-change-head">
         <div>
-          <strong>${escapeHtml(proposal.path || local.selectedFile || "Current file")}</strong>
+          <strong>${escapeHtml(proposal.path || local.selectedFile || "Current file")}${createsFile ? `<span class="ai-change-kind">New file</span>` : ""}</strong>
           <span>${escapeHtml(proposal.summary || "AI proposed a text edit.")}</span>
         </div>
         <b>${escapeHtml(status)}</b>
       </div>
       ${aiProposalDiffMarkup(proposal)}
       <div class="ai-change-actions">
-        <button class="btn btn-primary" data-apply-ai-proposal="${escapeHtml(proposal.id)}" ${canApply ? "" : "disabled"}>Approve</button>
+        <button class="btn btn-primary" data-apply-ai-proposal="${escapeHtml(proposal.id)}" ${canApply ? "" : "disabled"}>${createsFile ? "Create file" : "Approve"}</button>
         <button class="btn" data-reject-ai-proposal="${escapeHtml(proposal.id)}" ${canApply ? "" : "disabled"}>Reject</button>
         <button class="btn" data-explain-ai-proposal="${escapeHtml(proposal.id)}">Explain</button>
       </div>
@@ -5453,13 +6437,15 @@ function aiHistoryCardMarkup(proposal) {
   const status = proposal.status || "proposed";
   const expanded = local.aiExpandedChanges.has(proposal.id);
   const diffExpanded = local.aiExpandedDiffs.has(proposal.id);
-  const canRevert = status === "applied";
+  const canRevert = proposal.actionable !== false && status === "applied";
+  const createsFile = proposal.operation === "create";
+  const canOpenFile = !createsFile || status === "applied";
   return `
     <article class="ai-change-card ai-history-card ${escapeHtml(status)} ${expanded ? "expanded" : ""}" data-ai-proposal="${escapeHtml(proposal.id)}">
       <button type="button" class="ai-change-toggle" data-toggle-ai-change="${escapeHtml(proposal.id)}" aria-expanded="${expanded ? "true" : "false"}">
         <span>
           <strong>${escapeHtml(proposal.summary || "AI proposed a text edit.")}</strong>
-          <small>${escapeHtml(proposal.path || "Current file")}</small>
+          <small>${escapeHtml(proposal.path || "Current file")}${createsFile ? `<span class="ai-change-kind">New file</span>` : ""}</small>
         </span>
         <b class="ai-change-status ${escapeHtml(status)}">${escapeHtml(proposalStatusLabel(status))}</b>
         <i aria-hidden="true">${expanded ? "^" : "v"}</i>
@@ -5472,7 +6458,7 @@ function aiHistoryCardMarkup(proposal) {
         ${proposal.userRequest ? `<p class="ai-change-request">${escapeHtml(proposal.userRequest)}</p>` : ""}
         ${aiProposalDiffMarkup(proposal, { expanded: diffExpanded })}
         <div class="ai-change-actions">
-          <button class="btn" data-open-ai-proposal="${escapeHtml(proposal.id)}">Open file</button>
+          <button class="btn" data-open-ai-proposal="${escapeHtml(proposal.id)}" ${canOpenFile ? "" : "disabled"}>Open file</button>
           <button class="btn" data-explain-ai-proposal="${escapeHtml(proposal.id)}">Explain</button>
           <button class="btn" data-copy-ai-proposal="${escapeHtml(proposal.id)}">Copy diff</button>
           <button class="btn" data-view-ai-proposal="${escapeHtml(proposal.id)}">${diffExpanded ? "Collapse" : "View"}</button>
@@ -5492,12 +6478,24 @@ function aiMessageApprovalCardsMarkup(message) {
   return cards.length ? `<div class="ai-message-approvals">${cards.map(aiApprovalCardMarkup).join("")}</div>` : "";
 }
 
+function renderAiMessageContent(value) {
+  try {
+    if (typeof window.LocalLeafMarkdown?.renderMarkdown === "function") {
+      return window.LocalLeafMarkdown.renderMarkdown(value);
+    }
+  } catch {
+    // Fall back to escaped text if the optional renderer cannot parse a response.
+  }
+  return `<p>${escapeHtml(value || "").replace(/\r?\n/g, "<br>")}</p>`;
+}
+
 function aiMessageMarkup(message) {
+  const roleLabel = message.role === "user" ? "You" : "LocalLeaf";
   return `
-    <div class="ai-message ai-message-${escapeHtml(message.role || "assistant")}">
+    <article class="ai-message ai-message-${escapeHtml(message.role || "assistant")}" aria-label="${roleLabel} message">
       <div class="ai-message-body">
-        <span class="ai-message-role">${message.role === "user" ? "You" : "LocalLeaf"}</span>
-        <p>${escapeHtml(message.message || "")}</p>
+        <span class="ai-message-role">${roleLabel}</span>
+        <div class="ai-markdown">${renderAiMessageContent(message.message || "")}</div>
         ${Array.isArray(message.fileLinks) && message.fileLinks.length ? `
           <div class="ai-file-links">
             ${message.fileLinks.map((file) => `<button type="button" data-open-ai-file-link="${escapeHtml(file)}">${escapeHtml(file)}</button>`).join("")}
@@ -5505,7 +6503,7 @@ function aiMessageMarkup(message) {
         ` : ""}
         ${aiMessageApprovalCardsMarkup(message)}
       </div>
-    </div>
+    </article>
   `;
 }
 
@@ -5539,14 +6537,12 @@ function aiQueuedPromptStripMarkup() {
             <span>${escapeHtml(queuedPromptPreview(queued.message) || "Queued message")}</span>
           </button>
           <div class="ai-session-strip-actions">
-            <button type="button" class="ai-strip-action" data-steer-queued-ai-prompt="${escapeHtml(queued.id)}" title="Steer the active AI run" aria-label="Steer the active AI run"><span>Steer</span></button>
             <button type="button" class="ai-strip-action ai-strip-icon" data-delete-queued-ai-prompt="${escapeHtml(queued.id)}" title="Delete queued message" aria-label="Delete queued message">${editorToolIcon("delete")}</button>
             <div class="ai-strip-more-wrap ${isMenuOpen ? "open" : ""}">
-              <button type="button" class="ai-strip-action ai-strip-icon" data-toggle-queued-ai-menu="${escapeHtml(queued.id)}" title="Queue actions" aria-label="Queue actions" aria-expanded="${isMenuOpen ? "true" : "false"}">...</button>
+              <button type="button" class="ai-strip-action ai-strip-icon" data-toggle-queued-ai-menu="${escapeHtml(queued.id)}" title="Queue actions" aria-label="Queue actions" aria-expanded="${isMenuOpen ? "true" : "false"}">${editorToolIcon("more")}</button>
               ${isMenuOpen ? `
                 <div class="ai-strip-menu" role="menu">
                   <button type="button" data-edit-queued-ai-prompt="${escapeHtml(queued.id)}" role="menuitem">${editorToolIcon("edit")} Edit queued message</button>
-                  <button type="button" data-steer-queued-ai-prompt="${escapeHtml(queued.id)}" role="menuitem">${editorToolIcon("edit")} Steer now</button>
                   <button type="button" data-delete-queued-ai-prompt="${escapeHtml(queued.id)}" role="menuitem">${editorToolIcon("delete")} Delete queued message</button>
                   <small>${escapeHtml(index === 0 ? "Next message" : `Queued position ${index + 1}`)}</small>
                 </div>
@@ -5581,14 +6577,21 @@ function aiSessionTimeLabel(timestamp) {
 }
 
 function aiSessionStatusPill(session) {
-  if (session.id === local.aiCurrentSessionId) return `<span class="ai-session-status active">Active</span>`;
-  if (Number(session.changeCount || 0) > 0) return `<span class="ai-session-status changed">Changed</span>`;
-  if (session.parentSessionId) return `<span class="ai-session-status forked">Fork</span>`;
+  const queuedCount = local.aiQueuedPrompts.filter((item) => item.sessionId === session.id).length;
+  if (session.runStatus === "running") return `<span class="ai-session-badge running" data-status="running">Running</span>`;
+  if (queuedCount) return `<span class="ai-session-badge queued" data-status="queued">${queuedCount} queued</span>`;
+  if (session.unread) return `<span class="ai-session-badge unread" data-status="unread">Unread</span>`;
+  if (session.runStatus === "interrupted") return `<span class="ai-session-badge interrupted" data-status="interrupted">Interrupted</span>`;
+  if (Number(session.changeCount || 0) > 0) return `<span class="ai-session-badge">Changed</span>`;
+  if (session.parentSessionId) return `<span class="ai-session-badge">Fork</span>`;
   return "";
 }
 
 function aiSessionRowsMarkup(sessions) {
   if (!sessions.length) return `<div class="ai-session-empty">No sessions match this project search.</div>`;
+  const keyboardSessionId = sessions.some((session) => session.id === local.aiCurrentSessionId)
+    ? local.aiCurrentSessionId
+    : sessions[0].id;
   const groups = sessions.reduce((map, session) => {
     const label = aiSessionDateLabel(session.updatedAt || session.createdAt);
     if (!map.has(label)) map.set(label, []);
@@ -5596,28 +6599,58 @@ function aiSessionRowsMarkup(sessions) {
     return map;
   }, new Map());
   return [...groups.entries()].map(([label, items]) => `
-    <div class="ai-session-menu-label">${escapeHtml(label)}</div>
+    <div class="ai-session-menu-label" role="presentation">${escapeHtml(label)}</div>
     ${items.map((session) => {
       const active = session.id === local.aiCurrentSessionId;
-      return `
-        <div class="ai-session-menu-row ${active ? "active" : ""}">
-          <button type="button" role="menuitem" data-ai-session="${escapeHtml(session.id)}">
-            <span class="ai-session-row-top">
-              <strong>${escapeHtml(session.title || "New session")}</strong>
-              ${aiSessionStatusPill(session)}
-              <time>${escapeHtml(aiSessionTimeLabel(session.updatedAt || session.createdAt))}</time>
-            </span>
-            <span class="ai-session-preview">${escapeHtml(session.lastPreview || sessionPreviewFromMessages(session.messages || []))}</span>
-          </button>
-          <div class="ai-session-row-actions">
-            <button type="button" data-rename-ai-session="${escapeHtml(session.id)}" title="Rename session" aria-label="Rename ${escapeHtml(session.title || "session")}">${editorToolIcon("edit")}</button>
-            <button type="button" data-fork-ai-session="${escapeHtml(session.id)}" title="Fork session" aria-label="Fork ${escapeHtml(session.title || "session")}">Fork</button>
-            <button type="button" data-delete-ai-session="${escapeHtml(session.id)}" title="Delete session" aria-label="Delete ${escapeHtml(session.title || "session")}">${editorToolIcon("delete")}</button>
+      const actionOpen = local.aiSessionActionMenuId === session.id;
+      const renaming = local.aiSessionRenamingId === session.id;
+      const rowClasses = [
+        "ai-session-row",
+        active ? "active" : "",
+        active && local.aiSessionSwitchTargetId === session.id ? "is-switching" : "",
+        local.aiSessionNewId === session.id ? "is-new" : "",
+        local.aiSessionDeletingId === session.id ? "is-deleting" : ""
+      ].filter(Boolean).join(" ");
+      if (renaming) {
+        return `
+          <div class="${rowClasses}" role="presentation" data-session-id="${escapeHtml(session.id)}">
+            <input id="aiSessionRenameInput" class="ai-session-inline-rename" maxlength="64" value="${escapeHtml(local.aiSessionRenameValue)}" aria-label="Rename session" aria-invalid="${local.aiSessionRenameError ? "true" : "false"}" aria-describedby="${local.aiSessionRenameError ? "aiSessionRenameError" : ""}" />
+            <span></span>
+            ${local.aiSessionRenameError ? `<small id="aiSessionRenameError" class="ai-session-rename-error">${escapeHtml(local.aiSessionRenameError)}</small>` : ""}
           </div>
+        `;
+      }
+      const metadata = [
+        session.parentSessionId ? "Fork" : "",
+        Number(session.changeCount || 0) > 0 ? "Changed" : "",
+        aiSessionTimeLabel(session.updatedAt || session.createdAt)
+      ].filter(Boolean).join(" · ");
+      return `
+        <div class="${rowClasses}" role="presentation" data-session-id="${escapeHtml(session.id)}">
+          <button type="button" class="ai-session-row-main" data-ai-session="${escapeHtml(session.id)}" role="option" aria-selected="${active ? "true" : "false"}" aria-haspopup="menu" aria-expanded="${actionOpen ? "true" : "false"}" tabindex="${session.id === keyboardSessionId ? "0" : "-1"}">
+            <span class="ai-session-check" aria-hidden="true">${editorToolIcon("check")}</span>
+            <strong>${escapeHtml(session.title || "New session")} ${aiSessionStatusPill(session)}</strong>
+            <small>${escapeHtml(metadata)}${metadata ? " — " : ""}${escapeHtml(session.lastPreview || "Ready to help with this project.")}</small>
+            <span class="ai-session-row-menu-glyph" data-ai-session-actions aria-hidden="true">${editorToolIcon("more")}</span>
+          </button>
         </div>
       `;
     }).join("")}
   `).join("");
+}
+
+function aiSessionActionMenuMarkup() {
+  const session = local.aiSessions.find((item) => item.id === local.aiSessionActionMenuId);
+  if (!session) return "";
+  const queuedCount = local.aiQueuedPrompts.filter((item) => item.sessionId === session.id).length;
+  return `
+    <div class="ai-session-row-menu ai-session-floating-menu open" id="aiSessionActionsMenu" role="menu" aria-label="Actions for ${escapeHtml(session.title || "session")}" data-open="true">
+      <button type="button" data-rename-ai-session="${escapeHtml(session.id)}" data-session-action="rename" role="menuitem">${editorToolIcon("edit")} <span>Rename</span></button>
+      <button type="button" data-fork-ai-session="${escapeHtml(session.id)}" data-session-action="fork" role="menuitem">${editorToolIcon("files")} <span>Fork</span></button>
+      ${session.runStatus === "running" ? `<button type="button" data-stop-session-response="${escapeHtml(session.id)}" data-session-action="stop" role="menuitem">${uiGlyph("stop")} <span>Stop response</span></button>` : ""}
+      <button type="button" data-delete-ai-session="${escapeHtml(session.id)}" data-session-action="delete" role="menuitem" ${session.runStatus === "running" || queuedCount ? "disabled" : ""} title="${queuedCount ? "Remove queued messages before deleting" : "Delete session"}">${editorToolIcon("delete")} <span>Delete</span></button>
+    </div>
+  `;
 }
 
 function aiSessionMenuMarkup() {
@@ -5629,32 +6662,73 @@ function aiSessionMenuMarkup() {
     })
     .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
     .slice(0, 30);
-  const projectName = local.aiSessionsProjectName || local.appState?.project?.name || "Current project";
+  const current = local.aiSessions.find((session) => session.id === local.aiCurrentSessionId) || local.aiSessions[0] || {};
+  const atLimit = local.aiSessions.length >= 30;
+  const showSearch = local.aiSessions.length >= 5;
+  const footer = isGuestClient()
+    ? "Temporary for this live session."
+    : "Saved on this device for this project.";
   return `
-    <div class="ai-session-picker ${local.aiSessionMenuOpen ? "open" : ""}">
-      <button class="ai-session-plus" id="aiSessionMenuButton" type="button" title="AI sessions" aria-label="AI sessions" aria-expanded="${local.aiSessionMenuOpen ? "true" : "false"}">${uiGlyph("plus")}</button>
-      ${local.aiSessionMenuOpen ? `
-        <div class="ai-session-menu" role="menu">
-          <div class="ai-session-menu-head">
-            <span class="ai-session-project-icon">${editorToolIcon("files")}</span>
-            <strong>${escapeHtml(projectName)}</strong>
-            <span>Project</span>
-          </div>
-          <button type="button" class="ai-session-new" data-ai-session-new role="menuitem">${uiGlyph("plus")} New session</button>
-          <input id="aiSessionSearch" class="ai-session-search" value="${escapeHtml(local.aiSessionSearch)}" placeholder="Search sessions" autocomplete="off" />
-          <div class="ai-session-scroll">
+    <div class="ai-session-bar">
+      <button class="ai-session-trigger" id="aiSessionMenuButton" type="button" aria-haspopup="dialog" aria-expanded="${local.aiSessionMenuOpen ? "true" : "false"}" aria-controls="aiSessionDialog">
+        <span class="ai-session-trigger-icon" aria-hidden="true">${editorToolIcon("chat")}</span>
+        <span class="ai-session-trigger-copy"><strong>${escapeHtml(current.title || "New session")}</strong><span>${escapeHtml(current.runStatus === "running" ? "Response running" : current.unread ? "Unread response" : "AI session")}</span></span>
+        <span class="ai-session-trigger-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
+      </button>
+      <button class="ai-session-quick-new ${local.aiSessionCreating ? "is-creating" : ""}" type="button" data-ai-session-new title="${atLimit ? "Delete a session to create another" : "New session"}" aria-label="${local.aiSessionCreating ? "Creating session" : "New AI session"}" ${atLimit || local.aiSessionCreating ? "disabled" : ""}>${local.aiSessionCreating ? "Creating…" : uiGlyph("plus")}</button>
+      <div class="ai-session-dialog-shell ${local.aiSessionMenuOpen ? "open" : ""}" ${local.aiSessionMenuOpen ? "" : "inert aria-hidden=\"true\""}>
+        <div class="ai-session-dialog" id="aiSessionDialog" role="dialog" aria-modal="false" aria-label="AI sessions">
+          ${showSearch ? `<input id="aiSessionSearch" class="ai-session-search" value="${escapeHtml(local.aiSessionSearch)}" placeholder="Search sessions" autocomplete="off" aria-label="Search AI sessions" />` : ""}
+          <div class="ai-session-listbox" role="${local.aiSessionRenamingId ? "presentation" : "listbox"}" aria-label="AI sessions" tabindex="-1">
             ${aiSessionRowsMarkup(sessions)}
           </div>
-          <div class="ai-session-menu-foot">${editorToolIcon("complete")} Sessions are saved for this project</div>
+          ${aiSessionActionMenuMarkup()}
+          <div class="ai-session-footer">
+            <span>${escapeHtml(atLimit ? "Delete a session to create another." : local.aiSessionCreateError || footer)}</span>
+            ${local.aiSessionCreateError ? `<button type="button" data-ai-session-retry>Retry</button>` : ""}
+          </div>
         </div>
-      ` : ""}
+      </div>
     </div>
   `;
+}
+
+function currentContextUsage() {
+  return local.aiSessions.find((session) => session.id === local.aiCurrentSessionId)?.lastContextUsage || null;
+}
+
+function formatContextTokens(value, approximate = false) {
+  if (value === null || value === undefined || value === "" || !Number.isFinite(Number(value))) return "Unavailable";
+  return `${approximate ? "≈" : ""}${new Intl.NumberFormat().format(Number(value))}`;
+}
+
+function contextLevel(percent) {
+  if (Number(percent) >= 90) return { key: "danger", label: "Nearly full" };
+  if (Number(percent) >= 75) return { key: "warning", label: "Getting full" };
+  return { key: "normal", label: "Context ready" };
 }
 
 function aiModelChipMarkup() {
   const active = activeAiProviderModel();
   const permissionLabel = local.aiPermissions.yoloMode ? "YOLO" : "Default";
+  const usage = currentContextUsage();
+  const approximate = usage?.usage?.source === "server_estimate" || usage?.usage?.source === "mixed";
+  const percent = usage?.window?.percentUsed !== null && usage?.window?.percentUsed !== undefined && Number.isFinite(Number(usage.window.percentUsed))
+    ? Math.max(0, Math.min(100, Number(usage.window.percentUsed)))
+    : null;
+  const level = contextLevel(percent);
+  const unknownCapacity = usage?.window?.contextWindowTokens === null
+    || usage?.window?.contextWindowTokens === undefined
+    || !Number.isFinite(Number(usage.window.contextWindowTokens));
+  const contextSession = currentAiSession();
+  const localProviderAliases = new Set(["local", "localleaf-local"]);
+  const providerChanged = Boolean(
+    contextSession?.providerId
+    && active.providerId
+    && contextSession.providerId !== active.providerId
+    && !(localProviderAliases.has(contextSession.providerId) && localProviderAliases.has(active.providerId))
+  );
+  const staleModel = Boolean(usage && (providerChanged || (contextSession?.modelId && contextSession.modelId !== active.modelId)));
   const query = local.aiModelSearch.trim().toLowerCase();
   const items = modelPickerItems().filter((item) => {
     if (!query) return true;
@@ -5666,37 +6740,62 @@ function aiModelChipMarkup() {
     groups.get(key).push(item);
     return groups;
   }, new Map());
+  const tokenLabel = !usage
+    ? "No request yet"
+    : usage?.status === "not_applicable"
+    ? "Not applicable"
+    : usage?.status === "unavailable"
+      ? "Unavailable"
+      : formatContextTokens(usage?.usage?.totalTokens ?? usage?.usage?.inputTokens, approximate);
+  const statusLabel = staleModel
+    ? "Last request used another model"
+    : usage?.status === "failed"
+      ? "Last request failed"
+    : usage?.status === "not_applicable"
+      ? "Deterministic fallback"
+      : usage?.status === "unavailable"
+        ? "Context unavailable"
+        : usage
+          ? level.label
+          : "No request yet";
+  const truncationReasons = (usage?.truncation?.reasons || []).map((reason) => String(reason).replaceAll("_", " "));
   return `
     <div class="ai-model-picker ${local.aiModelPickerOpen ? "open" : ""}">
-      <button class="ai-model-chip" id="aiModelChip" type="button" aria-haspopup="menu" aria-expanded="${local.aiModelPickerOpen ? "true" : "false"}">
-        <span>${escapeHtml(active.providerName)}</span>
-        <strong>${escapeHtml(active.modelName)}</strong>
+      <button class="ai-context-model-control" id="aiModelChip" type="button" aria-haspopup="dialog" aria-expanded="${local.aiModelPickerOpen ? "true" : "false"}" aria-controls="aiContextPopover" aria-describedby="aiContextButtonStatus">
+        <span class="ai-context-ring ${unknownCapacity ? "unknown" : ""} ${level.key === "warning" ? "getting-full" : level.key === "danger" ? "nearly-full" : ""} ${local.aiContextUpdating ? "is-updating" : ""}" style="--context-percent:${percent ?? 0}" data-capacity="${unknownCapacity ? "unknown" : "known"}" data-level="${level.key}" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" pathLength="100"></circle><circle cx="8" cy="8" r="6" pathLength="100"></circle></svg></span>
+        <span>${escapeHtml(active.modelName || active.providerName || "Connect model")}</span>
+        <span class="ai-context-model-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
       </button>
-      ${local.aiModelPickerOpen ? `
-        <div class="ai-model-menu" role="menu">
-          <div class="ai-model-menu-toolbar">
-            <input id="aiModelSearch" value="${escapeHtml(local.aiModelSearch)}" placeholder="Search models" autocomplete="off" />
-            <button type="button" data-open-provider-dialog title="Connect provider" aria-label="Connect provider">${uiGlyph("plus")}</button>
-            <button type="button" data-open-model-settings title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button>
-            <button type="button" data-close-ai-model-picker title="Close model picker" aria-label="Close model picker">x</button>
-          </div>
-          ${[...grouped.entries()].map(([providerName, providerItems]) => `
-            <div class="ai-model-menu-group">
-              <span class="ai-model-menu-provider">${escapeHtml(providerName)}</span>
+      <span class="sr-only" id="aiContextButtonStatus">${escapeHtml(`${statusLabel}. ${tokenLabel}${usage && !["not_applicable", "unavailable"].includes(usage.status) ? " tokens" : ""}.`)}</span>
+      <div class="ai-context-popover-shell ${local.aiModelPickerOpen ? "open" : ""}" ${local.aiModelPickerOpen ? "" : "inert aria-hidden=\"true\""}>
+        <div class="ai-context-popover" id="aiContextPopover" role="dialog" aria-modal="false" aria-label="Model and context">
+          <div class="ai-context-status ${level.key === "warning" ? "getting-full" : level.key === "danger" ? "nearly-full" : ""}" data-level="${level.key}"><span>${escapeHtml(statusLabel)}</span><span>${escapeHtml(tokenLabel)}${usage && !["not_applicable", "unavailable"].includes(usage.status) ? " tokens" : ""}</span></div>
+          ${percent !== null ? `<div class="ai-context-progress ${level.key === "danger" ? "nearly-full" : ""}" data-level="${level.key}" style="--context-percent:${percent}"><span></span></div>` : ""}
+          <dl class="ai-context-details">
+            <dt>Last request</dt><dd>${escapeHtml(tokenLabel)}</dd>
+            <dt>Capacity</dt><dd>${unknownCapacity ? "Unknown" : escapeHtml(formatContextTokens(usage.window.contextWindowTokens))}</dd>
+            <dt>Chat turns</dt><dd>${usage ? `${Number(usage.history?.includedTurns || 0)} / ${Number(usage.history?.availableTurns || 0)}` : "—"}</dd>
+            <dt>Measurement</dt><dd>${usage ? (usage.status === "not_applicable" ? "Not applicable" : approximate ? "Estimated" : usage.usage?.source === "provider_reported" ? "Measured" : "Unavailable") : "—"}</dd>
+          </dl>
+          ${truncationReasons.length ? `<p>Truncated: ${escapeHtml(truncationReasons.join(", "))}.</p>` : ""}
+          <p>LocalLeaf rebuilds context each request. A new session clears recent chat, but project context is still included.</p>
+          ${unknownCapacity && usage && usage.status !== "not_applicable" ? `<button type="button" data-open-model-settings>Configure context window</button>` : ""}
+          ${Number(percent || 0) >= 90 ? `<button type="button" data-ai-session-new ${local.aiSessions.length >= 30 ? "disabled title=\"Delete a session to create another\"" : ""}>${local.aiSessions.length >= 30 ? "Delete a session to create another" : "Start new session"}</button>` : ""}
+          <div class="ai-context-model-list">
+            <div class="ai-context-model-toolbar"><input id="aiModelSearch" value="${escapeHtml(local.aiModelSearch)}" placeholder="Search models" autocomplete="off" aria-label="Search models" /><button type="button" data-open-provider-dialog title="Connect provider" aria-label="Connect provider">${uiGlyph("plus")}</button><button type="button" data-open-model-settings title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button></div>
+            ${[...grouped.entries()].map(([providerName, providerItems]) => `
+              <span class="ai-context-model-provider">${escapeHtml(providerName)}</span>
               ${providerItems.slice(0, 10).map((item) => {
                 const sameLocalProvider = ["local", "localleaf-local"].includes(active.providerId) && ["local", "localleaf-local"].includes(item.providerId);
                 const isActive = (active.providerId === item.providerId || sameLocalProvider) && active.modelId === item.modelId;
                 return `
-                  <button type="button" role="menuitem" data-picker-provider="${escapeHtml(item.providerId)}" data-picker-model="${escapeHtml(item.modelId)}" class="${isActive ? "active" : ""}">
-                    <strong>${escapeHtml(item.label)}</strong>
-                    ${isActive ? `<span class="ai-model-check" aria-hidden="true"></span>` : ""}
-                  </button>
+                  <button type="button" data-picker-provider="${escapeHtml(item.providerId)}" data-picker-model="${escapeHtml(item.modelId)}" class="${isActive ? "active" : ""}">${escapeHtml(item.label)}${isActive ? `<span class="ai-context-model-check" aria-hidden="true">${editorToolIcon("check")}</span>` : ""}</button>
                 `;
               }).join("")}
-            </div>
-          `).join("") || `<div class="ai-model-empty">No models match.</div>`}
+            `).join("") || `<div class="ai-model-empty">No models match.</div>`}
+          </div>
         </div>
-      ` : ""}
+      </div>
       <button type="button" id="aiPermissionModeButton" class="ai-permission-mode ${local.aiPermissions.yoloMode ? "is-yolo" : ""}" title="Switch AI write permission mode">${escapeHtml(permissionLabel)}</button>
     </div>
   `;
@@ -5715,6 +6814,41 @@ function aiSendButtonMarkup() {
   `;
 }
 
+function aiFormatToolbarMarkup() {
+  const tools = [
+    { action: "bold", label: "Bold", shortcut: "Ctrl/Cmd+B", keyshortcuts: "Control+B Meta+B", glyph: "<strong>B</strong>" },
+    { action: "italic", label: "Italic", shortcut: "Ctrl/Cmd+I", keyshortcuts: "Control+I Meta+I", glyph: "<em>I</em>" },
+    { action: "inlineCode", label: "Inline code", shortcut: "Ctrl/Cmd+E", keyshortcuts: "Control+E Meta+E", glyph: "<code>&lt;/&gt;</code>" },
+    { action: "codeBlock", label: "Code block", shortcut: "Ctrl/Cmd+Shift+K", keyshortcuts: "Control+Shift+K Meta+Shift+K", glyph: "<code>{ }</code>" },
+    { action: "unorderedList", label: "Bulleted list", shortcut: "Ctrl/Cmd+Shift+8", keyshortcuts: "Control+Shift+8 Meta+Shift+8", glyph: "<span>&bull;&nbsp;&mdash;</span>" },
+    { action: "orderedList", label: "Numbered list", shortcut: "Ctrl/Cmd+Shift+7", keyshortcuts: "Control+Shift+7 Meta+Shift+7", glyph: "<span>1.</span>" },
+    { action: "link", label: "Link", shortcut: "Ctrl/Cmd+K", keyshortcuts: "Control+K Meta+K", glyph: "<span class=\"ai-format-link-glyph\">&#8599;</span>" }
+  ];
+  return `
+    <div class="ai-format-toolbar" role="toolbar" aria-label="Format AI message with Markdown">
+      ${tools.map((tool) => `
+        <button type="button" data-ai-format="${tool.action}" title="${tool.label} (${tool.shortcut})" aria-label="${tool.label}" aria-keyshortcuts="${tool.keyshortcuts}">${tool.glyph}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function aiSessionDeleteDialogMarkup() {
+  const session = local.aiSessions.find((item) => item.id === local.aiSessionDeleteId);
+  return `
+    <div class="ai-session-delete-backdrop ${session ? "open" : ""}" ${session ? "" : "inert aria-hidden=\"true\""}>
+      <div class="ai-session-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="aiSessionDeleteTitle" aria-describedby="aiSessionDeleteDescription">
+        <h2 id="aiSessionDeleteTitle">Delete AI session?</h2>
+        <p id="aiSessionDeleteDescription">${session ? `“${escapeHtml(session.title || "This session")}” and its transcript will be removed from this device.` : "This AI session will be removed."}</p>
+        <div class="ai-session-delete-dialog-actions">
+          <button type="button" id="aiSessionDeleteCancel" data-cancel-session-delete>Cancel</button>
+          <button type="button" data-confirm-delete="${escapeHtml(session?.id || "")}">Delete</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function aiHelperPanelMarkup() {
   return `
     <section class="ai-helper-panel right-rail-panel ${local.rightRailTab === "ai" ? "active" : ""}" ${local.rightRailTab === "ai" ? "" : "hidden"}>
@@ -5724,8 +6858,9 @@ function aiHelperPanelMarkup() {
         </div>
         <button class="icon-button chat-tool" id="openAiSettings" title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button>
       </div>
-      <div class="ai-chat-wrap">
-        <div class="ai-chat-list" id="aiChatList">
+      ${aiSessionMenuMarkup()}
+      <div class="ai-chat-wrap ${local.aiTranscriptSwitching ? "ai-transcript-switching" : ""}">
+        <div class="ai-chat-list ${local.aiTranscriptSwitching ? "ai-transcript-switching" : ""}" id="aiChatList">
           ${local.aiMessages.map(aiMessageMarkup).join("")}
           ${local.aiActivityMessage ? aiWorkingMarkup() : ""}
         </div>
@@ -5733,39 +6868,65 @@ function aiHelperPanelMarkup() {
       </div>
       ${aiQueuedPromptStripMarkup()}
       <form class="ai-input-form" id="aiHelperForm">
-        <textarea id="aiPrompt" rows="2" placeholder="Ask AI Helper...">${escapeHtml(local.aiPrompt)}</textarea>
+        ${aiFormatToolbarMarkup()}
+        <textarea id="aiPrompt" rows="2" placeholder="Ask AI Helper..." aria-label="Message AI Helper" aria-describedby="aiComposerHint">${escapeHtml(local.aiPrompt)}</textarea>
+        <span class="ai-composer-hint" id="aiComposerHint">Markdown supported. Enter sends; Shift+Enter adds a line.</span>
         <div class="ai-composer-footer">
           <div class="ai-composer-left">
-            ${aiSessionMenuMarkup()}
             ${aiModelChipMarkup()}
           </div>
           ${aiSendButtonMarkup()}
         </div>
       </form>
+      ${aiSessionDeleteDialogMarkup()}
+      <div class="ai-sr-announcer" role="status" aria-live="polite" aria-atomic="true">${escapeHtml(local.aiAnnouncement)}</div>
     </section>
   `;
+}
+
+function aiReviewStatusLabel(status = local.aiReviewStatus) {
+  if (!status) return "";
+  if (status.state === "locating") return "Locating change";
+  if (status.state === "ready" && status.output?.page) return `Showing page ${status.output.page}`;
+  if (status.state === "pending") return "PDF is still compiling";
+  if (status.state === "busy") return "PDF lookup is busy";
+  if (status.state === "stale") return "Recompile to locate change";
+  if (status.state === "unavailable") return "Source opened; PDF location unavailable";
+  return "";
+}
+
+function updateAiReviewStatus(status) {
+  local.aiReviewStatus = status || null;
+  const element = document.querySelector("#changesReviewStatus");
+  if (!element) return;
+  const label = aiReviewStatusLabel();
+  element.textContent = label;
+  element.hidden = !label;
+  element.dataset.state = String(status?.state || "");
+  element.title = String(status?.reason || (status?.output?.page ? `Showing the change on PDF page ${status.output.page}.` : ""));
 }
 
 function aiRunChangeMarkup(run) {
   const expanded = local.aiExpandedRuns.has(run.id);
   const stats = aiRunStats(run);
-  const appliedCount = stats.applied;
+  const canUndo = run.proposals.some((proposal) => proposal.status === "applied" && proposal.actionable !== false);
   const fileCount = new Set(run.proposals.map((proposal) => proposal.path || "Current file")).size;
+  const detailsId = `ai-run-details-${String(run.id || "run").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return `
-    <section class="ai-run-change ${expanded ? "expanded" : ""}" data-ai-run="${escapeHtml(run.id)}">
+    <section class="ai-run-change ${expanded ? "expanded" : ""}" data-ai-run="${escapeHtml(run.runId)}" data-ai-run-group="${escapeHtml(run.id)}">
       <div class="ai-run-head">
-        <button type="button" class="ai-run-toggle" data-toggle-ai-run="${escapeHtml(run.id)}" aria-expanded="${expanded ? "true" : "false"}">
+        <button type="button" class="ai-run-toggle" data-toggle-ai-run="${escapeHtml(run.id)}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(detailsId)}">
           <strong>${fileCount} file${fileCount === 1 ? "" : "s"} changed</strong>
           <span class="diff-added">+${stats.added}</span>
           <span class="diff-removed">-${stats.removed}</span>
         </button>
         <div class="ai-run-actions">
-          <button type="button" data-undo-ai-run="${escapeHtml(run.id)}" ${appliedCount ? "" : "disabled"}>Undo</button>
-          <button type="button" data-review-ai-run="${escapeHtml(run.id)}">Review</button>
-          <button type="button" data-toggle-ai-run="${escapeHtml(run.id)}" title="${expanded ? "Collapse run" : "Expand run"}" aria-label="${expanded ? "Collapse run" : "Expand run"}">${expanded ? "^" : "v"}</button>
+          <button type="button" data-undo-ai-run="${escapeHtml(run.runId)}" data-run-group="${escapeHtml(run.id)}" ${canUndo ? "" : "disabled"}>Undo</button>
+          <button type="button" data-review-ai-run="${escapeHtml(run.runId)}" data-run-group="${escapeHtml(run.id)}" aria-label="Review this change and show its PDF location">Review</button>
+          <button type="button" data-toggle-ai-run="${escapeHtml(run.id)}" title="${expanded ? "Collapse run" : "Expand run"}" aria-label="${expanded ? "Collapse run" : "Expand run"}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(detailsId)}">${expanded ? "^" : "v"}</button>
         </div>
       </div>
-      ${expanded ? `<div class="ai-run-files">${run.proposals.map(aiHistoryCardMarkup).join("")}</div>` : ""}
+      ${expanded ? `<div class="ai-run-files" id="${escapeHtml(detailsId)}">${run.proposals.map(aiHistoryCardMarkup).join("")}</div>` : ""}
     </section>
   `;
 }
@@ -5777,6 +6938,7 @@ function changesPanelMarkup() {
     <section class="changes-panel right-rail-panel ${local.rightRailTab === "changes" ? "active" : ""}" ${local.rightRailTab === "changes" ? "" : "hidden"}>
       <div class="panel-head">
         <strong>Changes</strong>
+        <span class="changes-review-status" id="changesReviewStatus" role="status" aria-live="polite" aria-atomic="true" data-state="${escapeHtml(local.aiReviewStatus?.state || "")}" title="${escapeHtml(local.aiReviewStatus?.reason || "")}" ${aiReviewStatusLabel() ? "" : "hidden"}>${escapeHtml(aiReviewStatusLabel())}</span>
         <small>${runs.length} run${runs.length === 1 ? "" : "s"}</small>
       </div>
       <div class="change-history-list">
@@ -5857,7 +7019,7 @@ function setAiProposalStatus(proposalId, status, patch = {}) {
 
 function shouldAutoApplyAiProposal(proposal) {
   if (!proposal || proposal.status !== "proposed") return false;
-  return proposal.approvalRequired === false || local.aiPermissions.yoloMode;
+  return proposal.approvalRequired === false;
 }
 
 function isAiChatNearBottom(list) {
@@ -5902,13 +7064,55 @@ function autoGrowAiPrompt(input = document.querySelector("#aiPrompt")) {
   input.style.height = `${Math.min(input.scrollHeight, 148)}px`;
 }
 
-function stopAiRun() {
+function applyAiPromptFormat(action) {
+  const input = document.querySelector("#aiPrompt");
+  const formatter = window.LocalLeafMarkdown?.formatSelection;
+  if (!input || typeof formatter !== "function") return;
+  const result = formatter(input.value, input.selectionStart, input.selectionEnd, action);
+  input.value = result.value;
+  local.aiPrompt = result.value;
+  const queued = findQueuedAiPrompt(local.aiEditingQueuedPromptId);
+  if (queued) queued.message = local.aiPrompt;
+  autoGrowAiPrompt(input);
+  updateAiSendButtonState();
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(result.selectionStart, result.selectionEnd);
+}
+
+function aiPromptFormatShortcut(event) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return "";
+  const key = String(event.key || "").toLowerCase();
+  if (key === "b") return "bold";
+  if (key === "i") return "italic";
+  if (key === "e") return "inlineCode";
+  if (key === "k") return event.shiftKey ? "codeBlock" : "link";
+  if (event.shiftKey && event.code === "Digit8") return "unorderedList";
+  if (event.shiftKey && event.code === "Digit7") return "orderedList";
+  return "";
+}
+
+async function stopAiRun(sessionId = local.aiActiveRunSessionId) {
   local.aiStopRequested = true;
+  const runId = local.aiActiveRunId;
+  if (runId && sessionId) {
+    try {
+      const sessionState = await api("/api/agent/run/cancel", {
+        method: "POST",
+        body: { runId, sessionId }
+      });
+      applyAiSessionState(sessionState);
+      reduceAiSessionState({ type: "RUN_CANCELLED", runId });
+      announceAi("AI response stopped.");
+    } catch (error) {
+      announceAi(error.message || "Could not stop the AI response.");
+    }
+  }
   local.aiRunControllers.forEach((controller) => controller.abort());
   local.aiRunControllers.clear();
   local.aiActiveRunCount = 0;
   local.aiBusy = false;
   local.aiActiveRunId = "";
+  local.aiActiveRunSessionId = "";
   local.aiCompileVerifying = false;
   local.aiActivityMessage = "";
   local.aiForceScrollBottom = true;
@@ -5918,7 +7122,8 @@ function stopAiRun() {
 function scrollAiChatToBottom({ smooth = false } = {}) {
   const list = document.querySelector("#aiChatList") || document.querySelector(".ai-chat-list");
   if (!list) return;
-  list.scrollTo({ top: list.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  const allowSmooth = smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  list.scrollTo({ top: list.scrollHeight, behavior: allowSmooth ? "smooth" : "auto" });
   local.aiChatPinnedToBottom = true;
   setAiChatJumpVisible(false);
 }
@@ -5935,14 +7140,17 @@ function bindAiChatScrollState() {
   requestAnimationFrame(update);
 }
 
-function createQueuedAiPrompt(prompt) {
+function createQueuedAiPrompt(prompt, options = {}) {
   const activeModel = activeAiProviderModel();
   return {
     id: `queued-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    clientMessageId: `user-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    sessionId: local.aiCurrentSessionId,
     message: String(prompt || "").trim(),
     createdAt: Date.now(),
-    path: local.selectedFile,
-    selectedText: selectedEditorText(),
+    path: options.path ?? local.selectedFile,
+    selectedText: options.selectedText ?? selectedEditorText(),
+    pdfAnnotation: options.pdfAnnotation || null,
     model: {
       providerId: activeModel.providerId || "",
       modelId: activeModel.modelId || "",
@@ -5953,10 +7161,11 @@ function createQueuedAiPrompt(prompt) {
   };
 }
 
-function queueAiPrompt(prompt) {
-  const queued = createQueuedAiPrompt(prompt);
+function queueAiPrompt(prompt, options = {}) {
+  const queued = createQueuedAiPrompt(prompt, options);
   if (!queued.message) return null;
   local.aiQueuedPrompts.push(queued);
+  reduceAiSessionState({ type: "PROMPT_QUEUED", item: queued });
   local.aiPrompt = "";
   local.aiEditingQueuedPromptId = "";
   local.aiSessionMoreMenuOpen = false;
@@ -5986,6 +7195,7 @@ function editQueuedAiPrompt(id) {
 }
 
 function deleteQueuedAiPrompt(id) {
+  reduceAiSessionState({ type: "PROMPT_DEQUEUED", id });
   local.aiQueuedPrompts = local.aiQueuedPrompts.filter((item) => item.id !== id);
   if (local.aiEditingQueuedPromptId === id) {
     local.aiEditingQueuedPromptId = "";
@@ -6012,20 +7222,6 @@ function commitQueuedPromptEdit() {
   return true;
 }
 
-async function steerQueuedAiPrompt(id) {
-  const queued = findQueuedAiPrompt(id);
-  if (!queued) return;
-  local.aiQueuedPrompts = local.aiQueuedPrompts.filter((item) => item.id !== queued.id);
-  if (local.aiEditingQueuedPromptId === queued.id) {
-    local.aiEditingQueuedPromptId = "";
-    local.aiPrompt = "";
-  }
-  local.aiSessionMoreMenuOpen = false;
-  if (local.aiQueuedPromptMenuOpenId === queued.id) local.aiQueuedPromptMenuOpenId = "";
-  refreshRightRailUi();
-  await askAiHelper(queued.message, { queuedPrompt: queued, steer: true, allowWhileBusy: true });
-}
-
 async function askAiHelper(message, options = {}) {
   const prompt = String(message || local.aiPrompt || "").trim();
   if (!prompt) return;
@@ -6033,13 +7229,21 @@ async function askAiHelper(message, options = {}) {
     commitQueuedPromptEdit();
     return;
   }
-  if (local.aiBusy && !options.allowWhileBusy) {
-    queueAiPrompt(prompt);
+  if (local.aiBusy) {
+    if (options.queuedPrompt) {
+      local.aiQueuedPrompts.unshift(options.queuedPrompt);
+      reduceAiSessionState({ type: "PROMPT_QUEUED", item: options.queuedPrompt });
+      refreshRightRailUi();
+    } else {
+      queueAiPrompt(prompt, options);
+    }
     return;
   }
   const activeModel = activeAiProviderModel();
   const queuedModel = options.queuedPrompt?.model || null;
+  const originSessionId = options.queuedPrompt?.sessionId || local.aiCurrentSessionId;
   const runId = `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const clientMessageId = options.queuedPrompt?.clientMessageId || `user-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const controller = new AbortController();
   local.aiRunControllers.add(controller);
   local.aiStopRequested = false;
@@ -6047,37 +7251,51 @@ async function askAiHelper(message, options = {}) {
   local.aiActiveRunCount += 1;
   local.aiBusy = local.aiActiveRunCount > 0;
   local.aiActiveRunId = local.aiActiveRunId || runId;
+  local.aiActiveRunSessionId = originSessionId;
   local.aiActivityMessage = options.steer ? "Steering the active run" : "Reading the project and planning the edit";
   local.rightRailTab = "ai";
   localStorage.setItem("localleaf.rightRailTab", "ai");
   local.aiForceScrollBottom = true;
-  local.aiMessages.push({ id: `user-${Date.now()}`, role: "user", message: prompt });
-  syncCurrentAiSession(prompt);
+  const userMessage = { id: clientMessageId, role: "user", message: prompt, createdAt: Date.now(), runId };
+  reduceAiSessionState({
+    type: "RUN_STARTED",
+    runId,
+    sessionId: originSessionId,
+    userMessage,
+    run: {
+      runId,
+      sessionId: originSessionId,
+      clientMessageId,
+      model: queuedModel || activeModel,
+      permissions: options.queuedPrompt?.permissions || local.aiPermissions
+    }
+  });
   refreshRightRailUi();
   try {
     const response = await api(options.steer ? "/api/agent/steer" : "/api/agent/message", {
       method: "POST",
       signal: controller.signal,
       body: {
-        runId: options.steer ? local.aiActiveRunId : runId,
-        sessionId: local.aiCurrentSessionId,
+        runId,
+        clientMessageId,
+        sessionId: originSessionId,
         queuedPromptId: options.queuedPrompt?.id || "",
         message: prompt,
-        path: options.path || options.queuedPrompt?.path || local.selectedFile,
+        path: options.queuedPrompt ? options.queuedPrompt.path : (options.path ?? local.selectedFile),
         currentText: currentEditorText(),
-        selectedText: options.selectedText || options.queuedPrompt?.selectedText || selectedEditorText(),
-        pdfAnnotation: options.pdfAnnotation || null,
+        selectedText: options.queuedPrompt ? options.queuedPrompt.selectedText : (options.selectedText ?? selectedEditorText()),
+        pdfAnnotation: options.queuedPrompt ? options.queuedPrompt.pdfAnnotation : (options.pdfAnnotation || null),
         compileLogs: local.appState?.compile?.logs || [],
-        conversation: local.aiMessages.slice(-12).map((item) => ({
-          role: item.role,
-          message: item.message || ""
-        })),
         aiProviderId: queuedModel?.providerId || activeModel.providerId || "",
         aiModelId: queuedModel?.modelId || activeModel.modelId || "",
         aiPermissions: options.queuedPrompt?.permissions || local.aiPermissions
       }
     });
-    const proposals = (response.proposals || []).map((proposal) => ({ ...proposal, status: proposal.status || "proposed", sessionId: local.aiCurrentSessionId }));
+    const proposals = (response.proposals || []).map((proposal) => ({
+      ...proposal,
+      status: proposal.status || "proposed",
+      sessionId: response.sessionId || originSessionId
+    }));
     proposals.forEach(rememberAiProposal);
     const visibleApprovalIds = [];
     const autoApplied = [];
@@ -6105,34 +7323,68 @@ async function askAiHelper(message, options = {}) {
     } else {
       visibleApprovalIds.push(...proposals.filter((proposal) => proposal.status === "proposed").map((proposal) => proposal.id));
     }
-    local.aiMessages.push({
-      id: `assistant-${Date.now()}`,
+    const assistantMessage = {
+      ...(response.assistantMessage || {}),
+      id: response.assistantMessage?.id || `assistant-${runId}`,
       role: "assistant",
-      message: response.reply || "I prepared a response.",
+      message: response.assistantMessage?.message || response.reply || "I prepared a response.",
       proposals,
-      approvalCards: visibleApprovalIds
+      approvalCards: visibleApprovalIds,
+      runId
+    };
+    reduceAiSessionState({
+      type: "RUN_COMPLETED",
+      runId,
+      assistantMessage,
+      sessionRevision: response.sessionRevision,
+      contextUsage: response.contextUsage
     });
-    syncCurrentAiSession(prompt);
+    local.aiContextUpdating = true;
+    await refreshAiSessionsFromHost({ render: false });
+    if (originSessionId !== local.aiCurrentSessionId) {
+      const origin = local.aiSessions.find((session) => session.id === originSessionId);
+      announceAi(`Response completed in ${origin?.title || "a background AI session"}.`);
+    } else if (Number(response.contextUsage?.window?.percentUsed || 0) >= 90) {
+      announceAi("Context is nearly full. Consider starting a new session.");
+    } else {
+      announceAi("AI response completed.");
+    }
+    setTimeout(() => {
+      local.aiContextUpdating = false;
+      document.querySelector(".ai-context-ring")?.classList.remove("is-updating");
+    }, window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 140);
     if (autoApplied.length) await verifyAiRunAfterApply(autoApplied);
   } catch (error) {
     if (!controller.signal.aborted) {
-      local.aiMessages.push({
-        id: `assistant-error-${Date.now()}`,
-        role: "assistant",
-        message: error.message || "AI Helper could not respond."
+      reduceAiSessionState({
+        type: error.code === "AI_RUN_CANCELLED" ? "RUN_CANCELLED" : "RUN_FAILED",
+        runId,
+        error: { message: error.message || "AI Helper could not respond." }
       });
-      syncCurrentAiSession(prompt);
+      if (originSessionId === local.aiCurrentSessionId) {
+        local.aiMessages.push({
+          id: `assistant-error-${Date.now()}`,
+          role: "assistant",
+          message: error.message || "AI Helper could not respond."
+        });
+      }
+      announceAi(error.message || "AI Helper could not respond.");
+      await refreshAiSessionsFromHost({ render: false });
     }
   } finally {
     local.aiRunControllers.delete(controller);
     local.aiActiveRunCount = controller.signal.aborted ? local.aiRunControllers.size : Math.max(0, local.aiActiveRunCount - 1);
     local.aiBusy = local.aiActiveRunCount > 0;
-    if (!local.aiBusy) local.aiActiveRunId = "";
+    if (!local.aiBusy) {
+      local.aiActiveRunId = "";
+      local.aiActiveRunSessionId = "";
+    }
     if (!local.aiBusy && !local.aiCompileVerifying) local.aiActivityMessage = "";
     local.aiForceScrollBottom = true;
     refreshRightRailUi();
-    if (!local.aiBusy && !controller.signal.aborted && !local.aiStopRequested) {
+    if (!local.aiBusy) {
       const queued = local.aiQueuedPrompts.shift();
+      if (queued?.id) reduceAiSessionState({ type: "PROMPT_DEQUEUED", id: queued.id });
       if (queued?.message) setTimeout(() => askAiHelper(queued.message, { queuedPrompt: queued, allowWhileBusy: true }), 0);
     }
     if (!local.aiBusy) local.aiStopRequested = false;
@@ -6142,6 +7394,21 @@ async function askAiHelper(message, options = {}) {
 async function approveAiProposal(proposalId, options = {}) {
   const proposal = findAiProposal(proposalId);
   if (!proposal) return;
+  if (proposal.actionable === false) {
+    showAppNotice("This proposal is historical and can no longer be applied after LocalLeaf restarted.", {
+      type: "warning",
+      title: "Proposal unavailable",
+      detail: "Ask the AI Helper to prepare a fresh proposal against the current project state."
+    });
+    return null;
+  }
+  if (proposal.operation !== "create" && proposal.path === local.selectedFile && !await saveCurrentFile()) {
+    showAppNotice("Save the current file before applying this AI proposal.", {
+      type: "warning",
+      title: "Approval paused"
+    });
+    return null;
+  }
   let appliedProposal = null;
   let verifierOwnsActivity = false;
   setAiActivity(options.fromYolo ? "Applying YOLO edit" : "Applying approved change", { render: options.renderAfter !== false });
@@ -6150,8 +7417,17 @@ async function approveAiProposal(proposalId, options = {}) {
     appliedProposal = result.proposal || null;
     setAiProposalStatus(proposalId, appliedProposal?.status || "applied", appliedProposal || {});
     await loadState();
-    if (!local.selectedFile || proposal.path === local.selectedFile) {
+    if (proposal.operation === "create") {
+      const selected = await selectProjectFile(proposal.path);
+      if (!selected) {
+        showAppNotice("The file was created, but LocalLeaf kept the current editor open because its unsaved content could not be saved.", {
+          type: "warning",
+          title: "New file created"
+        });
+      }
+    } else if (!local.selectedFile || proposal.path === local.selectedFile) {
       local.selectedFile = proposal.path || local.selectedFile;
+      expandToFile(local.selectedFile);
       await loadSelectedFile();
       updateEditorSourceUi();
     }
@@ -6159,7 +7435,9 @@ async function approveAiProposal(proposalId, options = {}) {
       local.aiMessages.push({
         id: `assistant-auto-apply-${Date.now()}`,
         role: "assistant",
-        message: `YOLO mode applied the approved-safe edit to ${proposal.path || "the current file"}.`
+        message: proposal.operation === "create"
+          ? `Created ${proposal.path || "the new project file"} after host approval.`
+          : `YOLO mode applied the approved-safe edit to ${proposal.path || "the current file"}.`
       });
     }
     if (options.verifyCompile !== false) {
@@ -6169,11 +7447,20 @@ async function approveAiProposal(proposalId, options = {}) {
     }
     return appliedProposal || proposal;
   } catch (error) {
-    setAiProposalStatus(proposalId, "stale");
+    if (error.proposal) {
+      setAiProposalStatus(proposalId, error.proposal.status || proposal.status || "proposed", error.proposal);
+    } else {
+      try {
+        await loadState();
+        await refreshAiSessionsFromHost({ render: false });
+      } catch {
+        // Keep the last known proposal state when the host cannot be reached.
+      }
+    }
     local.aiMessages.push({
       id: `assistant-apply-error-${Date.now()}`,
       role: "assistant",
-      message: error.message || "Could not apply the proposal."
+      message: error.message || "LocalLeaf could not confirm whether the proposal was applied. The project state was refreshed where possible."
     });
     return null;
   } finally {
@@ -6184,11 +7471,27 @@ async function approveAiProposal(proposalId, options = {}) {
 }
 
 async function rejectAiProposal(proposalId) {
+  const proposal = findAiProposal(proposalId);
+  if (proposal?.actionable === false) {
+    showAppNotice("This historical proposal is no longer actionable after LocalLeaf restarted.", {
+      type: "warning",
+      title: "Proposal unavailable"
+    });
+    return;
+  }
   try {
     const result = await api("/api/agent/approval/reject", { method: "POST", body: { proposalId } });
     setAiProposalStatus(proposalId, result.proposal?.status || "rejected", result.proposal || {});
   } catch (error) {
-    setAiProposalStatus(proposalId, "rejected");
+    if (error.proposal) {
+      setAiProposalStatus(proposalId, error.proposal.status || "proposed", error.proposal);
+    } else {
+      try {
+        await refreshAiSessionsFromHost({ render: false });
+      } catch {
+        // Leave the proposal actionable if the host could not confirm the rejection.
+      }
+    }
     local.aiMessages.push({
       id: `assistant-reject-error-${Date.now()}`,
       role: "assistant",
@@ -6209,38 +7512,127 @@ function explainAiProposal(proposalId) {
   local.aiMessages.push({
     id: `assistant-explain-${Date.now()}`,
     role: "assistant",
-    message: `${proposal.summary || "This change updates the selected text file."} It targets ${proposal.path || "the current file"} and is listed in Changes.`,
-    fileLinks: proposal.path ? [proposal.path] : []
+    message: proposal.operation === "create"
+      ? `${proposal.summary || "This proposal creates a new project file."} It will create ${proposal.path || "the requested file"} only after host approval and is listed in Changes.`
+      : `${proposal.summary || "This change updates the selected text file."} It targets ${proposal.path || "the current file"} and is listed in Changes.`,
+    fileLinks: proposal.path && (proposal.operation !== "create" || proposal.status === "applied") ? [proposal.path] : []
   });
   syncCurrentAiSession();
   refreshRightRailUi();
 }
 
-async function openAiProposalFile(proposalId) {
+async function openAiProposalFile(proposalId, options = {}) {
   const proposal = findAiProposal(proposalId);
-  if (!proposal?.path) return;
-  local.selectedFile = proposal.path;
+  if (!proposal?.path) return false;
+  const isCurrent = typeof options.isCurrent === "function" ? options.isCurrent : () => true;
+  if (!isCurrent()) return false;
   local.sourcePaneVisible = true;
   localStorage.setItem("localleaf.sourcePaneVisible", "1");
   local.editorMode = "code";
   localStorage.setItem("localleaf.editorMode", "code");
   try {
-    const previewScroll = capturePreviewScroll();
-    await loadSelectedFile();
-    expandToFile(proposal.path);
+    applyEditorLayoutState();
+    const selected = await selectProjectFile(proposal.path, { isCurrent });
+    if (!selected || !isCurrent()) return false;
     local.rightRailTab = "changes";
-    await render();
-    restorePreviewScroll(previewScroll);
-    setTimeout(() => {
+    localStorage.setItem("localleaf.rightRailTab", "changes");
+    setEditorMode("code");
+    if (options.focus !== false) requestAnimationFrame(() => {
+      if (!isCurrent()) return;
       const focus = proposal.focus || {};
-      const start = Number.isInteger(focus.start) ? focus.start : 0;
-      const end = Number.isInteger(focus.end) ? Math.max(start, focus.end) : start;
+      const contentLength = String(local.editorContent || "").length;
+      const start = Math.max(0, Math.min(contentLength, Number.isInteger(focus.start) ? focus.start : 0));
+      const end = Math.max(start, Math.min(contentLength, Number.isInteger(focus.end) ? focus.end : start));
       local.codeEditor?.selectRange?.(start, end);
       local.codeEditor?.focus?.();
-    }, 0);
+      requestAnimationFrame(centerCodeEditorSelection);
+    });
+    return true;
   } catch (error) {
     showAppNotice(error.message || "Could not open the proposal file.", { title: "Open file" });
+    return false;
   }
+}
+
+function aiProposalExpectedSourceHash(proposal) {
+  return proposal?.status === "applied"
+    ? String(proposal.newHash || "")
+    : String(proposal?.baseHash || "");
+}
+
+function aiProposalOutputTarget(proposal, runId = "") {
+  const focus = proposal?.focus || {};
+  const line = Number.isSafeInteger(Number(focus.line)) && Number(focus.line) > 0
+    ? Number(focus.line)
+    : 1;
+  const column = Number.isSafeInteger(Number(focus.column)) && Number(focus.column) >= 0
+    ? Number(focus.column)
+    : 0;
+  const compile = local.appState?.compile || {};
+  return {
+    proposalId: String(proposal?.id || ""),
+    runId: String(runId || aiRunIdForProposal(proposal)),
+    path: String(proposal?.path || ""),
+    line,
+    column,
+    expectedSourceHash: aiProposalExpectedSourceHash(proposal),
+    artifactId: String(compile.artifactId || ""),
+    version: Number(compile.version || 0)
+  };
+}
+
+async function resolveAiProposalPdfOutput(target) {
+  const result = await api("/api/pdf/output-position", {
+    method: "POST",
+    body: {
+      path: target.path,
+      line: target.line,
+      column: target.column,
+      expectedSourceHash: target.expectedSourceHash,
+      artifactId: target.artifactId,
+      version: target.version
+    }
+  });
+  return result?.ok
+    ? {
+        ...result,
+        proposalId: target.proposalId,
+        runId: target.runId,
+        artifactId: String(result.artifactId || target.artifactId),
+        version: Number(result.version || target.version)
+      }
+    : result;
+}
+
+async function revealAiProposalPdfOutput(output, navigation = {}) {
+  if (!output?.ok || (navigation.isCurrent && !navigation.isCurrent())) return false;
+  const previewPane = document.querySelector("#previewPane");
+  const reveal = window.LocalLeafPdfPreview?.revealPosition;
+  if (!previewPane || typeof reveal !== "function") return false;
+  local.previewPaneVisible = true;
+  localStorage.setItem("localleaf.previewPaneVisible", "1");
+  applyEditorLayoutState();
+  const revealed = await reveal(previewPane, output);
+  if (navigation.isCurrent && !navigation.isCurrent()) return false;
+  return revealed === true;
+}
+
+function aiReviewNavigator() {
+  if (local.aiReviewNavigator) return local.aiReviewNavigator;
+  const createController = window.LocalLeafPdfSourceNavigation?.createPdfOutputNavigationController;
+  if (typeof createController !== "function") return null;
+  local.aiReviewNavigator = createController({
+    lookup: resolveAiProposalPdfOutput,
+    reveal: revealAiProposalPdfOutput,
+    onStatus: (status) => {
+      const previousTarget = local.aiReviewStatus?.target || null;
+      updateAiReviewStatus({
+        ...status,
+        target: status?.target || status?.output || previousTarget
+      });
+    }
+  });
+  return local.aiReviewNavigator;
 }
 
 function proposalDiffText(proposal) {
@@ -6294,6 +7686,8 @@ function compileFailureSummary() {
 async function requestCompileRepair(runId, sourceProposals, attempt) {
   const primary = sourceProposals.find((proposal) => proposal?.path) || sourceProposals[0] || {};
   const activeModel = activeAiProviderModel();
+  const repairRunId = `${String(runId || "run").slice(0, 46)}-repair-${attempt}-${Math.random().toString(36).slice(2, 8)}`;
+  const clientMessageId = `user-${repairRunId}`;
   const repairMessage = [
     `Fix the LaTeX compile errors caused by AI run ${runId}.`,
     "Keep the intended edit, make the smallest safe repair, and return a LocalLeaf proposal.",
@@ -6302,7 +7696,10 @@ async function requestCompileRepair(runId, sourceProposals, attempt) {
   const response = await api("/api/agent/message", {
     method: "POST",
     body: {
-      runId,
+      runId: repairRunId,
+      clientMessageId,
+      sessionId: primary.sessionId || local.aiCurrentSessionId,
+      parentRunId: runId,
       message: repairMessage,
       path: primary.path || local.selectedFile,
       currentText: currentEditorText(),
@@ -6317,7 +7714,7 @@ async function requestCompileRepair(runId, sourceProposals, attempt) {
     ...proposal,
     status: proposal.status || "proposed",
     sessionId: local.aiCurrentSessionId,
-    runId: proposal.runId || runId
+    runId: proposal.runId || repairRunId
   }));
   proposals.forEach(rememberAiProposal);
   return { response, proposals };
@@ -6423,11 +7820,65 @@ function toggleAiRun(runId) {
   refreshRightRailUi();
 }
 
-function reviewAiRun(runId) {
-  local.aiExpandedRuns.add(runId);
-  const proposal = aiHistoryItems().find((item) => aiRunIdForProposal(item) === runId);
+async function reviewAiRun(runKey) {
+  const requestId = ++local.aiReviewOpenSequence;
+  const isCurrent = () => requestId === local.aiReviewOpenSequence;
+  local.aiReviewNavigator?.cancel?.();
+  local.aiExpandedRuns.add(runKey);
+  const run = aiChangeRuns(aiHistoryItems()).find((item) => item.id === runKey);
+  const runId = run?.runId || "";
+  const runProposals = run?.proposals || [];
+  const proposal = runProposals.find((item) => item.operation !== "create") || runProposals[0];
+  if (proposal?.id) local.aiExpandedChanges.add(proposal.id);
   refreshRightRailUi();
-  if (proposal) openAiProposalFile(proposal.id);
+  if (!proposal) {
+    updateAiReviewStatus({ state: "unavailable", reason: "This change is no longer available to review." });
+    return false;
+  }
+  if (proposal.operation === "create" && proposal.status !== "applied") {
+    updateAiReviewStatus({
+      state: "unavailable",
+      target: { proposalId: proposal.id, runId, path: proposal.path },
+      reason: "This new file has not been created yet. Review its diff here, then choose Create file if it is correct."
+    });
+    return false;
+  }
+
+  local.sourcePaneVisible = true;
+  local.previewPaneVisible = true;
+  localStorage.setItem("localleaf.sourcePaneVisible", "1");
+  localStorage.setItem("localleaf.previewPaneVisible", "1");
+  applyEditorLayoutState();
+  const target = aiProposalOutputTarget(proposal, runId);
+  updateAiReviewStatus({ state: "locating", target });
+  const opened = await openAiProposalFile(proposal.id, { isCurrent });
+  if (!isCurrent()) return false;
+  if (!opened) {
+    const unavailable = { state: "unavailable", target, reason: "The changed source file could not be opened." };
+    updateAiReviewStatus(unavailable);
+    return false;
+  }
+
+  const navigator = aiReviewNavigator();
+  if (!navigator) {
+    const unavailable = {
+      state: "unavailable",
+      target,
+      reason: "PDF location navigation is unavailable in this build. The changed source is open."
+    };
+    updateAiReviewStatus(unavailable);
+    return false;
+  }
+  const result = await navigator.navigate(target);
+  if (!isCurrent() || result?.superseded) return false;
+  if (!result?.ok) {
+    showAppNotice(result?.reason || "The changed source is open, but its PDF location is unavailable.", {
+      title: "PDF location",
+      detail: result?.recompileRequired ? "Recompile the project, then choose Review again." : "The source file remains open for review."
+    });
+    return false;
+  }
+  return true;
 }
 
 function toggleAiChange(proposalId) {
@@ -6443,16 +7894,51 @@ function toggleAiProposalDiff(proposalId) {
   refreshRightRailUi();
 }
 
+async function openSurvivingProjectFile() {
+  const files = Array.isArray(local.appState?.project?.files) ? local.appState.project.files : [];
+  const fallback = local.appState?.project?.mainFile
+    || files.find((file) => file.type === "text")?.path
+    || "";
+  local.selectedFile = fallback;
+  if (!fallback) {
+    local.editorContent = "";
+    updateEditorSourceUi();
+    return;
+  }
+  expandToFile(fallback);
+  await loadSelectedFile();
+  updateEditorSourceUi();
+  sendCollab("open_file", { filePath: fallback });
+}
+
 async function revertAiProposal(proposalId, options = {}) {
   const proposal = findAiProposal(proposalId);
   if (!proposal) return null;
+  if (proposal.actionable === false) {
+    showAppNotice("This historical change can no longer be reverted automatically after LocalLeaf restarted.", {
+      type: "warning",
+      title: "Revert unavailable",
+      detail: "Use version control or prepare a new inverse edit."
+    });
+    return null;
+  }
+  if (proposal.path === local.selectedFile && !await saveCurrentFile()) {
+    showAppNotice("Save the current file before reverting this AI change.", {
+      type: "warning",
+      title: "Revert paused"
+    });
+    return null;
+  }
   try {
     const result = await api("/api/agent/proposal/revert", { method: "POST", body: { proposalId } });
     setAiProposalStatus(proposalId, result.proposal?.status || "reverted", result.proposal || {});
     await loadState();
     if (proposal.path === local.selectedFile) {
-      await loadSelectedFile();
-      updateEditorSourceUi();
+      if (proposal.operation === "create") await openSurvivingProjectFile();
+      else {
+        await loadSelectedFile();
+        updateEditorSourceUi();
+      }
     }
     if (options.report !== false) {
       addAiReportMessage(`Reverted ${proposal.summary || "the AI change"}.`, [result.proposal || proposal]);
@@ -6468,14 +7954,30 @@ async function revertAiProposal(proposalId, options = {}) {
   }
 }
 
-async function undoAiRun(runId) {
+async function undoAiRun(runKey) {
+  const run = aiChangeRuns(aiHistoryItems()).find((item) => item.id === runKey);
+  if (!run) return;
+  if (run.proposals.some((proposal) => proposal.path === local.selectedFile) && !await saveCurrentFile()) {
+    showAppNotice("Save the current file before undoing this AI run.", {
+      type: "warning",
+      title: "Undo paused"
+    });
+    return;
+  }
   try {
-    const result = await api("/api/agent/run/revert", { method: "POST", body: { runId } });
+    const result = await api("/api/agent/run/revert", {
+      method: "POST",
+      body: { runId: run.runId, proposalId: run.anchorProposalId }
+    });
     (result.proposals || []).forEach((proposal) => setAiProposalStatus(proposal.id, proposal.status || "reverted", proposal));
     await loadState();
-    if (result.proposals?.some((proposal) => proposal.path === local.selectedFile)) {
-      await loadSelectedFile();
-      updateEditorSourceUi();
+    const selectedProposal = result.proposals?.find((proposal) => proposal.path === local.selectedFile);
+    if (selectedProposal) {
+      if (selectedProposal.operation === "create") await openSurvivingProjectFile();
+      else {
+        await loadSelectedFile();
+        updateEditorSourceUi();
+      }
     }
     addAiReportMessage(`Undid ${result.proposals?.length || 0} applied change${result.proposals?.length === 1 ? "" : "s"} from this run.`, result.proposals || []);
   } catch (error) {
@@ -6544,8 +8046,14 @@ function bindRightRailControls() {
   document.querySelector("#aiSessionMenuButton")?.addEventListener("click", () => {
     local.aiSessionMenuOpen = !local.aiSessionMenuOpen;
     local.aiSessionMoreMenuOpen = false;
+    local.aiSessionActionMenuId = "";
     local.aiModelPickerOpen = false;
     refreshRightRailUi();
+    if (local.aiSessionMenuOpen) {
+      setTimeout(() => {
+        (document.querySelector("#aiSessionSearch") || document.querySelector(".ai-session-row.active .ai-session-row-main") || document.querySelector(".ai-session-row-main"))?.focus();
+      }, 0);
+    }
   });
   document.querySelector("#aiSessionSearch")?.addEventListener("input", (event) => {
     local.aiSessionSearch = event.currentTarget.value;
@@ -6556,14 +8064,26 @@ function bindRightRailControls() {
       input?.setSelectionRange?.(input.value.length, input.value.length);
     }, 0);
   });
+  document.querySelector("#aiSessionSearch")?.addEventListener("keydown", (event) => {
+    const options = [...document.querySelectorAll(".ai-session-listbox .ai-session-row-main")];
+    if (["ArrowDown", "Home"].includes(event.key) && options.length) {
+      event.preventDefault();
+      options[0].focus();
+    } else if (["ArrowUp", "End"].includes(event.key) && options.length) {
+      event.preventDefault();
+      options.at(-1).focus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      local.aiSessionMenuOpen = false;
+      refreshRightRailUi();
+      setTimeout(() => document.querySelector("#aiSessionMenuButton")?.focus(), 0);
+    }
+  });
   document.querySelectorAll("[data-edit-queued-ai-prompt]").forEach((button) => {
     button.addEventListener("click", () => editQueuedAiPrompt(button.dataset.editQueuedAiPrompt));
   });
   document.querySelectorAll("[data-delete-queued-ai-prompt]").forEach((button) => {
     button.addEventListener("click", () => deleteQueuedAiPrompt(button.dataset.deleteQueuedAiPrompt));
-  });
-  document.querySelectorAll("[data-steer-queued-ai-prompt]").forEach((button) => {
-    button.addEventListener("click", () => steerQueuedAiPrompt(button.dataset.steerQueuedAiPrompt));
   });
   document.querySelectorAll("[data-toggle-queued-ai-menu]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -6586,14 +8106,27 @@ function bindRightRailControls() {
     local.aiSessionMoreMenuOpen = false;
     refreshRightRailUi();
   });
-  document.querySelector("[data-ai-session-new]")?.addEventListener("click", startNewAiSession);
+  document.querySelectorAll("[data-ai-session-new], [data-ai-session-retry]").forEach((button) => {
+    button.addEventListener("click", startNewAiSession);
+  });
   document.querySelectorAll("[data-ai-session]").forEach((button) => {
-    button.addEventListener("click", () => switchAiSession(button.dataset.aiSession));
+    button.addEventListener("click", (event) => {
+      if (event.target.closest?.("[data-ai-session-actions]")) {
+        event.preventDefault();
+        toggleAiSessionActions(button.dataset.aiSession);
+        return;
+      }
+      switchAiSession(button.dataset.aiSession);
+    });
+    button.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      toggleAiSessionActions(button.dataset.aiSession);
+    });
   });
   document.querySelectorAll("[data-rename-ai-session]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      renameAiSession(button.dataset.renameAiSession);
+      beginRenameAiSession(button.dataset.renameAiSession);
     });
   });
   document.querySelectorAll("[data-fork-ai-session]").forEach((button) => {
@@ -6605,8 +8138,105 @@ function bindRightRailControls() {
   document.querySelectorAll("[data-delete-ai-session]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      deleteAiSession(button.dataset.deleteAiSession);
+      requestDeleteAiSession(button.dataset.deleteAiSession);
     });
+  });
+  document.querySelectorAll("[data-stop-session-response]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      stopAiRun(button.dataset.stopSessionResponse);
+    });
+  });
+  document.querySelector("#aiSessionRenameInput")?.addEventListener("input", (event) => {
+    local.aiSessionRenameValue = event.currentTarget.value.slice(0, 64);
+    local.aiSessionRenameError = "";
+  });
+  document.querySelector("#aiSessionRenameInput")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      event.stopPropagation();
+      renameAiSession(local.aiSessionRenamingId, event.currentTarget.value);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelAiSessionRename();
+    }
+  });
+  const sessionListbox = document.querySelector(".ai-session-listbox");
+  sessionListbox?.addEventListener("keydown", (event) => {
+    const eventMain = event.target.closest?.(".ai-session-row-main");
+    if (!eventMain && event.key !== "Escape") return;
+    const options = [...sessionListbox.querySelectorAll(".ai-session-row-main")];
+    if (!options.length) return;
+    const focused = document.activeElement?.closest?.(".ai-session-row-main");
+    let index = Math.max(0, options.indexOf(focused));
+    if (event.key === "ArrowDown") index = Math.min(options.length - 1, index + 1);
+    else if (event.key === "ArrowUp") index = Math.max(0, index - 1);
+    else if (event.key === "Home") index = 0;
+    else if (event.key === "End") index = options.length - 1;
+    else if (event.key === "Enter" && focused) {
+      event.preventDefault();
+      focused.click();
+      return;
+    } else if ((event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) && focused) {
+      event.preventDefault();
+      toggleAiSessionActions(focused.dataset.aiSession);
+      return;
+    } else if (event.key === "F2" && focused) {
+      event.preventDefault();
+      beginRenameAiSession(focused.dataset.aiSession);
+      return;
+    } else if (event.key === "Delete" && focused) {
+      event.preventDefault();
+      requestDeleteAiSession(focused.dataset.aiSession);
+      return;
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      if (local.aiSessionActionMenuId) local.aiSessionActionMenuId = "";
+      else local.aiSessionMenuOpen = false;
+      refreshRightRailUi();
+      setTimeout(() => document.querySelector("#aiSessionMenuButton")?.focus(), 0);
+      return;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    options.forEach((option, optionIndex) => option.tabIndex = optionIndex === index ? 0 : -1);
+    options[index]?.focus();
+  });
+  document.querySelector("[data-cancel-session-delete]")?.addEventListener("click", () => {
+    local.aiSessionDeleteId = "";
+    refreshRightRailUi();
+    setTimeout(() => document.querySelector("#aiSessionMenuButton")?.focus(), 0);
+  });
+  document.querySelector("[data-confirm-delete]")?.addEventListener("click", (event) => {
+    deleteAiSession(event.currentTarget.dataset.confirmDelete);
+  });
+  const deleteDialog = document.querySelector(".ai-session-delete-backdrop.open .ai-session-delete-dialog");
+  deleteDialog?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      local.aiSessionDeleteId = "";
+      refreshRightRailUi();
+      setTimeout(() => document.querySelector("#aiSessionMenuButton")?.focus(), 0);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...deleteDialog.querySelectorAll("button:not(:disabled)")];
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  document.querySelectorAll("[data-ai-format]").forEach((button) => {
+    button.addEventListener("mousedown", (event) => event.preventDefault());
+    button.addEventListener("click", () => applyAiPromptFormat(button.dataset.aiFormat));
   });
   document.querySelector("#aiPrompt")?.addEventListener("input", (event) => {
     local.aiPrompt = event.currentTarget.value;
@@ -6616,6 +8246,13 @@ function bindRightRailControls() {
     updateAiSendButtonState();
   });
   document.querySelector("#aiPrompt")?.addEventListener("keydown", (event) => {
+    const formatAction = aiPromptFormatShortcut(event);
+    if (formatAction) {
+      event.preventDefault();
+      event.stopPropagation();
+      applyAiPromptFormat(formatAction);
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       askAiHelper();
@@ -6657,10 +8294,12 @@ function bindRightRailControls() {
     button.addEventListener("click", () => toggleAiRun(button.dataset.toggleAiRun));
   });
   document.querySelectorAll("[data-review-ai-run]").forEach((button) => {
-    button.addEventListener("click", () => reviewAiRun(button.dataset.reviewAiRun));
+    button.addEventListener("click", () => {
+      void reviewAiRun(button.dataset.runGroup || button.dataset.reviewAiRun);
+    });
   });
   document.querySelectorAll("[data-undo-ai-run]").forEach((button) => {
-    button.addEventListener("click", () => undoAiRun(button.dataset.undoAiRun));
+    button.addEventListener("click", () => undoAiRun(button.dataset.runGroup || button.dataset.undoAiRun));
   });
   document.querySelectorAll("[data-toggle-ai-change]").forEach((button) => {
     button.addEventListener("click", () => toggleAiChange(button.dataset.toggleAiChange));
@@ -6762,19 +8401,24 @@ function showExportModal() {
   });
 }
 
-async function selectProjectFile(filePath) {
+async function selectProjectFile(filePath, options = {}) {
   const item = fileMeta(filePath);
-  if (!item || (!isEditableFile(item) && !isImageAsset(item))) return;
-  await saveCurrentFile();
+  if (!item || (!isEditableFile(item) && !isImageAsset(item))) return false;
+  if (!await saveCurrentFile()) return false;
+  if (options.isCurrent && !options.isCurrent()) return false;
+  const editorContent = isEditableFile(item)
+    ? (await api(`/api/file?path=${encodeURIComponent(filePath)}`)).content
+    : "";
+  if (options.isCurrent && !options.isCurrent()) return false;
   local.selectedFile = filePath;
   local.selectedFolder = "";
   expandToFile(filePath);
   local.saveStatus = "Saved";
   if (isEditableFile(item)) {
-    await loadSelectedFile();
+    local.editorContent = editorContent;
     local.editorMode = readEditorModeForFile(filePath);
   } else {
-    local.editorContent = "";
+    local.editorContent = editorContent;
     local.editorMode = "code";
   }
   updateEditorSourceUi();
@@ -6782,6 +8426,7 @@ async function selectProjectFile(filePath) {
   if (isEditableFile(item)) {
     sendCollab("open_file", { filePath });
   }
+  return true;
 }
 
 function editorView() {
@@ -6790,7 +8435,8 @@ function editorView() {
   const compileLogs = state.compile.logs || [];
   syncPinnedCompileIssues(state.compile);
   const selection = selectedFileState(file);
-  const isCompiling = state.compile.status === "running";
+  const isCompiling = local.compileBusy || state.compile.status === "running";
+  const canCompile = !isGuestClient();
   const editorSurface = editorSurfaceMarkup(file, selection.selectedMeta);
   const preview = compiledPreviewMarkup();
   const hostBackButton = isGuestClient() ? "" : `
@@ -6807,7 +8453,7 @@ function editorView() {
             <button class="icon-button editor-more-button ${local.editorMoreMenuOpen ? "active" : ""}" id="editorMoreButton" title="More editor actions" aria-label="More editor actions" aria-expanded="${local.editorMoreMenuOpen ? "true" : "false"}">
               ${editorToolIcon("menu")}
             </button>
-            ${editorMoreMenuMarkup(state, selection)}
+            ${editorMoreMenuMarkup(state)}
             <button class="btn editor-save-button" id="saveButton" ${selection.canEditSelected ? "" : "disabled"}>
               <span class="save-glyph" aria-hidden="true"></span>
               <span>Save</span>
@@ -6815,12 +8461,12 @@ function editorView() {
           </div>
           <div class="editor-title-block">
             <h1>${escapeHtml(state.project.name)}</h1>
-            <span class="editor-subtitle">Main: ${escapeHtml(state.project.mainFile || "none")} Â· ${escapeHtml(local.saveStatus)}</span>
+            <span class="editor-subtitle">Main: ${escapeHtml(state.project.mainFile || "none")} · ${escapeHtml(local.saveStatus)}</span>
           </div>
             <div class="toolbar-actions editor-run-actions">
-              <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling ? "disabled" : ""}>
+              <button class="compile-button ${isCompiling ? "compiling" : ""}" id="compileButton" ${isCompiling || !canCompile ? "disabled" : ""} title="${canCompile ? "Compile the current host snapshot" : "Only the host can run the LaTeX compiler"}">
               <span class="compile-spinner"></span>
-              <span>${isCompiling ? "Compiling..." : "Recompile"}</span>
+              <span>${isCompiling ? "Compiling..." : canCompile ? "Recompile" : "Host compiles"}</span>
             </button>
             <button class="btn" id="exportButton" style="height:32px">Export</button>
           </div>
@@ -6883,7 +8529,7 @@ function editorView() {
             </div>
           </div>
           <div class="preview-scroll" id="previewPane">
-            ${isCompiling ? `<div class="compile-overlay"><span class="big-spinner"></span><strong>Compiling ${escapeHtml(state.project.mainFile || "project")}</strong></div>` : ""}
+            ${isCompiling ? `<div class="compile-overlay"><span class="big-spinner"></span><strong>${escapeHtml(compileBusyLabel())}</strong></div>` : ""}
             ${preview}
           </div>
         </section>
@@ -6913,9 +8559,10 @@ async function loadState() {
   syncAiSessionsFromAppState();
   await importLegacyAiSessionsForProject();
   syncAiProposalsFromAppState();
-  if (!isGuestClient()) rememberRecentProject(local.appState.project);
+  if (local.hostToken) rememberRecentProject(local.appState.project);
   if (!local.guestToken && !new URLSearchParams(location.search).get("name")) {
-    const hostUser = local.appState.session.users.find((user) => user.role === "host");
+    const hostUser = (Array.isArray(local.appState?.session?.users) ? local.appState.session.users : [])
+      .find((user) => user.role === "host");
     if (hostUser?.name) local.userName = hostUser.name;
   }
   if (!local.selectedFile) {
@@ -6965,6 +8612,7 @@ function goBackHome() {
   closeCollab();
   local.joinRequestId = null;
   local.guestToken = "";
+  sessionStorage.removeItem("localleaf.guestToken");
   local.userName = "Host";
   local.userId = "";
   local.sessionEndedReason = "The host has ended the session.";
@@ -6982,7 +8630,7 @@ function bindHome() {
   document.querySelectorAll("[data-open-recent]").forEach((button) => {
     button.addEventListener("click", () => openRecentProject(button.dataset.openRecent));
   });
-  document.querySelector("#newProject")?.addEventListener("click", createNewProject);
+  document.querySelector("#newProject")?.addEventListener("click", showNewProjectDialog);
   document.querySelector("#importZip")?.addEventListener("click", () => importZipProject());
   document.querySelector("#importFiles")?.addEventListener("click", openHomeImportPicker);
   document.querySelector("#homeSessionAction")?.addEventListener("click", handleHomeSessionAction);
@@ -7007,21 +8655,205 @@ async function openRecentProject(projectRoot) {
   }
 }
 
-async function createNewProject() {
+function newProjectDestinationDirectory() {
+  const configuredDirectory = String(local.appState?.project?.defaultProjectsDirectory || "").trim();
+  if (configuredDirectory) return configuredDirectory;
+  const projectRoot = String(local.appState?.project?.root || "").trim().replace(/[\\/]+$/, "");
+  if (!projectRoot) return "";
+  const separatorIndex = Math.max(projectRoot.lastIndexOf("\\"), projectRoot.lastIndexOf("/"));
+  if (separatorIndex < 0) return "";
+  if (separatorIndex === 2 && /^[A-Za-z]:/.test(projectRoot)) return `${projectRoot.slice(0, 2)}\\`;
+  if (separatorIndex === 0) return projectRoot.slice(0, 1);
+  return projectRoot.slice(0, separatorIndex);
+}
+
+function hideNewProjectDialog(options = {}) {
+  removeModal(document.querySelector(".new-project-backdrop"), options);
+}
+
+function setNewProjectDialogState(modal, options = {}) {
+  if (!modal) return;
+  const busy = Boolean(options.busy);
+  const form = modal.querySelector("#newProjectForm");
+  const createButton = modal.querySelector("#createNewProject");
+  const cancelButton = modal.querySelector("#cancelNewProject");
+  const status = modal.querySelector("#newProjectStatus");
+  modal.dataset.busy = busy ? "true" : "false";
+  form?.setAttribute("aria-busy", busy ? "true" : "false");
+  form?.querySelectorAll("input, button").forEach((control) => {
+    control.disabled = busy;
+  });
+  if (cancelButton) cancelButton.disabled = busy;
+  if (createButton) {
+    createButton.textContent = busy ? "Creating..." : "Create project";
+  }
+  if (status) {
+    status.textContent = options.message || (busy ? "Creating the project and starter files..." : "");
+    status.classList.toggle("is-error", options.type === "error");
+  }
+}
+
+function showNewProjectDialog() {
+  const existingModal = document.querySelector(".new-project-backdrop");
+  const returnFocus = existingModal?._localleafReturnFocus || document.activeElement;
+  removeModal(existingModal, { restoreFocus: false });
+  const defaultDestination = newProjectDestinationDirectory();
+  const creationRequestId = typeof crypto?.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `new-project-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  app.insertAdjacentHTML("beforeend", `
+    <div class="new-project-backdrop" role="presentation">
+      <section class="new-project-modal" role="dialog" aria-modal="true" aria-labelledby="newProjectTitle" aria-describedby="newProjectDescription">
+        <header class="new-project-modal-head">
+          <div>
+            <h2 id="newProjectTitle">Create a new project</h2>
+            <p id="newProjectDescription">Choose a name and where LocalLeaf should create the project folder.</p>
+          </div>
+        </header>
+        <form class="new-project-form" id="newProjectForm" novalidate>
+          <label class="new-project-field" for="newProjectName">
+            <span>Project name</span>
+            <input id="newProjectName" name="projectName" type="text" value="LocalLeaf Project" maxlength="70" autocomplete="off" spellcheck="false" required aria-describedby="newProjectNameHint">
+            <small id="newProjectNameHint">This becomes the folder name and project title.</small>
+          </label>
+          <div class="new-project-field">
+            <label for="newProjectDestination">Destination folder</label>
+            <div class="new-project-destination-row">
+              <input id="newProjectDestination" name="destinationDirectory" type="text" value="${escapeHtml(defaultDestination)}" autocomplete="off" spellcheck="false" required aria-describedby="newProjectDestinationHint">
+              <button class="btn" id="browseNewProjectDestination" type="button">${uiGlyph("folder")} Browse</button>
+            </div>
+            <small id="newProjectDestinationHint">LocalLeaf creates the named project folder inside this location. You can paste or edit the path directly.</small>
+          </div>
+          <p class="new-project-status" id="newProjectStatus" role="status" aria-live="polite"></p>
+          <div class="new-project-actions">
+            <button class="btn" id="cancelNewProject" type="button">Cancel</button>
+            <button class="btn btn-primary" id="createNewProject" type="submit">Create project</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `);
+
+  const modal = document.querySelector(".new-project-backdrop");
+  const form = modal?.querySelector("#newProjectForm");
+  const nameInput = modal?.querySelector("#newProjectName");
+  const destinationInput = modal?.querySelector("#newProjectDestination");
+  const close = () => {
+    if (modal?.dataset.busy === "true") return;
+    hideNewProjectDialog();
+  };
+  installModalFocusManagement(modal, returnFocus);
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) close();
+  });
+  modal?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    close();
+  });
+  modal?.querySelector("#cancelNewProject")?.addEventListener("click", close);
+  modal?.querySelector("#browseNewProjectDestination")?.addEventListener("click", async () => {
+    if (typeof window.localleafDesktop?.chooseProjectFolder !== "function") {
+      setNewProjectDialogState(modal, {
+        message: "Folder browsing is available in the desktop app. You can still enter the destination path above."
+      });
+      destinationInput?.focus();
+      return;
+    }
+    const browseButton = modal.querySelector("#browseNewProjectDestination");
+    browseButton.disabled = true;
+    browseButton.setAttribute("aria-busy", "true");
+    try {
+      const result = await window.localleafDesktop.chooseProjectFolder(destinationInput?.value || "");
+      if (!result?.canceled && result?.folderPath && destinationInput) {
+        destinationInput.value = result.folderPath;
+        setNewProjectDialogState(modal);
+        destinationInput.focus();
+      }
+    } catch (error) {
+      setNewProjectDialogState(modal, {
+        type: "error",
+        message: error?.message || "LocalLeaf could not open the folder picker. Enter the path directly instead."
+      });
+      destinationInput?.focus();
+    } finally {
+      browseButton.disabled = false;
+      browseButton.setAttribute("aria-busy", "false");
+    }
+  });
+  [nameInput, destinationInput].forEach((input) => {
+    input?.addEventListener("input", () => {
+      input.setCustomValidity("");
+      input.removeAttribute("aria-invalid");
+      const status = modal?.querySelector("#newProjectStatus");
+      if (status?.classList.contains("is-error")) setNewProjectDialogState(modal);
+    });
+  });
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const projectName = nameInput?.value.trim() || "";
+    const destinationDirectory = destinationInput?.value.trim() || "";
+    if (!projectName) {
+      nameInput?.setCustomValidity("Enter a project name.");
+      nameInput?.reportValidity();
+      nameInput?.focus();
+      return;
+    }
+    if (!destinationDirectory) {
+      destinationInput?.setCustomValidity("Choose or enter a destination folder.");
+      destinationInput?.reportValidity();
+      destinationInput?.focus();
+      return;
+    }
+    setNewProjectDialogState(modal, { busy: true });
+    await createNewProject({ projectName, destinationDirectory, requestId: creationRequestId }, modal);
+  });
+  window.setTimeout(() => {
+    nameInput?.focus({ preventScroll: true });
+    nameInput?.select();
+  }, 0);
+}
+
+async function createNewProject({ projectName, destinationDirectory, requestId }, modal) {
+  let createdState;
   try {
     syncCurrentAiSession();
-    local.appState = await api("/api/project/new", { method: "POST", body: {} });
+    createdState = await api("/api/project/new", {
+      method: "POST",
+      body: { projectName, destinationDirectory, requestId },
+      timeoutMs: 20000
+    });
+  } catch (error) {
+    setNewProjectDialogState(modal, {
+      type: "error",
+      message: error?.message || "LocalLeaf could not create this project."
+    });
+    const fieldId = error?.field === "destinationDirectory" ? "#newProjectDestination" : "#newProjectName";
+    const field = modal?.querySelector(fieldId);
+    field?.setAttribute("aria-invalid", "true");
+    field?.focus();
+    return false;
+  }
+
+  local.appState = createdState;
+  rememberRecentProject(local.appState.project);
+  local.selectedFile = local.appState.project.mainFile;
+  expandToFile(local.selectedFile);
+  local.saveStatus = "New project";
+  removeModal(modal, { restoreFocus: false });
+  try {
     syncAiSessionsFromAppState();
     await importLegacyAiSessionsForProject();
-    rememberRecentProject(local.appState.project);
-    local.selectedFile = local.appState.project.mainFile;
-    expandToFile(local.selectedFile);
     await loadSelectedFile();
-    local.saveStatus = "New project";
-    setView("project");
   } catch (error) {
-    alert(error.message);
+    showAppNotice("The project was created, but LocalLeaf could not finish loading its editor state yet.", {
+      type: "warning",
+      title: "Project created",
+      detail: error?.message || "Open the editor again to retry loading the starter file."
+    });
   }
+  setView("project");
+  return true;
 }
 
 async function handleHomeSessionAction() {
@@ -7266,17 +9098,86 @@ async function importZipFile(file) {
 }
 
 async function startSession() {
-  local.appState = await api("/api/session/start", { method: "POST", body: {} });
-  await loadSelectedFile();
-  setView("session");
+  if (local.sessionStartBusy) return;
+  local.sessionStartBusy = true;
+  if (["session", "active"].includes(route().view)) render();
+  try {
+    local.appState = await api("/api/session/start", {
+      method: "POST",
+      body: { providerId: sessionTunnelProviderId() || null }
+    });
+    await loadSelectedFile();
+    if (route().view === "session") render();
+    else setView("session");
+  } catch (error) {
+    showAppNotice(error.message || "LocalLeaf could not start the sharing session.", {
+      type: "error",
+      title: "Session did not start",
+      detail: "Choose another invite-link provider or try again."
+    });
+  } finally {
+    local.sessionStartBusy = false;
+    if (["session", "active"].includes(route().view)) render();
+  }
+}
+
+async function requestAnotherTunnelProvider() {
+  if (local.tunnelProviderSwitchBusy) return;
+  const session = local.appState?.session;
+  const providerId = sessionTunnelProviderId(session);
+
+  local.tunnelProviderSwitchBusy = true;
+  render();
+  try {
+    const result = await api("/api/session/tunnel/restart", {
+      method: "POST",
+      body: { providerId: providerId || null }
+    });
+    if (result?.project && result?.session) {
+      local.appState = result;
+    } else if (result?.session) {
+      local.appState.session = result.session;
+    } else {
+      await loadState();
+    }
+    if (local.appState?.session?.tunnel?.previousLinkInvalidated) {
+      showAppNotice("The previous invite link is no longer active.", {
+        type: "warning",
+        title: "Refreshing invite link",
+        detail: "Wait for the selected provider to verify, then share the new link.",
+        timeoutMs: 5200
+      });
+    } else {
+      showAppNotice("LocalLeaf is creating and verifying an invite link.", {
+        title: "Refreshing invite link",
+        detail: "Share it only after the session screen marks it as verified.",
+        timeoutMs: 4200
+      });
+    }
+  } catch (error) {
+    showAppNotice(error.message || "LocalLeaf could not refresh the invite link.", {
+      type: "error",
+      title: "Link refresh failed",
+      detail: "Check the status on this screen before sharing any link."
+    });
+  } finally {
+    local.tunnelProviderSwitchBusy = false;
+    if (["session", "active"].includes(route().view)) render();
+  }
 }
 
 function bindSession() {
   document.querySelector("#copyInvite")?.addEventListener("click", (event) => copyInvite(event.currentTarget));
-  document.querySelector("#copyInviteBottom")?.addEventListener("click", (event) => copyInvite(event.currentTarget));
   document.querySelectorAll("[data-start-session]").forEach((button) => {
     button.addEventListener("click", startSession);
   });
+  document.querySelector("#sessionTunnelProvider")?.addEventListener("change", (event) => {
+    const providerId = String(event.currentTarget.value || "");
+    if (providerId && !availableTunnelProviders().some((provider) => provider.id === providerId)) return;
+    local.sessionTunnelProviderOverrideId = providerId;
+    render();
+  });
+  document.querySelector("#refreshInviteLink")?.addEventListener("click", requestAnotherTunnelProvider);
   document.querySelector("#openEditorFromSession")?.addEventListener("click", async () => {
     await loadSelectedFile();
     setView("editor");
@@ -7306,9 +9207,20 @@ function markEditorChanged(source) {
   local.saveStatus = "Unsaved";
   const status = document.querySelector(".editor-subtitle");
   if (status) status.textContent = local.saveStatus;
-  sendCollab("edit", { filePath: local.selectedFile, newText: local.editorContent });
+  const sentThroughCollab = sendCollab("edit", { filePath: local.selectedFile, newText: local.editorContent });
   clearTimeout(local.saveTimer);
-  local.saveTimer = setTimeout(saveCurrentFile, 450);
+  local.saveTimer = setTimeout(async () => {
+    if (sentThroughCollab) {
+      const saved = await requestCollabSave(local.selectedFile, local.editorContent);
+      if (!saved) {
+        local.saveStatus = "Reconnecting...";
+        const status = document.querySelector(".editor-subtitle");
+        if (status) status.textContent = local.saveStatus;
+      }
+      return;
+    }
+    saveCurrentFile();
+  }, 450);
 }
 
 async function refreshEditorSuggestions() {
@@ -8080,7 +9992,7 @@ function mountCodeEditor() {
     diagnostics: compileDiagnosticsForFile(local.selectedFile),
     suggestions: local.editorSuggestions || {},
     onChange: (text) => markEditorChanged(text),
-    onSave: saveAndCompile,
+    onSave: saveCurrentFile,
     onCompile: compile,
     onSearch: openEditorSearchPanel,
     onFocus: () => {
@@ -8987,11 +10899,36 @@ async function copyInvite(trigger) {
 }
 
 async function stopSession() {
-  await api("/api/session/stop", { method: "POST", body: {} });
-  await loadState();
-  local.sessionEndedReason = "Host stopped the session.";
-  local.sessionEndedDetail = "Anyone still connected has been told the session ended.";
-  setView("home");
+  if (local.sessionStopBusy) return;
+  local.sessionStopBusy = true;
+  render();
+  let failure = null;
+  try {
+    const result = await api("/api/session/stop", { method: "POST", body: {} });
+    if (result?.project && result?.session) local.appState = result;
+    else await loadState();
+    local.sessionTunnelProviderOverrideId = null;
+    local.sessionEndedReason = "Host stopped the session.";
+    local.sessionEndedDetail = "Anyone still connected has been told the session ended.";
+  } catch (error) {
+    failure = error;
+  } finally {
+    local.sessionStopBusy = false;
+    if (["session", "active"].includes(route().view)) render();
+  }
+  if (failure) {
+    showAppNotice(failure.message || "LocalLeaf could not stop sharing.", {
+      type: "error",
+      title: "Session is still active",
+      detail: "Try stopping it again before you close LocalLeaf."
+    });
+    return;
+  }
+  showAppNotice("The invite link is inactive and collaborators have been disconnected.", {
+    title: "Sharing stopped",
+    detail: "You can host again here or use Back to Home when you are ready.",
+    timeoutMs: 5200
+  });
 }
 
 function bindJoin(code) {
@@ -9072,8 +11009,7 @@ function bindEditor() {
     if (local.editorMoreMenuOpen) closeEditorMoreMenuInPlace();
     else openEditorMoreMenuInPlace();
   });
-  document.querySelector("#editorCheckUpdates")?.addEventListener("click", manualCheckForUpdates);
-  document.querySelector("#saveButton")?.addEventListener("click", saveAndCompile);
+  document.querySelector("#saveButton")?.addEventListener("click", saveCurrentFile);
   bindEditorMoreActions();
   document.querySelector("#toggleSourcePane")?.addEventListener("click", () => toggleLayoutPane("source"));
   document.querySelector("#togglePreviewPane")?.addEventListener("click", () => toggleLayoutPane("preview"));
@@ -9155,7 +11091,8 @@ function sidebarSectionMetrics() {
   return { sidebar, head, search, handleHeight, minFiles, minImages, minOutline, available };
 }
 
-function clampSidebarSections(nextFiles = local.fileSectionHeight, nextImages = local.imageSectionHeight) {
+function clampSidebarSections(nextFiles = local.fileSectionHeight, nextImages = local.imageSectionHeight, options = {}) {
+  const persist = options.persist !== false;
   const metrics = sidebarSectionMetrics();
   const minFiles = metrics?.minFiles || 130;
   const minImages = metrics?.minImages || 86;
@@ -9166,7 +11103,7 @@ function clampSidebarSections(nextFiles = local.fileSectionHeight, nextImages = 
     nextFiles = Math.max(minFiles, Math.round((available - nextImages) * 0.72));
     local.sidebarSectionLayoutNeedsDefault = false;
     local.sidebarSectionLayoutAutoSized = true;
-    localStorage.setItem("localleaf.sidebarSectionLayoutVersion", SIDEBAR_SECTION_LAYOUT_VERSION);
+    if (persist) localStorage.setItem("localleaf.sidebarSectionLayoutVersion", SIDEBAR_SECTION_LAYOUT_VERSION);
   }
   const maxFiles = Math.max(minFiles, available - minImages - minOutline);
   const files = Math.max(minFiles, Math.min(maxFiles, Math.round(nextFiles)));
@@ -9174,8 +11111,10 @@ function clampSidebarSections(nextFiles = local.fileSectionHeight, nextImages = 
   const images = Math.max(minImages, Math.min(maxImages, Math.round(nextImages)));
   local.fileSectionHeight = files;
   local.imageSectionHeight = images;
-  localStorage.setItem("localleaf.fileSectionHeight", String(files));
-  localStorage.setItem("localleaf.imageSectionHeight", String(images));
+  if (persist) {
+    localStorage.setItem("localleaf.fileSectionHeight", String(files));
+    localStorage.setItem("localleaf.imageSectionHeight", String(images));
+  }
   applySidebarSectionStyles();
 }
 
@@ -9602,7 +11541,13 @@ function updateEditorSourceUi() {
   const codePanel = document.querySelector(".code-panel");
   const oldSurface = codePanel?.querySelector(".editor-code-mount, .editor-visual-mount, #editorText, .asset-preview");
   if (oldSurface) {
-    destroyEditorSurfaces();
+    // Keep the initiating PDF navigation current while the mapped file swaps
+    // the editor surface; full route/preview teardown still cancels it.
+    destroyEditorSurfaces({
+      cancelPdfPreview: false,
+      cancelPdfSourceNavigation: false,
+      cancelPdfReviewNavigation: false
+    });
     oldSurface.outerHTML = editorSurfaceMarkup(file, selection.selectedMeta);
   }
 
@@ -9648,9 +11593,9 @@ function updateUsersPresenceUi() {
       <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
       <div>
         <strong>${escapeHtml(user.name)}</strong><br />
-        <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` Â· ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
+        <small>${escapeHtml(user.role)}${activeFileForUser(user.id) ? ` · ${escapeHtml(activeFileForUser(user.id))}` : ""}</small>
       </div>
-      <span class="online-dot"></span>
+      <span class="online-dot ${user.online ? "" : "offline"}" title="${user.online ? "Online" : "Offline"}"></span>
     </div>
   `).join("");
 }
@@ -9658,14 +11603,17 @@ function updateUsersPresenceUi() {
 function updateCompileUi(options = {}) {
   if (!local.appState) return;
   const compile = local.appState.compile;
-  const isCompiling = compile.status === "running";
+  const isCompiling = local.compileBusy || compile.status === "running";
+  const canCompile = !isGuestClient();
   syncPinnedCompileIssues(compile);
   const button = document.querySelector("#compileButton");
   if (button) {
-    button.disabled = isCompiling;
+    button.disabled = isCompiling || !canCompile;
     button.classList.toggle("compiling", isCompiling);
     const label = button.querySelector("span:last-child");
-    if (label) label.textContent = isCompiling ? "Compiling..." : "Recompile";
+    if (label) label.textContent = isCompiling
+      ? (local.compilePhase === "saving" ? "Saving..." : "Compiling...")
+      : canCompile ? "Recompile" : "Host compiles";
   }
 
   const previewActions = document.querySelector(".preview-actions");
@@ -9689,8 +11637,11 @@ function updateCompileUi(options = {}) {
   if (!previewPane) return;
   const existingOverlay = previewPane.querySelector(".compile-overlay");
   if (isCompiling) {
+    const overlayMarkup = `<span class="big-spinner"></span><strong>${escapeHtml(compileBusyLabel())}</strong>`;
     if (!existingOverlay) {
-      previewPane.insertAdjacentHTML("afterbegin", `<div class="compile-overlay"><span class="big-spinner"></span><strong>Compiling ${escapeHtml(local.appState.project.mainFile || "project")}</strong></div>`);
+      previewPane.insertAdjacentHTML("afterbegin", `<div class="compile-overlay">${overlayMarkup}</div>`);
+    } else {
+      existingOverlay.innerHTML = overlayMarkup;
     }
     return;
   }
@@ -9711,20 +11662,30 @@ function shouldApplyCompileUpdate(nextCompile) {
   const currentVersion = Number(currentCompile.version || 0);
   const nextVersion = Number(nextCompile?.version || 0);
   if (nextVersion < currentVersion) return false;
+  if (
+    nextVersion === currentVersion
+    && String(nextCompile?.status || "") === String(currentCompile.status || "")
+    && String(nextCompile?.jobId || "") === String(currentCompile.jobId || "")
+    && (nextCompile?.logs || []).length <= (currentCompile.logs || []).length
+  ) {
+    return false;
+  }
   if (nextVersion === currentVersion && currentCompile.status !== "running" && nextCompile?.status === "running") {
     return false;
   }
   return true;
 }
 
-window.addEventListener("pointermove", (event) => {
+let resizePointerFrame = 0;
+let pendingResizePointer = null;
+
+function applyResizePointer(event) {
   if (local.resizingSidebar) {
     const grid = document.querySelector(".editor-grid");
     if (!grid) return;
     const rect = grid.getBoundingClientRect();
     const width = Math.max(220, Math.min(460, Math.round(event.clientX - rect.left)));
     local.sidebarWidth = width;
-    localStorage.setItem("localleaf.sidebarWidth", String(width));
     grid.style.setProperty("--sidebar-width", `${width}px`);
     document.querySelector(".editor-shell")?.style.setProperty("--sidebar-width", `${width}px`);
     return;
@@ -9737,9 +11698,9 @@ window.addEventListener("pointermove", (event) => {
     const fixedTop = (metrics.head?.offsetHeight || 0) + (metrics.search?.offsetHeight || 0);
     const y = Math.round(event.clientY - rect.top - fixedTop);
     if (local.resizingSidebarSection === "files") {
-      clampSidebarSections(y, local.imageSectionHeight);
+      clampSidebarSections(y, local.imageSectionHeight, { persist: false });
     } else if (local.resizingSidebarSection === "images") {
-      clampSidebarSections(local.fileSectionHeight, y - local.fileSectionHeight - metrics.handleHeight);
+      clampSidebarSections(local.fileSectionHeight, y - local.fileSectionHeight - metrics.handleHeight, { persist: false });
     }
     return;
   }
@@ -9756,7 +11717,6 @@ window.addEventListener("pointermove", (event) => {
     const maxSource = Math.max(minSource, totalWidth - 340);
     const width = Math.max(minSource, Math.min(maxSource, Math.round(event.clientX - codeRect.left)));
     local.sourcePaneWidth = width;
-    localStorage.setItem("localleaf.sourcePaneWidth", String(width));
     shell.style.setProperty("--source-width", `${width}px`);
     return;
   }
@@ -9769,7 +11729,6 @@ window.addEventListener("pointermove", (event) => {
     const maxWidth = Math.max(240, Math.min(540, Math.round(rect.width * 0.38)));
     const width = Math.max(220, Math.min(maxWidth, Math.round(rect.right - event.clientX)));
     local.rightRailWidth = width;
-    localStorage.setItem("localleaf.rightRailWidth", String(width));
     shell.style.setProperty("--right-rail-width", `${width}px`);
     return;
   }
@@ -9781,24 +11740,78 @@ window.addEventListener("pointermove", (event) => {
     const maxHeight = Math.max(92, Math.min(420, Math.round(rect.height - 220)));
     const height = Math.max(72, Math.min(maxHeight, Math.round(rect.bottom - event.clientY)));
     local.logsHeight = height;
-    localStorage.setItem("localleaf.logsHeight", String(height));
     shell.style.setProperty("--logs-height", `${height}px`);
   }
+}
+
+window.addEventListener("pointermove", (event) => {
+  if (!(local.resizingSidebar || local.resizingSidebarSection || local.resizingSplit || local.resizingRightRail || local.resizingLogs)) return;
+  pendingResizePointer = { clientX: event.clientX, clientY: event.clientY };
+  if (resizePointerFrame) return;
+  resizePointerFrame = requestAnimationFrame(() => {
+    resizePointerFrame = 0;
+    const pointer = pendingResizePointer;
+    pendingResizePointer = null;
+    if (pointer) applyResizePointer(pointer);
+  });
 });
 
-window.addEventListener("pointerup", () => {
-  const wasResizing = local.resizingSidebar || local.resizingSidebarSection || local.resizingSplit || local.resizingRightRail || local.resizingLogs;
-  if (!wasResizing) return;
-  local.resizingSidebar = false;
-  local.resizingSidebarSection = "";
-  local.resizingSplit = false;
-  local.resizingRightRail = false;
-  local.resizingLogs = false;
-  document.body.classList.remove("is-resizing-sidebar");
-  document.body.classList.remove("is-resizing-sidebar-section");
-  document.body.classList.remove("is-resizing-split");
-  document.body.classList.remove("is-resizing-right-rail");
-  document.body.classList.remove("is-resizing-logs");
+function finishResize(event, options = {}) {
+  const resizeState = {
+    sidebar: local.resizingSidebar,
+    sidebarSection: local.resizingSidebarSection,
+    split: local.resizingSplit,
+    rightRail: local.resizingRightRail,
+    logs: local.resizingLogs
+  };
+  if (!(resizeState.sidebar || resizeState.sidebarSection || resizeState.split || resizeState.rightRail || resizeState.logs)) return false;
+  if (resizePointerFrame) cancelAnimationFrame(resizePointerFrame);
+  resizePointerFrame = 0;
+  const eventPointer = Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)
+    ? { clientX: event.clientX, clientY: event.clientY }
+    : null;
+  const finalPointer = options.useEventPointer === false ? pendingResizePointer : eventPointer || pendingResizePointer;
+  pendingResizePointer = null;
+  if (finalPointer) applyResizePointer(finalPointer);
+  try {
+    if (resizeState.sidebar) localStorage.setItem("localleaf.sidebarWidth", String(local.sidebarWidth));
+    if (resizeState.sidebarSection) {
+      localStorage.setItem("localleaf.fileSectionHeight", String(local.fileSectionHeight));
+      localStorage.setItem("localleaf.imageSectionHeight", String(local.imageSectionHeight));
+      localStorage.setItem("localleaf.sidebarSectionLayoutVersion", SIDEBAR_SECTION_LAYOUT_VERSION);
+    }
+    if (resizeState.split) localStorage.setItem("localleaf.sourcePaneWidth", String(local.sourcePaneWidth));
+    if (resizeState.rightRail) localStorage.setItem("localleaf.rightRailWidth", String(local.rightRailWidth));
+    if (resizeState.logs) localStorage.setItem("localleaf.logsHeight", String(local.logsHeight));
+  } finally {
+    local.resizingSidebar = false;
+    local.resizingSidebarSection = "";
+    local.resizingSplit = false;
+    local.resizingRightRail = false;
+    local.resizingLogs = false;
+    document.body.classList.remove("is-resizing-sidebar");
+    document.body.classList.remove("is-resizing-sidebar-section");
+    document.body.classList.remove("is-resizing-split");
+    document.body.classList.remove("is-resizing-right-rail");
+    document.body.classList.remove("is-resizing-logs");
+  }
+  return true;
+}
+
+window.addEventListener("pointerup", (event) => {
+  finishResize(event);
+});
+
+window.addEventListener("pointercancel", () => {
+  finishResize(null, { useEventPointer: false });
+});
+
+window.addEventListener("lostpointercapture", () => {
+  finishResize(null, { useEventPointer: false });
+});
+
+window.addEventListener("blur", () => {
+  finishResize(null, { useEventPointer: false });
 });
 
 window.addEventListener("resize", () => {
@@ -9824,11 +11837,26 @@ function settleEditorUi() {
 }
 
 async function saveCurrentFile() {
-  if (!local.selectedFile) return;
-  if (!isEditableFile(fileMeta(local.selectedFile))) return;
+  if (!local.selectedFile) return true;
+  if (!isEditableFile(fileMeta(local.selectedFile))) return true;
   prepareEditorForPersistence();
   clearTimeout(local.saveTimer);
   local.editorContent = currentEditorText();
+  if (isLiveSession()) {
+    const status = document.querySelector(".editor-subtitle");
+    local.saveStatus = "Saving...";
+    if (status) status.textContent = local.saveStatus;
+    const saved = await requestCollabSave(local.selectedFile, local.editorContent);
+    if (saved) {
+      local.saveStatus = "Saved";
+      if (status) status.textContent = local.saveStatus;
+      return true;
+    }
+    local.saveStatus = "Waiting to reconnect";
+    if (status) status.textContent = local.saveStatus;
+    showRemoteReconnectNotice("Reconnect before saving or compiling this live document.");
+    return false;
+  }
   if (local.saving) {
     local.pendingSave = true;
     return local.savePromise;
@@ -9838,6 +11866,7 @@ async function saveCurrentFile() {
   local.saveStatus = "Saving...";
 
   local.savePromise = (async () => {
+    let saved = true;
     try {
       await api("/api/file", {
         method: "POST",
@@ -9851,8 +11880,13 @@ async function saveCurrentFile() {
       local.saveStatus = "Saved";
       refreshEditorSuggestions();
     } catch (error) {
+      saved = false;
       local.saveStatus = "Save failed";
-      alert(error.message);
+      showAppNotice(error.message || "LocalLeaf could not save this file.", {
+        type: "error",
+        title: "Save failed",
+        detail: "Your editor content is still here. Try saving again before compiling."
+      });
     } finally {
       local.saving = false;
       local.savePromise = null;
@@ -9861,16 +11895,13 @@ async function saveCurrentFile() {
     }
 
     if (local.pendingSave) {
-      await saveCurrentFile();
+      const pendingSaved = await saveCurrentFile();
+      return saved && pendingSaved;
     }
+    return saved;
   })();
 
   return local.savePromise;
-}
-
-async function saveAndCompile() {
-  clearTimeout(local.saveTimer);
-  await compile();
 }
 
 function focusRenameInput() {
@@ -10128,20 +12159,92 @@ async function setMainFile() {
 }
 
 async function compile() {
-  const previewScroll = capturePreviewScroll();
-  local.pendingPreviewScroll = previewScroll;
-  await saveCurrentFile();
-  local.appState.compile.status = "running";
-  updateCompileUi();
-  const nextCompile = await api("/api/compile", {
-    method: "POST",
-    body: { requestedBy: local.userName }
-  });
-  if (shouldApplyCompileUpdate(nextCompile)) {
-    local.appState.compile = nextCompile;
+  if (isGuestClient()) {
+    showAppNotice("Only the host can run the LaTeX compiler.", {
+      title: "Host-controlled compile",
+      detail: "Your edits are shared with the host, who can compile and publish the next PDF preview."
+    });
+    return false;
   }
-  updateCompileUi({ refreshPreview: true, previewScroll });
-  local.pendingPreviewScroll = null;
+  if (local.compileBusy || local.appState?.compile?.status === "running") return false;
+  const previewScroll = capturePreviewScroll();
+  const previousCompile = {
+    ...local.appState.compile,
+    logs: [...(local.appState.compile.logs || [])]
+  };
+  const runId = ++local.compileRunId;
+  let refreshPreview = false;
+  let compileSucceeded = false;
+  local.compileBusy = true;
+  local.compilePhase = "saving";
+  local.pendingPreviewScroll = previewScroll;
+  updateCompileUi();
+  try {
+    const saved = await saveCurrentFile();
+    if (!saved) {
+      showAppNotice("Compile canceled because the current file was not saved.", {
+        type: "error",
+        title: "Compile did not start",
+        detail: "Resolve the save error, then recompile."
+      });
+      return false;
+    }
+
+    local.compilePhase = "compiling";
+    local.appState.compile.status = "running";
+    updateCompileUi();
+    const nextCompile = await api("/api/compile", {
+      method: "POST",
+      body: { requestedBy: local.userName }
+    });
+    if (runId !== local.compileRunId) return false;
+    if (shouldApplyCompileUpdate(nextCompile)) {
+      local.appState.compile = nextCompile;
+    }
+    refreshPreview = local.appState.compile.status !== "running";
+    compileSucceeded = local.appState.compile.status === "success";
+    if (!compileSucceeded && local.appState.compile.status === "failed") {
+      showAppNotice("The latest compile failed.", {
+        type: "error",
+        title: "Compile failed",
+        detail: compileUsesLastGoodPreview(local.appState.compile)
+          ? "The preview is showing the last successful PDF. Check the compile log before sharing it."
+          : "No current PDF is available. Check the compile log, then try again."
+      });
+    }
+    return compileSucceeded;
+  } catch (error) {
+    const currentCompile = local.appState.compile;
+    const serverFinished = currentCompile.status !== "running"
+      && Number(currentCompile.version || 0) >= Number(previousCompile.version || 0);
+    if (!serverFinished) {
+      local.appState.compile = {
+        ...previousCompile,
+        status: "failed",
+        previewStale: previousCompile.mode === "pdf" && Boolean(previousCompile.pdfPath),
+        isStale: previousCompile.mode === "pdf" && Boolean(previousCompile.pdfPath),
+        logs: [
+          ...(previousCompile.logs || []),
+          `Compile request failed: ${error.message || "Unknown error"}`
+        ]
+      };
+    }
+    showAppNotice(error.message || "LocalLeaf could not complete the compile request.", {
+      type: "error",
+      title: "Compile failed",
+      detail: compileUsesLastGoodPreview(local.appState.compile)
+        ? "The preview is still showing the last successful PDF."
+        : "Check the compile log, then try again."
+    });
+    return false;
+  } finally {
+    if (runId === local.compileRunId) {
+      local.compileBusy = false;
+      local.compilePhase = "";
+      local.pendingPreviewScroll = null;
+      updateCompileUi({ refreshPreview, previewScroll });
+    }
+  }
 }
 
 async function render() {
@@ -10151,7 +12254,7 @@ async function render() {
 
   let current = route();
   if (isGuestClient() && !["editor", "ended"].includes(current.view)) {
-    const params = new URLSearchParams({ view: "editor", token: local.guestToken });
+    const params = new URLSearchParams({ view: "editor" });
     if (local.userName && local.userName !== "Host") params.set("name", local.userName);
     history.replaceState({}, "", `/?${params.toString()}`);
     local.view = "editor";
@@ -10220,7 +12323,7 @@ function connectEvents() {
     syncAiProposalsFromAppState();
     const current = route();
     if (current.view === "editor") {
-      local.appState.session.joinRequests
+      (Array.isArray(local.appState?.session?.joinRequests) ? local.appState.session.joinRequests : [])
         .filter((request) => request.status === "pending")
         .forEach(showEditorJoinRequest);
       refreshRightRailUi();
@@ -10284,7 +12387,18 @@ function connectEvents() {
     const current = route();
     const isRemoteSessionView = Boolean(local.guestToken) && ["editor", "join", "waiting"].includes(current.view);
     if (!isRemoteSessionView) return;
+    const collabIsHealthy = current.view === "editor" && local.collabSocket?.readyState === WebSocket.OPEN;
+    if (collabIsHealthy) {
+      local.eventDisconnectTimer = null;
+      clearRemoteReconnectNotice();
+      return;
+    }
     local.eventDisconnectTimer = setTimeout(() => {
+      const websocketRecovered = route().view === "editor" && local.collabSocket?.readyState === WebSocket.OPEN;
+      if (websocketRecovered) {
+        clearRemoteReconnectNotice();
+        return;
+      }
       if (local.events?.readyState !== EventSource.OPEN) {
         showRemoteReconnectNotice("The host event stream is reconnecting.");
       }
@@ -10322,16 +12436,21 @@ window.addEventListener("pointerdown", (event) => {
 window.addEventListener("pointerdown", (event) => {
   if (!local.editorMoreMenuOpen) return;
   if (event.target.closest?.(".editor-more-menu, #editorMoreButton")) return;
-  closeEditorMoreMenuInPlace();
+  closeEditorMoreMenuInPlace({ focus: false });
 });
 
 window.addEventListener("pointerdown", (event) => {
   if (local.pdfAnnotationPopover && !event.target.closest?.(".pdf-annotation-popover") && !event.target.closest?.(".pdf-page")) {
     setPdfAnnotateMode(false);
   }
+  if (local.aiSessionDeleteId) return;
   let shouldRender = false;
-  if (local.aiSessionMenuOpen && !event.target.closest?.(".ai-session-picker")) {
+  if (local.aiSessionMenuOpen && !event.target.closest?.(".ai-session-bar")) {
     local.aiSessionMenuOpen = false;
+    shouldRender = true;
+  }
+  if (local.aiSessionActionMenuId && !event.target.closest?.(".ai-session-row, #aiSessionActionsMenu")) {
+    local.aiSessionActionMenuId = "";
     shouldRender = true;
   }
   if (local.aiSessionMoreMenuOpen && !event.target.closest?.(".ai-strip-more-wrap")) {
@@ -10356,6 +12475,40 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape" && route().view === "editor") {
+    if (local.aiSessionDeleteId) {
+      event.preventDefault();
+      local.aiSessionDeleteId = "";
+      refreshRightRailUi();
+      setTimeout(() => document.querySelector("#aiSessionMenuButton")?.focus(), 0);
+      return;
+    }
+    if (local.aiSessionRenamingId) {
+      event.preventDefault();
+      cancelAiSessionRename();
+      return;
+    }
+    if (local.aiSessionActionMenuId) {
+      const sessionId = local.aiSessionActionMenuId;
+      event.preventDefault();
+      local.aiSessionActionMenuId = "";
+      refreshRightRailUi();
+      setTimeout(() => document.querySelector(`.ai-session-row[data-session-id="${CSS.escape(sessionId)}"] .ai-session-row-main`)?.focus(), 0);
+      return;
+    }
+    if (local.aiSessionMenuOpen) {
+      event.preventDefault();
+      local.aiSessionMenuOpen = false;
+      refreshRightRailUi();
+      setTimeout(() => document.querySelector("#aiSessionMenuButton")?.focus(), 0);
+      return;
+    }
+    if (local.aiModelPickerOpen) {
+      event.preventDefault();
+      local.aiModelPickerOpen = false;
+      refreshRightRailUi();
+      setTimeout(() => document.querySelector("#aiModelChip")?.focus(), 0);
+      return;
+    }
     if (local.pdfAnnotationPopover || local.pdfAnnotateMode) {
       event.preventDefault();
       setPdfAnnotateMode(false);
@@ -10399,7 +12552,7 @@ window.addEventListener("keydown", (event) => {
   if (key === "s") {
     if (document.activeElement?.closest?.(".cm-editor")) return;
     event.preventDefault();
-    saveAndCompile();
+    saveCurrentFile();
     return;
   }
   if (document.activeElement?.closest?.(".cm-editor")) return;

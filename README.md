@@ -1,7 +1,7 @@
 # LocalLeaf
 
 <p align="center">
-  <img src="landing-page/assets/localleaf-logo.svg" alt="LocalLeaf" width="96" />
+  <img src="public/assets/localleaf-logo.svg" alt="LocalLeaf" width="80" />
 </p>
 
 <h3 align="center">The Overleaf-like editor hosted by you.</h3>
@@ -37,7 +37,7 @@
 
 ## What It Is
 
-LocalLeaf is a host-powered LaTeX collaboration app. The host runs the desktop app, opens a project, starts a session, and shares an invite link. Collaborators join from a browser, edit together, chat, compile, preview, and export while the host computer remains the source of truth.
+LocalLeaf is a host-powered LaTeX collaboration app. The host runs the desktop app, opens a project, starts a session, and shares an invite link. Collaborators join from a browser to edit and chat; the host compiles the shared PDF, and approved collaborators can preview or export it while the host computer remains the source of truth.
 
 No accounts. No monthly server. No cloud storage.
 
@@ -51,10 +51,10 @@ When the host stops the session or closes the app, the room ends and the project
 - Real LaTeX project import from folders or ZIP files.
 - CodeMirror 6 LaTeX editor with line numbers, highlighting, toolbar actions, shortcuts, and autocomplete.
 - Local PDF compilation through bundled Tectonic, system LaTeX tools, or fallback preview guidance.
-- PDF.js preview with zoom, page preservation, and export support.
+- PDF.js preview with zoom, page preservation, export support, and per-participant click-to-source navigation through SyncTeX.
 - Real-time shared text editing over WebSockets.
 - Human chat beside the editor, PDF preview, compile logs, and project files.
-- AI Helper with local models, OpenAI-compatible providers, approval cards, and reviewable file edits.
+- AI Helper with local models, OpenAI-compatible providers, safe rich Markdown, natural prose guidance, approval cards, and reviewable file edits.
 - Light and dark app themes.
 
 ## Preview
@@ -130,9 +130,9 @@ The built-in Cursor-style harness powers AI edit proposals inside LocalLeaf: mod
 | macOS Apple Silicon | [LocalLeaf-Host-mac-arm64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg) |
 | macOS Intel | [LocalLeaf-Host-mac-x64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg) |
 
-Current release: `0.1.22`
+Current release: `0.1.23`
 
-Version `0.1.22` fixes image/PDF asset uploads so uploaded assets are saved with normalized cross-platform paths, appear immediately in the Images panel, and remain downloadable from the project state.
+Version `0.1.23` refreshes the desktop interface, strengthens hosted-session and PDF source navigation reliability, adds safe rich-text AI responses and reviewable new-file creation, and expands automated regression coverage.
 
 ## macOS First Launch
 

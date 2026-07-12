@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PMG_DISABLE_TELEMETRY: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # Node 26.3.0 bundles npm 11.16.0, the first release supporting every
+          # fail-closed dependency-source control used by this repository.
+          node-version: "26.3.0"
+
+      - name: Start Package Manager Guard
+        uses: safedep/pmg@cb34b76fbcd1d1d517b1c0922b32d0ecf3f0e4a2 # v1
+        with:
+          server-mode: true
+
+      - name: Verify npm hardening support
+        run: |
+          NPM_VERSION="$(npm --version)"
+          node -e "const v=process.argv[1].split('.').map(Number); if (v[0] < 11 || (v[0] === 11 && v[1] < 16)) { console.error('npm >= 11.16.0 is required; found ' + process.argv[1]); process.exit(1); }" "$NPM_VERSION"
+
+      - name: Install dependencies without lifecycle scripts
+        run: pmg npm ci --ignore-scripts
+
+      - name: Rebuild approved test dependencies
+        # npm ci intentionally suppresses lifecycle scripts. Re-enable them only
+        # for the lockfile-pinned Electron and esbuild packages allowed in package.json.
+        run: pmg npm rebuild electron esbuild --ignore-scripts=false
+
+      - name: Check JavaScript syntax
+        run: find src public tests scripts landing-page -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
+
+      - name: Build clients and run regression tests
+        run: pmg npm test
+
+      - name: Verify generated clients are current
+        run: git diff --exit-code -- public/editor.bundle.js public/pdf-preview.bundle.js public/pdf.worker.bundle.js
+
+      - name: Run rendered Electron regression gate
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1024x640x24" pmg npm run test:rendered
+
+      - name: Enforce Package Manager Guard policy
+        if: always()
+        run: pmg proxy stop --fail-on-violation
+
+  windows-smoke:
+    name: Windows build and regression smoke
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # Keep the Windows smoke on the same verified npm policy floor.
+          node-version: "26.3.0"
+
+      - name: Verify npm hardening support
+        shell: pwsh
+        run: |
+          $version = (npm --version).Split('.') | ForEach-Object { [int]$_ }
+          if ($version[0] -lt 11 -or ($version[0] -eq 11 -and $version[1] -lt 16)) {
+            throw "npm >= 11.16.0 is required; found $(npm --version)"
+          }
+
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Rebuild approved test dependencies
+        # Keep lifecycle execution limited to the reviewed allowlist.
+        run: npm rebuild electron esbuild --ignore-scripts=false
+
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem src, public, tests, scripts, landing-page -Recurse -File |
+            Where-Object { $_.Extension -in '.js', '.mjs' }
+          foreach ($file in $files) {
+            node --check $file.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Build clients and run regression tests
+        run: npm test
+
+      - name: Verify generated clients are current
+        run: git diff --exit-code -- public/editor.bundle.js public/pdf-preview.bundle.js public/pdf.worker.bundle.js
+
+      - name: Run rendered Electron regression gate
+        run: npm run test:rendered

@@ -57,6 +57,9 @@ function normalizeRelativePath(relativePath) {
     if (WINDOWS_RESERVED_NAMES.has(base)) {
       throw new Error(`Reserved Windows filename is not allowed: ${part}`);
     }
+    if (/[<>:"|?*\u0000-\u001F]/u.test(part) || /[. ]$/u.test(part)) {
+      throw new Error(`Invalid Windows filename is not allowed: ${part}`);
+    }
   }
 
   return parts.join("/");
@@ -199,7 +202,7 @@ function getProjectSize(projectRoot) {
 }
 
 function detectMainFile(projectRoot) {
-  const files = listProjectFiles(projectRoot).filter((file) => file.type === "text" && file.path.endsWith(".tex"));
+  const files = listProjectFiles(projectRoot).filter((file) => file.type === "text" && file.path.toLowerCase().endsWith(".tex"));
   const main = files.find((file) => file.path.toLowerCase() === "main.tex");
   if (main) return main.path;
 

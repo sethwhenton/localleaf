@@ -6,7 +6,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 
-const { createLocalLeafServer } = require("../src/server/index");
+const { createTestLocalLeafServer: createLocalLeafServer } = require("./helpers/localleaf-test-server");
 
 function hostBaseUrl(app, port) {
   return `http://localhost:${port}/?host=${encodeURIComponent(app.state.hostToken)}`;
@@ -87,6 +87,25 @@ function createProject() {
   );
   return projectRoot;
 }
+
+test("reports the clamped configured llama context window", async () => {
+  const projectRoot = createProject();
+  const previous = process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE;
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    for (const [configured, expected] of [["1024", 4096], ["24576", 24576], ["999999", 32768], ["invalid", 16384]]) {
+      process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE = configured;
+      const state = await request(baseUrl, "/api/state");
+      assert.equal(state.ai.models[0].contextWindowTokens, expected);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE;
+    else process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE = previous;
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
 
 test("validates OpenAI-compatible providers and redacts provider state", async () => {
   const projectRoot = createProject();
@@ -227,11 +246,100 @@ test("adds the OpenCode Go preset and supports provider activation and deletion"
   }
 });
 
+test("keeps user-defined providers custom when their ID or name matches a built-in", async () => {
+  const projectRoot = createProject();
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    const idCollision = await request(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        id: "openai",
+        name: "Private gateway",
+        baseUrl: "https://gateway.example/v1",
+        models: [{ id: "private-model", name: "Private model" }],
+        custom: false,
+        builtin: true
+      }
+    });
+    const customOpenAiId = idCollision.providers.find((provider) => provider.id === "openai");
+    assert.equal(customOpenAiId.name, "Private gateway");
+    assert.equal(customOpenAiId.custom, true);
+    assert.equal(customOpenAiId.builtin, false);
+
+    const nameCollision = await request(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        id: "private-openrouter",
+        name: "OpenRouter",
+        baseUrl: "https://router.example/v1",
+        models: [{ id: "private-model", name: "Private model" }],
+        custom: false,
+        builtin: true
+      }
+    });
+    const customOpenRouterName = nameCollision.providers.find((provider) => provider.id === "private-openrouter");
+    assert.equal(customOpenRouterName.name, "OpenRouter");
+    assert.equal(customOpenRouterName.custom, true);
+    assert.equal(customOpenRouterName.builtin, false);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("requires an exact known template selection before assigning built-in branding", async () => {
+  const projectRoot = createProject();
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    const unknownTemplate = await rawRequest(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        templateId: "not-a-provider",
+        id: "not-a-provider",
+        name: "Unknown template",
+        baseUrl: "https://provider.example/v1",
+        models: [{ id: "model", name: "Model" }]
+      }
+    });
+    assert.equal(unknownTemplate.response.status, 400);
+    assert.match(unknownTemplate.payload.error, /unknown provider preset/i);
+
+    const mismatchedTemplate = await rawRequest(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        templateId: "openai",
+        id: "openrouter",
+        name: "Mismatched preset",
+        baseUrl: "https://provider.example/v1",
+        models: [{ id: "model", name: "Model" }]
+      }
+    });
+    assert.equal(mismatchedTemplate.response.status, 400);
+    assert.match(mismatchedTemplate.payload.error, /provider ID.*preset/i);
+
+    const builtIn = await request(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: { templateId: "ollama", id: "ollama", activate: false }
+    });
+    const ollama = builtIn.providers.find((provider) => provider.id === "ollama");
+    assert.equal(ollama.custom, false);
+    assert.equal(ollama.builtin, true);
+  } finally {
+    await app.stop();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test("uses hosted provider replacement instructions to create safe LaTeX edit proposals", async () => {
   const projectRoot = createProject();
   const mainPath = path.join(projectRoot, "main.tex");
+  let agentPrompt = "";
   const mock = await startOpenAiCompatibleMock(({ body }) => {
     assert.equal(body.model, "kimi-k2.6");
+    const prompt = body.messages?.map((item) => String(item.content || "")).join("\n\n") || "";
+    if (/Return JSON only with this shape/u.test(prompt)) agentPrompt = prompt;
     return {
       status: 200,
       body: {
@@ -239,7 +347,7 @@ test("uses hosted provider replacement instructions to create safe LaTeX edit pr
           message: {
             role: "assistant",
             content: JSON.stringify({
-              reply: "I found the exact text and prepared the change.",
+              reply: "## Edit summary\n\nI found the exact sentence and kept the rest of the document unchanged.",
               summary: "Replace the verbose sentence.",
               replacements: [{
                 find: "We utilize this draft.",
@@ -294,6 +402,15 @@ test("uses hosted provider replacement instructions to create safe LaTeX edit pr
     assert.equal(message.proposals.length, 1);
     assert.equal(message.proposals[0].provider.id, "hosted");
     assert.match(message.proposals[0].newText, /We use this draft/);
+    assert.match(
+      message.reply,
+      /^I prepared an edit to `main\.tex` for review, replacing "We utilize this draft\." with "We use this draft\."/u
+    );
+    assert.doesNotMatch(message.reply.split("\n")[0], /[.!?]["']\./u);
+    assert.match(message.reply, /## Edit summary/u);
+    assert.match(agentPrompt, /LocalLeaf safe Markdown/u);
+    assert.match(agentPrompt, /never add commentary outside the JSON object/u);
+    assert.match(agentPrompt, /preserve the requested voice, facts, quotations, citations, and meaning/u);
     assert.doesNotMatch(fs.readFileSync(mainPath, "utf8"), /We use this draft/);
 
     await request(baseUrl, "/api/agent/approval/approve", {
@@ -304,6 +421,313 @@ test("uses hosted provider replacement instructions to create safe LaTeX edit pr
   } finally {
     await app.stop();
     await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("normalizes hosted proposal summaries before returning approval cards", async () => {
+  const projectRoot = createProject();
+  const unsafeSummary = `## **Update** <img src=x onerror=alert(1)> [unsafe](javascript:alert(1)) [reference](https://example.com) ${"detail ".repeat(40)}`;
+  const mock = await startOpenAiCompatibleMock(() => ({
+    status: 200,
+    body: {
+      choices: [{
+        message: {
+          role: "assistant",
+          content: JSON.stringify({
+            reply: "The sentence is ready for review.",
+            summary: unsafeSummary,
+            replacements: [{
+              find: "We utilize this draft.",
+              replace: "We use this draft."
+            }]
+          })
+        }
+      }]
+    }
+  }));
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    await request(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        id: "summary-provider",
+        name: "Summary Provider",
+        type: "openai-compatible",
+        baseUrl: mock.baseUrl,
+        apiKey: "test-provider-key",
+        modelId: "summary-model",
+        models: [{ id: "summary-model", name: "Summary Model" }],
+        activate: true
+      }
+    });
+
+    const message = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: { path: "main.tex", message: "rewrite this sentence" }
+    });
+
+    assert.equal(message.proposals.length, 1);
+    assert.match(message.proposals[0].summary, /^Update unsafe reference detail/u);
+    assert.ok(message.proposals[0].summary.length <= 180);
+    assert.doesNotMatch(message.proposals[0].summary, /[#*<>\[\]]|javascript:|https?:\/\//iu);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("preserves validated hosted context windows and rejects unsafe limits", async () => {
+  const projectRoot = createProject();
+  const mock = await startOpenAiCompatibleMock(() => ({
+    status: 200,
+    body: {
+      choices: [{ message: { role: "assistant", content: "Provider ready." } }]
+    }
+  }));
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    const validated = await request(baseUrl, "/api/ai/providers/validate", {
+      method: "POST",
+      body: {
+        provider: {
+          id: "context-provider",
+          name: "Context Provider",
+          type: "openai-compatible",
+          baseUrl: mock.baseUrl,
+          models: [{ id: "context-model", name: "Context Model", contextWindowTokens: 131072 }]
+        }
+      }
+    });
+    assert.equal(validated.provider.models[0].contextWindowTokens, 131072);
+
+    const callsBeforeInvalidRequest = mock.calls.length;
+    const invalid = await rawRequest(baseUrl, "/api/ai/providers/validate", {
+      method: "POST",
+      body: {
+        provider: {
+          id: "bad-context-provider",
+          name: "Bad Context Provider",
+          type: "openai-compatible",
+          baseUrl: mock.baseUrl,
+          models: [{ id: "context-model", name: "Context Model", contextWindowTokens: 1000 }]
+        }
+      }
+    });
+    assert.equal(invalid.response.status, 400);
+    assert.match(invalid.payload.error, /context window/i);
+    assert.equal(mock.calls.length, callsBeforeInvalidRequest);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects unconfigured provider model IDs before a generation request", async () => {
+  const projectRoot = createProject();
+  const mock = await startOpenAiCompatibleMock(() => ({
+    status: 200,
+    body: {
+      choices: [{
+        message: {
+          role: "assistant",
+          content: JSON.stringify({ reply: "No edit needed.", edits: [] })
+        }
+      }]
+    }
+  }));
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    await request(baseUrl, "/api/ai/providers/validate", {
+      method: "POST",
+      body: {
+        provider: {
+          id: "configured-models",
+          name: "Configured Models",
+          type: "openai-compatible",
+          baseUrl: mock.baseUrl,
+          models: [{ id: "known-model", name: "Known Model" }]
+        }
+      }
+    });
+    await request(baseUrl, "/api/ai/providers/activate", {
+      method: "POST",
+      body: { providerId: "configured-models", modelId: "known-model" }
+    });
+
+    const callsBeforeGeneration = mock.calls.length;
+    const result = await rawRequest(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: {
+        path: "main.tex",
+        message: "Explain this file.",
+        aiProviderId: "configured-models",
+        aiModelId: "not-configured"
+      }
+    });
+    assert.equal(result.response.status, 400);
+    assert.match(result.payload.error, /configured model|not configured/i);
+    assert.equal(mock.calls.length, callsBeforeGeneration);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("returns measured context usage from hosted provider responses", async () => {
+  const projectRoot = createProject();
+  const mock = await startOpenAiCompatibleMock(() => ({
+    status: 200,
+    body: {
+      choices: [{
+        message: {
+          role: "assistant",
+          content: JSON.stringify({ reply: "The file is a short article.", edits: [] })
+        }
+      }],
+      usage: { prompt_tokens: 1200, completion_tokens: 80, total_tokens: 1280 }
+    }
+  }));
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    await request(baseUrl, "/api/ai/providers/validate", {
+      method: "POST",
+      body: {
+        provider: {
+          id: "metered-provider",
+          name: "Metered Provider",
+          type: "openai-compatible",
+          baseUrl: mock.baseUrl,
+          models: [{ id: "metered-model", name: "Metered Model", contextWindowTokens: 32768 }]
+        }
+      }
+    });
+    await request(baseUrl, "/api/ai/providers/activate", {
+      method: "POST",
+      body: { providerId: "metered-provider", modelId: "metered-model" }
+    });
+
+    const result = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: { path: "main.tex", message: "What is this file?" }
+    });
+    assert.equal(result.contextUsage.scope, "last_request");
+    assert.equal(result.contextUsage.status, "complete");
+    assert.deepEqual(result.contextUsage.usage, {
+      inputTokens: 1200,
+      outputTokens: 80,
+      totalTokens: 1280,
+      source: "provider_reported"
+    });
+    assert.equal(result.contextUsage.window.contextWindowTokens, 32768);
+    assert.equal(result.contextUsage.window.source, "provider_model_config");
+    assert.equal(result.contextUsage.window.percentUsed, 3.9);
+    assert.equal("raw" in result, false);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("estimates missing usage from the exact serialized provider request", async () => {
+  const projectRoot = createProject();
+  fs.writeFileSync(path.join(projectRoot, "appendix.tex"), `\\section{Appendix}\n${"Long project context. ".repeat(5000)}`);
+  const mock = await startOpenAiCompatibleMock(() => ({
+    status: 200,
+    body: {
+      choices: [{
+        message: {
+          role: "assistant",
+          content: JSON.stringify({ reply: "Estimated response.", edits: [] })
+        }
+      }]
+    }
+  }));
+  const { app, baseUrl } = await startApp(projectRoot);
+
+  try {
+    await request(baseUrl, "/api/ai/providers/validate", {
+      method: "POST",
+      body: {
+        provider: {
+          id: "estimated-provider",
+          name: "Estimated Provider",
+          type: "openai-compatible",
+          baseUrl: mock.baseUrl,
+          models: [{ id: "estimated-model", name: "Estimated Model" }]
+        }
+      }
+    });
+    await request(baseUrl, "/api/ai/providers/activate", {
+      method: "POST",
+      body: { providerId: "estimated-provider", modelId: "estimated-model" }
+    });
+
+    const result = await request(baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: { path: "main.tex", message: "Estimate this request" }
+    });
+    const exactSerializedRequest = JSON.stringify(mock.calls.at(-1).body);
+    const expectedTokens = Math.ceil(Buffer.byteLength(exactSerializedRequest, "utf8") / 3);
+    assert.equal(result.contextUsage.usage.source, "server_estimate");
+    assert.equal(result.contextUsage.usage.inputTokens, expectedTokens);
+    assert.equal(result.contextUsage.usage.totalTokens, expectedTokens);
+    assert.equal(result.contextUsage.truncation.occurred, true);
+    assert.ok(result.contextUsage.truncation.reasons.includes("project_context_limit"));
+    assert.equal(result.contextUsage.components.find((item) => item.key === "project_context").truncated, true);
+  } finally {
+    await app.stop();
+    await new Promise((resolve) => mock.server.close(resolve));
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("propagates caller cancellation to hosted provider requests", async () => {
+  const projectRoot = createProject();
+  let capturedSignal = null;
+  const aiFetch = async (_url, options = {}) => {
+    capturedSignal = options.signal;
+    return new Promise((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    });
+  };
+  const { app, baseUrl } = await startApp(projectRoot, { aiFetch });
+
+  try {
+    await request(baseUrl, "/api/ai/providers/save", {
+      method: "POST",
+      body: {
+        id: "abortable-provider",
+        name: "Abortable provider",
+        type: "openai-compatible",
+        baseUrl: "https://provider.invalid/v1",
+        modelId: "abortable-model",
+        models: [{ id: "abortable-model", name: "Abortable model" }],
+        activate: true
+      }
+    });
+    const controller = new AbortController();
+    const pending = app.state.ai.models.askActiveProvider([
+      { role: "user", content: "Wait" }
+    ], { signal: controller.signal, timeoutMs: 50 });
+    while (!capturedSignal) await new Promise((resolve) => setTimeout(resolve, 1));
+    controller.abort();
+    await assert.rejects(pending, /cancelled/i);
+    assert.equal(capturedSignal.aborted, true);
+  } finally {
+    await app.stop();
     fs.rmSync(projectRoot, { recursive: true, force: true });
   }
 });
@@ -503,11 +927,13 @@ test("falls back to deterministic proposals when no hosted provider is active", 
 
     const message = await request(baseUrl, "/api/agent/message", {
       method: "POST",
-      body: { path: "main.tex", message: "rewrite this section" }
+      body: { path: "main.tex", message: "rewrite this section", selectedText: "We utilize this draft." }
     });
-    assert.match(message.reply, /Rewrite/);
+    assert.match(message.reply, /^I prepared an edit to `main\.tex` for review, rewriting common verbose phrases/u);
     assert.equal(message.proposals.length, 1);
     assert.match(message.proposals[0].newText, /We use this draft/);
+    assert.equal(message.contextUsage.status, "not_applicable");
+    assert.equal(message.contextUsage.runtime, "deterministic-fallback");
   } finally {
     await app.stop();
     fs.rmSync(projectRoot, { recursive: true, force: true });
@@ -548,9 +974,15 @@ test("falls back to safe proposals when hosted provider generation is malformed"
     });
 
     assert.doesNotMatch(message.reply, /Provider returned a malformed response/i);
+    assert.match(
+      message.reply,
+      /^I prepared an edit to `main\.tex` for review, replacing "ML" with "Machine Learning"\./u
+    );
     assert.equal(message.proposals.length, 1);
     assert.match(message.proposals[0].newText, /\\title\{Machine Learning\}/);
     assert.equal(fs.readFileSync(mainPath, "utf8").includes("Machine Learning"), false);
+    assert.equal(message.contextUsage.status, "not_applicable");
+    assert.equal(message.contextUsage.runtime, "deterministic-fallback");
   } finally {
     await app.stop();
     await new Promise((resolve) => mock.server.close(resolve));

@@ -30,15 +30,16 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          # Node 26.3.0 bundles npm 11.16.0, matching package.json and .npmrc.
+          node-version: "26.3.0"
 
       - name: Verify npm hardening support
         shell: pwsh
         run: |
           $npmVersion = npm --version
           $parts = $npmVersion.Split(".") | ForEach-Object { [int]$_ }
-          if ($parts[0] -lt 11 -or ($parts[0] -eq 11 -and $parts[1] -lt 10)) {
-            throw "npm >= 11.10.0 is required for min-release-age; found $npmVersion"
+          if ($parts[0] -lt 11 -or ($parts[0] -eq 11 -and $parts[1] -lt 16)) {
+            throw "npm >= 11.16.0 is required; found $npmVersion"
           }
 
       - name: Install dependencies without lifecycle scripts

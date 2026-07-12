@@ -4,12 +4,19 @@ const os = require("node:os");
 const path = require("node:path");
 const { app, BrowserWindow, Menu, dialog, ipcMain, nativeImage, nativeTheme, safeStorage, shell } = require("electron");
 const { createLocalLeafServer } = require("../server/index");
+const { readDesktopPreferences, writeDesktopPreferences } = require("./preferences");
 
 let hostServer;
 let mainWindow;
+let hostOrigin = "";
 const UPDATE_REDIRECT_LIMIT = 5;
+const UPDATE_REPOSITORY_PATH = "/sethwhenton/localleaf/";
+const UPDATE_REDIRECT_HOSTS = new Set([
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com"
+]);
 
-function isAllowedUpdateUrl(rawUrl) {
+function isAllowedUpdateUrl(rawUrl, options = {}) {
   let parsed;
   try {
     parsed = new URL(String(rawUrl || ""));
@@ -17,12 +24,12 @@ function isAllowedUpdateUrl(rawUrl) {
     return false;
   }
   const host = parsed.hostname.toLowerCase();
-  return parsed.protocol === "https:"
-    && (
-      host === "github.com"
-      || host === "objects.githubusercontent.com"
-      || host.endsWith(".githubusercontent.com")
-    );
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) return false;
+  if (!options.redirect) {
+    return host === "github.com"
+      && parsed.pathname.toLowerCase().startsWith(UPDATE_REPOSITORY_PATH);
+  }
+  return UPDATE_REDIRECT_HOSTS.has(host) || host.endsWith(".githubusercontent.com");
 }
 
 function expectedInstallerExtension() {
@@ -46,7 +53,7 @@ function downloadUpdateInstaller(rawUrl, version, redirectCount = 0) {
   if (redirectCount > UPDATE_REDIRECT_LIMIT) {
     return Promise.reject(new Error("Update download redirected too many times."));
   }
-  if (!isAllowedUpdateUrl(rawUrl)) {
+  if (!isAllowedUpdateUrl(rawUrl, { redirect: redirectCount > 0 })) {
     return Promise.reject(new Error("Update download URL is not trusted."));
   }
   const parsed = new URL(rawUrl);
@@ -103,6 +110,31 @@ function downloadUpdateInstaller(rawUrl, version, redirectCount = 0) {
   });
 }
 
+function isTrustedRendererEvent(event) {
+  if (!hostOrigin) return false;
+  try {
+    return new URL(event.senderFrame?.url || event.sender?.getURL?.() || "").origin === hostOrigin;
+  } catch {
+    return false;
+  }
+}
+
+function requireTrustedRenderer(event) {
+  if (!isTrustedRendererEvent(event)) {
+    throw new Error("Blocked a LocalLeaf desktop request from an untrusted page.");
+  }
+}
+
+function safeExternalUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ""));
+    if (parsed.protocol === "https:" || parsed.origin === hostOrigin) return parsed.toString();
+    return "";
+  } catch {
+    return "";
+  }
+}
+
 function titleBarTheme(theme) {
   return theme === "dark"
     ? { color: "#10110f", symbolColor: "#f4eee6", height: 44 }
@@ -136,6 +168,10 @@ function defaultAiSessionRoot() {
 
 function defaultAiChangeRoot() {
   return path.join(app.getPath("userData"), "AiChanges");
+}
+
+function rendererPreferencesPath() {
+  return path.join(app.getPath("userData"), "renderer-preferences.json");
 }
 
 function createAiSecretStore() {
@@ -201,14 +237,15 @@ async function startHostServer() {
     // The server can decide how to fall back if the desktop default is unavailable.
   }
   hostServer = createLocalLeafServer({
-    port: 4317,
+    port: 0,
     modelRoot,
     aiSessionRoot: defaultAiSessionRoot(),
     aiChangeRoot: defaultAiChangeRoot(),
     aiSecretStore: createAiSecretStore()
   });
-  await hostServer.start(4317);
-  return `http://localhost:4317/?host=${encodeURIComponent(hostServer.state.hostToken)}`;
+  await hostServer.start(0);
+  hostOrigin = `http://127.0.0.1:${hostServer.state.port}`;
+  return `${hostOrigin}/?host=${encodeURIComponent(hostServer.state.hostToken)}`;
 }
 
 function createWindow(url) {
@@ -237,14 +274,27 @@ function createWindow(url) {
   mainWindow.setMenu(null);
 
   mainWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
-    shell.openExternal(targetUrl);
+    const externalUrl = safeExternalUrl(targetUrl);
+    if (externalUrl) shell.openExternal(externalUrl);
     return { action: "deny" };
   });
+
+  mainWindow.webContents.on("will-navigate", (event, targetUrl) => {
+    let targetOrigin = "";
+    try {
+      targetOrigin = new URL(targetUrl).origin;
+    } catch {
+      // Invalid navigation targets are blocked below.
+    }
+    if (targetOrigin !== hostOrigin) event.preventDefault();
+  });
+  mainWindow.webContents.on("will-attach-webview", (event) => event.preventDefault());
 
   mainWindow.loadURL(url);
 }
 
 ipcMain.on("localleaf:maximize", (event) => {
+  if (!isTrustedRendererEvent(event)) return;
   const targetWindow = BrowserWindow.fromWebContents(event.sender);
   if (targetWindow && !targetWindow.isMaximized()) {
     targetWindow.maximize();
@@ -252,10 +302,29 @@ ipcMain.on("localleaf:maximize", (event) => {
 });
 
 ipcMain.on("localleaf:theme", (event, theme) => {
+  if (!isTrustedRendererEvent(event)) return;
   applyDesktopTheme(theme, BrowserWindow.fromWebContents(event.sender));
 });
 
+ipcMain.on("localleaf:preferences:load", (event) => {
+  if (!isTrustedRendererEvent(event)) {
+    event.returnValue = null;
+    return;
+  }
+  event.returnValue = readDesktopPreferences(rendererPreferencesPath());
+});
+
+ipcMain.on("localleaf:preferences:save", (event, preferences) => {
+  if (!isTrustedRendererEvent(event)) return;
+  try {
+    writeDesktopPreferences(rendererPreferencesPath(), preferences);
+  } catch {
+    // Preferences remain available in the renderer for this run even if the app-private file cannot be updated.
+  }
+});
+
 ipcMain.handle("localleaf:install-update", async (event, update = {}) => {
+  requireTrustedRenderer(event);
   const targetWindow = BrowserWindow.fromWebContents(event.sender);
   const downloadUrl = String(update.downloadUrl || "");
   const version = String(update.version || update.latestVersion || "latest");
@@ -269,6 +338,7 @@ ipcMain.handle("localleaf:install-update", async (event, update = {}) => {
 });
 
 ipcMain.handle("localleaf:choose-model-folder", async (event) => {
+  requireTrustedRenderer(event);
   const targetWindow = BrowserWindow.fromWebContents(event.sender);
   const result = await dialog.showOpenDialog(targetWindow || undefined, {
     title: "Choose AI model folder",
@@ -280,19 +350,60 @@ ipcMain.handle("localleaf:choose-model-folder", async (event) => {
   };
 });
 
-app.whenReady().then(async () => {
-  app.setAppUserModelId("dev.localleaf.host");
-  nativeTheme.themeSource = "dark";
-  Menu.setApplicationMenu(null);
-  const url = await startHostServer();
-  createWindow(url);
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow(url);
+ipcMain.handle("localleaf:choose-project-folder", async (event, suggestedPath) => {
+  requireTrustedRenderer(event);
+  const targetWindow = BrowserWindow.fromWebContents(event.sender);
+  const candidatePath = typeof suggestedPath === "string" ? suggestedPath.trim() : "";
+  let defaultPath;
+  try {
+    if (candidatePath && path.isAbsolute(candidatePath) && fs.statSync(candidatePath).isDirectory()) {
+      defaultPath = path.resolve(candidatePath);
     }
+  } catch {
+    defaultPath = undefined;
+  }
+  const result = await dialog.showOpenDialog(targetWindow || undefined, {
+    title: "Choose where to create the project",
+    properties: ["openDirectory", "createDirectory"],
+    ...(defaultPath ? { defaultPath } : {})
   });
+  return {
+    canceled: result.canceled,
+    folderPath: result.canceled ? null : result.filePaths[0] || null
+  };
 });
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(async () => {
+    app.setAppUserModelId("dev.localleaf.host");
+    nativeTheme.themeSource = "dark";
+    Menu.setApplicationMenu(null);
+    const url = await startHostServer();
+    createWindow(url);
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow(url);
+      }
+    });
+  }).catch((error) => {
+    dialog.showErrorBox(
+      "LocalLeaf could not start",
+      error?.message || "The local host service could not be started."
+    );
+    app.quit();
+  });
+}
 
 app.on("before-quit", async (event) => {
   if (!hostServer) return;

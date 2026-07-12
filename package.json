@@ -1,6 +1,6 @@
 {
   "name": "localleaf",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "private": true,
   "description": "LocalLeaf host-powered Overleaf-style collaboration app.",
   "main": "src/desktop/main.js",
@@ -16,7 +16,8 @@
     "package:win": "npm run build:client && electron-builder --win nsis --x64 --publish never",
     "package:mac:x64": "npm run build:client && electron-builder --mac dmg zip --x64 --publish never",
     "package:mac:arm64": "npm run build:client && electron-builder --mac dmg zip --arm64 --publish never",
-    "test": "npm run build:client && node --test tests/*.test.js"
+    "test:rendered": "node scripts/run-rendered-smoke.js",
+    "test": "npm run build:client && node --test --test-concurrency=4 tests/*.test.js"
   },
   "keywords": [
     "latex",
@@ -28,12 +29,12 @@
   "license": "UNLICENSED",
   "engines": {
     "node": ">=22.19.0",
-    "npm": ">=11.10.0"
+    "npm": ">=11.16.0"
   },
   "allowScripts": {
     "electron@41.3.0": true,
     "electron-winstaller@5.4.0": true,
-    "esbuild@0.28.0": true
+    "esbuild@0.28.1": true
   },
   "build": {
     "appId": "dev.localleaf.host",
@@ -47,6 +48,7 @@
       "public/**/*",
       "build/**/*",
       "samples/**/*",
+      "THIRD_PARTY_NOTICES.md",
       "package.json",
       "README.md"
     ],
@@ -96,8 +98,8 @@
   },
   "devDependencies": {
     "electron": "^41.3.0",
-    "electron-builder": "^26.8.1",
-    "esbuild": "^0.28.0"
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.1",
@@ -110,9 +112,10 @@
     "codemirror": "^6.0.2",
     "localtunnel": "^2.0.2",
     "pdfjs-dist": "^5.7.284",
-    "ws": "^8.18.3"
+    "ws": "^8.21.0"
   },
   "overrides": {
-    "axios": "1.15.2"
+    "axios": "1.18.1",
+    "form-data": "4.0.6"
   }
 }
