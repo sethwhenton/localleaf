@@ -42,17 +42,13 @@ jobs:
             throw "npm >= 11.16.0 is required; found $npmVersion"
           }
 
-      - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
-
-      - name: Rebuild approved install-script dependencies
-        # Work around npm/cli#8970 only for the reviewed package allowlist.
+      - name: Install dependencies with reviewed lifecycle allowlist
         shell: pwsh
         run: |
           npm config delete ignore-scripts --location=project
           try {
-            npm rebuild electron esbuild electron-winstaller
-            if ($LASTEXITCODE -ne 0) { throw "Approved dependency rebuild failed" }
+            npm ci
+            if ($LASTEXITCODE -ne 0) { throw "Allowlisted dependency install failed" }
             node -e "require('electron')"
             if ($LASTEXITCODE -ne 0) { throw "Electron runtime verification failed" }
           } finally {
