@@ -33,9 +33,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          # Node 26.3.0 bundles npm 11.16.0, the first release supporting every
-          # fail-closed dependency-source control used by this repository.
-          node-version: "26.3.0"
+          # Node 24.18.0 is the current LTS release and bundles npm 11.16.0,
+          # the first release supporting every fail-closed control used here.
+          node-version: "24.18.0"
 
       - name: Start Package Manager Guard
         uses: safedep/pmg@cb34b76fbcd1d1d517b1c0922b32d0ecf3f0e4a2 # v1
@@ -56,7 +56,7 @@ jobs:
           unset ELECTRON_SKIP_BINARY_DOWNLOAD
           test "$(npm config get ignore-scripts)" = "false"
           node -e "if ('ELECTRON_SKIP_BINARY_DOWNLOAD' in process.env) process.exit(1)"
-          pmg npm ci
+          pmg npm ci --ignore-scripts=false --foreground-scripts
           node -e "require('electron')"
 
       - name: Check JavaScript syntax
@@ -91,8 +91,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          # Keep the Windows smoke on the same verified npm policy floor.
-          node-version: "26.3.0"
+          # Keep the Windows smoke on the same LTS runtime and npm policy floor.
+          node-version: "24.18.0"
 
       - name: Verify npm hardening support
         shell: pwsh
@@ -110,7 +110,7 @@ jobs:
           if ((npm config get ignore-scripts).Trim() -ne "false") { throw "Could not scope lifecycle override" }
           node -e "if ('ELECTRON_SKIP_BINARY_DOWNLOAD' in process.env) process.exit(1)"
           if ($LASTEXITCODE -ne 0) { throw "Could not enable Electron runtime download" }
-          npm ci
+          npm ci --ignore-scripts=false --foreground-scripts
           if ($LASTEXITCODE -ne 0) { throw "Allowlisted dependency install failed" }
           node -e "require('electron')"
           if ($LASTEXITCODE -ne 0) { throw "Electron runtime verification failed" }

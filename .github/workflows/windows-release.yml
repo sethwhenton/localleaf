@@ -30,8 +30,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          # Node 26.3.0 bundles npm 11.16.0, matching package.json and .npmrc.
-          node-version: "26.3.0"
+          # Node 24.18.0 LTS bundles npm 11.16.0, matching package.json and .npmrc.
+          node-version: "24.18.0"
 
       - name: Verify npm hardening support
         shell: pwsh
@@ -50,7 +50,7 @@ jobs:
           if ((npm config get ignore-scripts).Trim() -ne "false") { throw "Could not scope lifecycle override" }
           node -e "if ('ELECTRON_SKIP_BINARY_DOWNLOAD' in process.env) process.exit(1)"
           if ($LASTEXITCODE -ne 0) { throw "Could not enable Electron runtime download" }
-          npm ci
+          npm ci --ignore-scripts=false --foreground-scripts
           if ($LASTEXITCODE -ne 0) { throw "Allowlisted dependency install failed" }
           node -e "require('electron')"
           if ($LASTEXITCODE -ne 0) { throw "Electron runtime verification failed" }
