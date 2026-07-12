@@ -1,15 +1,10 @@
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
+const os = require("node:os");
 const path = require("node:path");
-
-if (
-  !process.env.ELECTRON_GET_USE_PROXY &&
-  (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy)
-) {
-  process.env.ELECTRON_GET_USE_PROXY = "1";
-}
-
-const { downloadArtifact } = require("@electron/get");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const extract = require("extract-zip");
 
 const electronDirectory = path.dirname(require.resolve("electron/package.json"));
@@ -41,6 +36,24 @@ function runtimeIsReady(platformPath) {
   }
 }
 
+async function downloadFile(url, targetPath) {
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: { "user-agent": "LocalLeaf-release-build" },
+    signal: AbortSignal.timeout(5 * 60 * 1000)
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Electron download failed with HTTP ${response.status}: ${response.url || url}`);
+  }
+  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(targetPath));
+}
+
+async function sha256File(filePath) {
+  const hash = crypto.createHash("sha256");
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest("hex");
+}
+
 async function installElectronRuntime() {
   delete process.env.ELECTRON_SKIP_BINARY_DOWNLOAD;
 
@@ -52,18 +65,30 @@ async function installElectronRuntime() {
     return;
   }
 
-  const archivePath = await downloadArtifact({
-    version: electronPackage.version,
-    artifactName: "electron",
-    platform,
-    arch,
-    cacheRoot: process.env.electron_config_cache,
-    checksums: electronChecksums
-  });
+  const assetPlatform = platform === "mas" ? "darwin" : platform;
+  const assetName = `electron-v${electronPackage.version}-${assetPlatform}-${arch}.zip`;
+  const expectedSha256 = electronChecksums[assetName];
+  if (!expectedSha256) {
+    throw new Error(`Electron checksum manifest has no entry for ${assetName}`);
+  }
 
-  await fsp.rm(distDirectory, { recursive: true, force: true });
-  await fsp.mkdir(distDirectory, { recursive: true });
-  await extract(archivePath, { dir: distDirectory });
+  const tempDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "localleaf-electron-"));
+  const archivePath = path.join(tempDirectory, assetName);
+  try {
+    const url = `https://github.com/electron/electron/releases/download/v${electronPackage.version}/${assetName}`;
+    console.log(`Downloading ${assetName}...`);
+    await downloadFile(url, archivePath);
+    const actualSha256 = await sha256File(archivePath);
+    if (actualSha256 !== expectedSha256) {
+      throw new Error(`Electron checksum mismatch: expected ${expectedSha256}, got ${actualSha256}`);
+    }
+
+    await fsp.rm(distDirectory, { recursive: true, force: true });
+    await fsp.mkdir(distDirectory, { recursive: true });
+    await extract(archivePath, { dir: distDirectory });
+  } finally {
+    await fsp.rm(tempDirectory, { recursive: true, force: true });
+  }
 
   // The package already ships its matching declarations at the package root.
   await fsp.rm(path.join(distDirectory, "electron.d.ts"), { force: true });
