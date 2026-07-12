@@ -515,6 +515,7 @@ async function testHostStartupAndHelp(baseUrl) {
       thumbHeight: thumbStyle.height,
       thumbTransform: thumbStyle.transform,
       thumbTransition: thumbStyle.transitionProperty,
+      reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
       iconNames: icons.map((icon) => icon.dataset.themeIcon),
       iconSizes: icons.map((icon) => [getComputedStyle(icon).width, getComputedStyle(icon).height]),
       iconStrokes: icons.map((icon) => getComputedStyle(icon).strokeWidth),
@@ -545,6 +546,14 @@ async function testHostStartupAndHelp(baseUrl) {
       const properties = (value) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
       const compositorOnly = (value) => properties(value).every((property) => ["transform", "opacity"].includes(property));
       const thumbProperties = properties(initialThemeSwitch.thumbTransition);
+      const reducedMotionSafe = initialThemeSwitch.reducedMotion
+        && thumbProperties.length === 1
+        && thumbProperties[0] === "none"
+        && initialThemeSwitch.iconTransitions.every((value) => {
+          const iconProperties = properties(value);
+          return iconProperties.length === 1 && iconProperties[0] === "none";
+        });
+      if (reducedMotionSafe) return true;
       return thumbProperties.includes("transform")
         && compositorOnly(initialThemeSwitch.thumbTransition)
         && initialThemeSwitch.iconTransitions.every((value) => {
