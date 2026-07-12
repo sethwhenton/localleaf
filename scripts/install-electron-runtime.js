@@ -1,7 +1,7 @@
 const crypto = require("node:crypto");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
-const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { pipeline } = require("node:stream/promises");
@@ -36,57 +36,31 @@ function runtimeIsReady(platformPath) {
   }
 }
 
-const directHttpsAgent = new https.Agent({ keepAlive: true });
-
-function downloadHttps(url, targetPath, signal, redirects = 0) {
-  if (redirects > 8) {
-    return Promise.reject(new Error("Electron download exceeded the redirect limit"));
-  }
-  return new Promise((resolve, reject) => {
-    const request = https.get(
-      url,
-      {
-        agent: directHttpsAgent,
-        signal,
-        headers: { "user-agent": "LocalLeaf-release-build" }
-      },
-      (response) => {
-        if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
-          response.resume();
-          resolve(downloadHttps(new URL(response.headers.location, url).toString(), targetPath, signal, redirects + 1));
-          return;
-        }
-        if (response.statusCode !== 200) {
-          response.resume();
-          reject(new Error(`Electron download failed with HTTP ${response.statusCode}: ${url}`));
-          return;
-        }
-
-        const output = fs.createWriteStream(targetPath);
-        response.setTimeout(2 * 60 * 1000, () => {
-          response.destroy(new Error("Electron download stalled"));
-        });
-        response.on("error", reject);
-        output.on("error", (error) => {
-          response.destroy(error);
-          reject(error);
-        });
-        output.on("finish", () => output.close(resolve));
-        response.pipe(output);
-      }
-    );
-    request.setTimeout(2 * 60 * 1000, () => request.destroy(new Error("Electron download request timed out")));
-    request.on("error", reject);
-  });
-}
-
-async function downloadFile(url, targetPath) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new Error("Electron download exceeded five minutes")), 5 * 60 * 1000);
-  try {
-    await downloadHttps(url, targetPath, controller.signal);
-  } finally {
-    clearTimeout(timeout);
+function downloadReleaseAsset(tag, assetName, targetDirectory) {
+  const command = process.platform === "win32" ? "gh.exe" : "gh";
+  const result = spawnSync(
+    command,
+    [
+      "release",
+      "download",
+      tag,
+      "--repo",
+      "electron/electron",
+      "--pattern",
+      assetName,
+      "--dir",
+      targetDirectory
+    ],
+    {
+      stdio: "inherit",
+      shell: false,
+      timeout: 5 * 60 * 1000,
+      env: process.env
+    }
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`GitHub CLI failed to download ${assetName} (exit ${result.status})`);
   }
 }
 
@@ -117,9 +91,8 @@ async function installElectronRuntime() {
   const tempDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "localleaf-electron-"));
   const archivePath = path.join(tempDirectory, assetName);
   try {
-    const url = `https://github.com/electron/electron/releases/download/v${electronPackage.version}/${assetName}`;
     console.log(`Downloading ${assetName}...`);
-    await downloadFile(url, archivePath);
+    downloadReleaseAsset(`v${electronPackage.version}`, assetName, tempDirectory);
     const actualSha256 = await sha256File(archivePath);
     if (actualSha256 !== expectedSha256) {
       throw new Error(`Electron checksum mismatch: expected ${expectedSha256}, got ${actualSha256}`);

@@ -61,6 +61,8 @@ jobs:
       - name: Install reviewed Electron runtime
         # The lockfile-pinned installer verifies the official artifact against
         # Electron's bundled checksum manifest.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/install-electron-runtime.js
           node -e "require('electron')"

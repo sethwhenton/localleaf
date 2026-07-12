@@ -60,6 +60,8 @@ jobs:
         # repository helper awaits the official artifact, verifies it against
         # the checksum manifest shipped inside the lockfile-pinned package,
         # and checks the installed executable before continuing.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/install-electron-runtime.js
           node -e "require('electron')"
@@ -117,6 +119,8 @@ jobs:
       - name: Install reviewed Electron runtime
         # See the Linux job above; this is the same lockfile-pinned,
         # checksum-verifying Electron installer.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/install-electron-runtime.js
           node -e "require('electron')"
