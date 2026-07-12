@@ -59,7 +59,11 @@ jobs:
         # npm 11.16 may leave Electron's binary absent after rebuild. The
         # lockfile-pinned installer verifies the official artifact against the
         # checksum manifest shipped inside the Electron package.
-        run: node node_modules/electron/install.js
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: ""
+        run: |
+          node node_modules/electron/install.js
+          node -e "require('electron')"
 
       - name: Check JavaScript syntax
         run: find src public tests scripts landing-page -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
@@ -114,7 +118,11 @@ jobs:
       - name: Install reviewed Electron runtime
         # See the Linux job above; this is the same lockfile-pinned,
         # checksum-verifying Electron installer.
-        run: node node_modules/electron/install.js
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: ""
+        run: |
+          node node_modules/electron/install.js
+          node -e "require('electron')"
 
       - name: Check JavaScript syntax
         shell: pwsh

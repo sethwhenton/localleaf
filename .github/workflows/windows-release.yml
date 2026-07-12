@@ -51,7 +51,11 @@ jobs:
       - name: Install reviewed Electron runtime
         # The lockfile-pinned installer verifies the official artifact against
         # Electron's bundled checksum manifest.
-        run: node node_modules/electron/install.js
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: ""
+        run: |
+          node node_modules/electron/install.js
+          node -e "require('electron')"
 
       - name: Download bundled binaries
         run: npm run prepare:binaries
