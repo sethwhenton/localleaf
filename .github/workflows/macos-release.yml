@@ -56,15 +56,12 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Rebuild approved install-script dependencies
-        run: npm rebuild electron esbuild --ignore-scripts=false
-
-      - name: Install reviewed Electron runtime
-        # The lockfile-pinned installer verifies the official artifact against
-        # Electron's bundled checksum manifest.
-        env:
-          GH_TOKEN: ${{ github.token }}
+        # Work around npm/cli#8970 only for the reviewed package allowlist.
         run: |
-          node scripts/install-electron-runtime.js
+          set -euo pipefail
+          npm config delete ignore-scripts --location=project
+          trap 'npm config set ignore-scripts=true --location=project' EXIT
+          npm rebuild electron esbuild
           node -e "require('electron')"
 
       - name: Create macOS icon

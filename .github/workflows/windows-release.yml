@@ -46,16 +46,18 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Rebuild approved install-script dependencies
-        run: npm rebuild electron esbuild electron-winstaller --ignore-scripts=false
-
-      - name: Install reviewed Electron runtime
-        # The lockfile-pinned installer verifies the official artifact against
-        # Electron's bundled checksum manifest.
-        env:
-          GH_TOKEN: ${{ github.token }}
+        # Work around npm/cli#8970 only for the reviewed package allowlist.
+        shell: pwsh
         run: |
-          node scripts/install-electron-runtime.js
-          node -e "require('electron')"
+          npm config delete ignore-scripts --location=project
+          try {
+            npm rebuild electron esbuild electron-winstaller
+            if ($LASTEXITCODE -ne 0) { throw "Approved dependency rebuild failed" }
+            node -e "require('electron')"
+            if ($LASTEXITCODE -ne 0) { throw "Electron runtime verification failed" }
+          } finally {
+            npm config set ignore-scripts=true --location=project
+          }
 
       - name: Download bundled binaries
         run: npm run prepare:binaries
