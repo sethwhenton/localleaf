@@ -46,7 +46,10 @@ jobs:
         shell: pwsh
         run: |
           $env:npm_config_ignore_scripts = "false"
+          Remove-Item Env:ELECTRON_SKIP_BINARY_DOWNLOAD -ErrorAction SilentlyContinue
           if ((npm config get ignore-scripts).Trim() -ne "false") { throw "Could not scope lifecycle override" }
+          node -e "if ('ELECTRON_SKIP_BINARY_DOWNLOAD' in process.env) process.exit(1)"
+          if ($LASTEXITCODE -ne 0) { throw "Could not enable Electron runtime download" }
           npm ci
           if ($LASTEXITCODE -ne 0) { throw "Allowlisted dependency install failed" }
           node -e "require('electron')"

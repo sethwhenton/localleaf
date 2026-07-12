@@ -56,7 +56,9 @@ jobs:
         run: |
           set -euo pipefail
           export npm_config_ignore_scripts=false
+          unset ELECTRON_SKIP_BINARY_DOWNLOAD
           test "$(npm config get ignore-scripts)" = "false"
+          node -e "if ('ELECTRON_SKIP_BINARY_DOWNLOAD' in process.env) process.exit(1)"
           npm ci
           node -e "require('electron')"
 
