@@ -541,8 +541,19 @@ async function testHostStartupAndHelp(baseUrl) {
     "The Appearance switch drifted from its compact 18px icon geometry."
   );
   ensure(
-    initialThemeSwitch.thumbTransition === "transform"
-      && initialThemeSwitch.iconTransitions.every((properties) => properties === "transform, opacity"),
+    (() => {
+      const properties = (value) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+      const compositorOnly = (value) => properties(value).every((property) => ["transform", "opacity"].includes(property));
+      const thumbProperties = properties(initialThemeSwitch.thumbTransition);
+      return thumbProperties.includes("transform")
+        && compositorOnly(initialThemeSwitch.thumbTransition)
+        && initialThemeSwitch.iconTransitions.every((value) => {
+          const iconProperties = properties(value);
+          return iconProperties.includes("transform")
+            && iconProperties.includes("opacity")
+            && compositorOnly(value);
+        });
+    })(),
     "The Appearance switch introduced a non-compositor motion property."
   );
 
@@ -832,12 +843,17 @@ async function testDesktopThemeParity(baseUrl) {
     `matchMedia("(forced-colors: active)").matches`,
     "the forced-colors media override"
   );
-  const forcedColors = await rendererValue(`(() => ({
-    active: matchMedia("(forced-colors: active)").matches,
-    avatarBorder: getComputedStyle(document.querySelector(".user-row .avatar")).borderStyle,
-    selectedBackground: getComputedStyle(document.querySelector(".file-button.active")).backgroundColor
-  }))()`);
-  ensure(forcedColors.active && forcedColors.avatarBorder === "solid" && forcedColors.selectedBackground === "rgba(0, 0, 0, 0)", `Forced colors lost avatar structure or underline-only selection: ${JSON.stringify(forcedColors)}`);
+  const forcedColors = await rendererValue(`(() => {
+    const selectedBackground = getComputedStyle(document.querySelector(".file-button.active")).backgroundColor;
+    const channels = (String(selectedBackground).match(/[\\d.]+/g) || []).map(Number);
+    return {
+      active: matchMedia("(forced-colors: active)").matches,
+      avatarBorder: getComputedStyle(document.querySelector(".user-row .avatar")).borderStyle,
+      selectedBackground,
+      selectedBackgroundTransparent: selectedBackground === "transparent" || (channels.length > 3 && channels[3] === 0)
+    };
+  })()`);
+  ensure(forcedColors.active && forcedColors.avatarBorder === "solid" && forcedColors.selectedBackgroundTransparent, `Forced colors lost avatar structure or underline-only selection: ${JSON.stringify(forcedColors)}`);
   await setEmulatedMediaFeatures([]);
 
   smokeWindow.setContentSize(1024, 640);
