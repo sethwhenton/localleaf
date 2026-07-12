@@ -48,6 +48,11 @@ jobs:
       - name: Rebuild approved install-script dependencies
         run: npm rebuild electron esbuild electron-winstaller --ignore-scripts=false
 
+      - name: Install reviewed Electron runtime
+        # The lockfile-pinned installer verifies the official artifact against
+        # Electron's bundled checksum manifest.
+        run: node node_modules/electron/install.js
+
       - name: Download bundled binaries
         run: npm run prepare:binaries
 

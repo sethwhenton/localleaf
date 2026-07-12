@@ -58,6 +58,11 @@ jobs:
       - name: Rebuild approved install-script dependencies
         run: npm rebuild electron esbuild --ignore-scripts=false
 
+      - name: Install reviewed Electron runtime
+        # The lockfile-pinned installer verifies the official artifact against
+        # Electron's bundled checksum manifest.
+        run: node node_modules/electron/install.js
+
       - name: Create macOS icon
         run: |
           chmod +x scripts/create-mac-icon.sh

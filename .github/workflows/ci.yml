@@ -55,6 +55,12 @@ jobs:
         # for the lockfile-pinned Electron and esbuild packages allowed in package.json.
         run: pmg npm rebuild electron esbuild --ignore-scripts=false
 
+      - name: Install reviewed Electron runtime
+        # npm 11.16 may leave Electron's binary absent after rebuild. The
+        # lockfile-pinned installer verifies the official artifact against the
+        # checksum manifest shipped inside the Electron package.
+        run: node node_modules/electron/install.js
+
       - name: Check JavaScript syntax
         run: find src public tests scripts landing-page -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
 
@@ -104,6 +110,11 @@ jobs:
       - name: Rebuild approved test dependencies
         # Keep lifecycle execution limited to the reviewed allowlist.
         run: npm rebuild electron esbuild --ignore-scripts=false
+
+      - name: Install reviewed Electron runtime
+        # See the Linux job above; this is the same lockfile-pinned,
+        # checksum-verifying Electron installer.
+        run: node node_modules/electron/install.js
 
       - name: Check JavaScript syntax
         shell: pwsh
