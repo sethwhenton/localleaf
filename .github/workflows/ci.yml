@@ -52,8 +52,8 @@ jobs:
         # enforces package.json allowScripts with strict-allow-scripts=true, so
         # only the pinned Electron/esbuild hooks can run and all others fail.
         run: |
-          npm config delete ignore-scripts --location=project
-          trap 'npm config set ignore-scripts=true --location=project' EXIT
+          export npm_config_ignore_scripts=false
+          test "$(npm config get ignore-scripts)" = "false"
           pmg npm ci
           node -e "require('electron')"
 
@@ -103,15 +103,12 @@ jobs:
       - name: Install dependencies with reviewed lifecycle allowlist
         shell: pwsh
         run: |
-          npm config delete ignore-scripts --location=project
-          try {
-            npm ci
-            if ($LASTEXITCODE -ne 0) { throw "Allowlisted dependency install failed" }
-            node -e "require('electron')"
-            if ($LASTEXITCODE -ne 0) { throw "Electron runtime verification failed" }
-          } finally {
-            npm config set ignore-scripts=true --location=project
-          }
+          $env:npm_config_ignore_scripts = "false"
+          if ((npm config get ignore-scripts).Trim() -ne "false") { throw "Could not scope lifecycle override" }
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "Allowlisted dependency install failed" }
+          node -e "require('electron')"
+          if ($LASTEXITCODE -ne 0) { throw "Electron runtime verification failed" }
 
       - name: Check JavaScript syntax
         shell: pwsh

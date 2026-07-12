@@ -55,8 +55,8 @@ jobs:
       - name: Install dependencies with reviewed lifecycle allowlist
         run: |
           set -euo pipefail
-          npm config delete ignore-scripts --location=project
-          trap 'npm config set ignore-scripts=true --location=project' EXIT
+          export npm_config_ignore_scripts=false
+          test "$(npm config get ignore-scripts)" = "false"
           npm ci
           node -e "require('electron')"
 
