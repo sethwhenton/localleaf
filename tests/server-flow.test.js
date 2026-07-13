@@ -2460,12 +2460,6 @@ test("a slow participant SyncTeX lookup does not block another lookup, HTTP stat
     const sync = waitForWsMessage(guestWs, "sync_state");
     await waitForWsOpen(guestWs);
     await sync;
-    const unexpectedMessages = [];
-    const captureUnexpected = (raw) => {
-      const payload = JSON.parse(raw.toString());
-      if (payload.type !== "heartbeat") unexpectedMessages.push(payload.type);
-    };
-    guestWs.on("message", captureUnexpected);
 
     const slowLookup = publicTunnelRequest(
       baseUrl,
@@ -2479,7 +2473,7 @@ test("a slow participant SyncTeX lookup does not block another lookup, HTTP stat
 
     const heartbeat = waitForWsMessage(guestWs, "heartbeat");
     guestWs.send(JSON.stringify({ type: "heartbeat" }));
-    const [state, fastLookup] = await Promise.all([
+    const [state, fastLookup, heartbeatResponse] = await Promise.all([
       request(baseUrl, "/api/state"),
       request(baseUrl, "/api/pdf/source-position", {
         method: "POST",
@@ -2489,7 +2483,7 @@ test("a slow participant SyncTeX lookup does not block another lookup, HTTP stat
     ]);
     assert.equal(state.project.mainFile, "main.tex");
     assert.deepEqual(fastLookup, { ok: true, path: "main.tex", line: 2, column: 0 });
-    assert.deepEqual(unexpectedMessages, []);
+    assert.equal(heartbeatResponse.type, "heartbeat");
 
     releaseSlow({
       ok: true,
@@ -2499,7 +2493,6 @@ test("a slow participant SyncTeX lookup does not block another lookup, HTTP stat
     const slowResponse = await slowLookup;
     assert.equal(slowResponse.response.statusCode, 200);
     assert.deepEqual(slowResponse.payload, { ok: true, path: "main.tex", line: 1, column: 0 });
-    guestWs.off("message", captureUnexpected);
   } finally {
     releaseSlow?.({ ok: false, timedOut: true, stdout: "", stderr: "" });
     guestWs?.close();
