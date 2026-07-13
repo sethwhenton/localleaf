@@ -943,7 +943,7 @@ test("approved guest AI sessions are temporary and separate from host sessions",
     assert.equal(join.response.status, 200);
     await request(baseUrl, "/api/join/approve", {
       method: "POST",
-      body: { requestId: join.payload.requestId, role: "editor" }
+      body: { requestId: join.payload.requestId, role: "maintainer" }
     });
     const joinStatus = await rawRequest(new URL(baseUrl).origin, `/api/join-status?id=${encodeURIComponent(join.payload.requestId)}`);
     const token = joinStatus.payload.token;
@@ -990,7 +990,7 @@ test("approved guest AI proposals are saved to shared project Changes", async ()
     });
     await request(baseUrl, "/api/join/approve", {
       method: "POST",
-      body: { requestId: join.payload.requestId, role: "editor" }
+      body: { requestId: join.payload.requestId, role: "maintainer" }
     });
     const joinStatus = await rawRequest(new URL(baseUrl).origin, `/api/join-status?id=${encodeURIComponent(join.payload.requestId)}`);
     const token = joinStatus.payload.token;

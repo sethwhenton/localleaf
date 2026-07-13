@@ -1,9 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
   <title id="title">LocalLeaf mark</title>
-  <desc id="desc">A compact orange document and leaf mark.</desc>
-  <path d="M19 6h24l12 12v37c0 3-2 5-5 5H19c-3 0-5-2-5-5V11c0-3 2-5 5-5Z" fill="none" stroke="#ff6a00" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M43 6v10c0 2 2 4 4 4h9" fill="none" stroke="#ff6a00" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M7 48c0-15 9-26 26-31 8-2 18-2 26-2 1 10-1 19-7 26-8 11-22 15-35 11" fill="#ff6a00"/>
-  <path d="M5 60c9-18 24-29 45-35" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round"/>
-  <path d="M5 60c9-18 24-29 45-35" fill="none" stroke="#ff6a00" stroke-width="2.5" stroke-linecap="round" transform="translate(-2 3)"/>
+  <desc id="desc">A white leaf on a warm orange rounded tile.</desc>
+  <rect x="3" y="3" width="58" height="58" rx="17" fill="#ff6700"/>
+  <path d="M17 41.5c.8-15.2 10.4-24.8 30-27.5-.2 15.7-8.9 27-25.8 31.7-2.2-.8-3.6-2.2-4.2-4.2Z" fill="#fff"/>
+  <path d="M17.5 48c7.2-14 16.2-23.3 27.5-29" fill="none" stroke="#ff6700" stroke-width="4" stroke-linecap="round"/>
 </svg>

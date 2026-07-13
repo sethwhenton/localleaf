@@ -221,9 +221,22 @@ const local = {
   userName: initialParams.get("name") || "Host",
   userId: "",
   view: initialParams.get("view") || "",
+  pendingViewTransition: null,
+  viewMotionTimer: null,
+  hostRailEntrancePending: true,
+  pendingHostRailMotion: "",
+  hostRailMotionTimer: null,
   editingNow: false,
   events: null,
   eventDisconnectTimer: null,
+  sessionActionsMenuAbortController: null,
+  sessionGuestMenuAbortController: null,
+  sessionGuestRoles: {},
+  sessionGuestBusy: {},
+  sessionGuestErrors: {},
+  sessionGuestStatus: "",
+  sessionGuestFocusPending: false,
+  sessionAccessRoleTarget: "",
   collabSocket: null,
   collabReconnectTimer: null,
   collabHeartbeatTimer: null,
@@ -248,6 +261,9 @@ const local = {
   renamingTreePath: "",
   renamingTreeKind: "",
   renameSaving: false,
+  renameError: "",
+  treeCreateDraft: null,
+  treeCreateFocus: false,
   collapsedFolders: new Set(),
   imagesCollapsed: true,
   fileFilter: "",
@@ -318,6 +334,7 @@ const local = {
   preferredTunnelProviderId: localStorage.getItem(TUNNEL_PROVIDER_STORAGE_KEY) || "",
   tunnelProviderPreferenceLoaded: localStorage.getItem(TUNNEL_PROVIDER_STORAGE_KEY) !== null,
   sessionTunnelProviderOverrideId: null,
+  sessionProviderMenuAbortController: null,
   tunnelProviderSwitchBusy: false,
   sessionStartBusy: false,
   sessionStopBusy: false,
@@ -637,16 +654,146 @@ function isProviderModelGroupOpen(providerId) {
 }
 
 function toggleProviderModelGroup(providerId) {
-  if (!providerId) return;
+  if (!providerId) return false;
   local.aiModelGroupOpen[providerId] = !isProviderModelGroupOpen(providerId);
   writeBooleanMap(AI_MODEL_GROUP_STORAGE_KEY, local.aiModelGroupOpen);
+  return isProviderModelGroupOpen(providerId);
+}
+
+function clearProviderModelGroupMotion(panel) {
+  if (!panel) return;
+  if (panel._localleafModelGroupMotionFrame) {
+    cancelAnimationFrame(panel._localleafModelGroupMotionFrame);
+    panel._localleafModelGroupMotionFrame = null;
+  }
+  if (panel._localleafModelGroupMotionTimer) {
+    clearTimeout(panel._localleafModelGroupMotionTimer);
+    panel._localleafModelGroupMotionTimer = null;
+  }
+  if (panel._localleafModelGroupMotionEnd) {
+    panel.removeEventListener("transitionend", panel._localleafModelGroupMotionEnd);
+    panel._localleafModelGroupMotionEnd = null;
+  }
+  panel.classList.remove("is-revealing", "is-hiding");
+}
+
+function providerModelGroupExpandedHeight(panel) {
+  const style = getComputedStyle(panel);
+  const borderHeight = Number.parseFloat(style.borderTopWidth || "0")
+    + Number.parseFloat(style.borderBottomWidth || "0");
+  return Math.ceil(panel.scrollHeight + borderHeight);
+}
+
+function updateProviderModelGroupDisclosure(button, expanded) {
+  const group = button?.closest(".settings-provider-model-group");
+  const controlledId = button?.getAttribute("aria-controls") || "";
+  const panel = (controlledId && document.getElementById(controlledId))
+    || group?.querySelector(".settings-provider-models");
+  if (!button || !group || !panel) return;
+
+  const scrollContainer = group.closest(".settings-options");
+  const scrollTop = scrollContainer?.scrollTop || 0;
+  const preserveFocus = document.activeElement === button;
+  const providerName = button.dataset.providerModelName || "Provider";
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+  const wasHidden = panel.hidden;
+  const currentHeight = wasHidden ? 0 : panel.getBoundingClientRect().height;
+  const restoreInteractionContext = () => {
+    if (scrollContainer) scrollContainer.scrollTop = scrollTop;
+    if (preserveFocus && (!document.activeElement || document.activeElement === document.body)) {
+      button.focus({ preventScroll: true });
+    }
+  };
+
+  clearProviderModelGroupMotion(panel);
+  button.classList.toggle("open", expanded);
+  button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  button.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} ${providerName} models`);
+  button.title = `${expanded ? "Collapse" : "Expand"} models`;
+  group.classList.toggle("open", expanded);
+  group.classList.toggle("collapsed", !expanded);
+
+  if (expanded) {
+    panel.hidden = false;
+    panel.removeAttribute("inert");
+    panel.style.maxHeight = `${currentHeight}px`;
+    if (wasHidden) panel.classList.add("is-collapsed");
+    if (reducedMotion) {
+      panel.classList.remove("is-collapsed");
+      panel.style.removeProperty("max-height");
+      restoreInteractionContext();
+      return;
+    }
+    let targetHeight = currentHeight;
+    panel.classList.add("is-revealing");
+    const finishReveal = (event) => {
+      if (event?.target && event.target !== panel) return;
+      if (event?.propertyName && event.propertyName !== "max-height") return;
+      clearProviderModelGroupMotion(panel);
+      if (button.getAttribute("aria-expanded") === "true") {
+        panel.classList.remove("is-collapsed");
+        panel.style.maxHeight = `${targetHeight}px`;
+      }
+      restoreInteractionContext();
+    };
+    panel._localleafModelGroupMotionEnd = finishReveal;
+    panel.addEventListener("transitionend", finishReveal);
+    panel._localleafModelGroupMotionFrame = requestAnimationFrame(() => {
+      targetHeight = providerModelGroupExpandedHeight(panel);
+      panel._localleafModelGroupMotionFrame = requestAnimationFrame(() => {
+        panel._localleafModelGroupMotionFrame = null;
+        panel.classList.remove("is-collapsed");
+        panel.style.maxHeight = `${targetHeight}px`;
+      });
+    });
+    panel._localleafModelGroupMotionTimer = setTimeout(() => finishReveal(), 560);
+    restoreInteractionContext();
+    return;
+  }
+
+  panel.setAttribute("inert", "");
+  panel.style.maxHeight = `${currentHeight}px`;
+  const finishHide = (event) => {
+    if (event?.target && event.target !== panel) return;
+    if (event?.propertyName && event.propertyName !== "max-height") return;
+    clearProviderModelGroupMotion(panel);
+    if (button.getAttribute("aria-expanded") === "false") {
+      panel.classList.add("is-collapsed");
+      panel.style.maxHeight = "0px";
+      panel.hidden = true;
+    }
+    restoreInteractionContext();
+  };
+  if (reducedMotion) {
+    panel.classList.add("is-collapsed");
+    panel.style.maxHeight = "0px";
+    finishHide();
+    return;
+  }
+  panel.classList.add("is-hiding");
+  panel._localleafModelGroupMotionEnd = finishHide;
+  panel.addEventListener("transitionend", finishHide);
+  panel._localleafModelGroupMotionFrame = requestAnimationFrame(() => {
+    panel._localleafModelGroupMotionFrame = requestAnimationFrame(() => {
+      panel._localleafModelGroupMotionFrame = null;
+      panel.classList.add("is-collapsed");
+      panel.style.maxHeight = "0px";
+    });
+  });
+  panel._localleafModelGroupMotionTimer = setTimeout(() => finishHide(), 560);
+  restoreInteractionContext();
 }
 
 function providerModelEntries(provider) {
   return (provider?.models?.length ? provider.models : ["default"]).map((model) => {
     const id = typeof model === "string" ? model : model.id || model.name || "default";
     const name = typeof model === "string" ? model : model.name || model.id || "Default model";
-    return { id, name };
+    return {
+      id,
+      name,
+      contextWindowTokens: typeof model === "string" ? null : model.contextWindowTokens || null,
+      contextWindow: typeof model === "string" ? null : model.contextWindow || null
+    };
   });
 }
 
@@ -664,7 +811,9 @@ function modelPickerItems() {
     modelId: model.id,
     label: model.name || model.id,
     providerName: "Local",
-    detail: model.sizeLabel || "Local model"
+    detail: model.sizeLabel || "Local model",
+    contextWindowTokens: model.contextWindowTokens || null,
+    contextWindow: model.contextWindow || null
   }));
   if (local.aiPermissions.localModelOnly) return localItems;
   const providerItems = connectedAiProviders().filter(isProviderEnabled).flatMap((provider) => {
@@ -674,7 +823,9 @@ function modelPickerItems() {
         modelId: model.id,
         label: model.name,
         providerName: provider.name,
-        detail: provider.name
+        detail: provider.name,
+        contextWindowTokens: model.contextWindowTokens || null,
+        contextWindow: model.contextWindow || null
       };
     });
   });
@@ -699,14 +850,18 @@ function activeAiProviderModel() {
         modelId: installedLocal.id,
         providerName: "Local",
         modelName: installedLocal.name,
-        label: `Local / ${installedLocal.name}`
+        label: `Local / ${installedLocal.name}`,
+        contextWindowTokens: installedLocal.contextWindowTokens || null,
+        contextWindow: installedLocal.contextWindow || null
       }
       : {
         providerId: "localleaf-local",
         modelId: "",
         providerName: "Local",
         modelName: "Fallback",
-        label: "Local / Fallback"
+        label: "Local / Fallback",
+        contextWindowTokens: null,
+        contextWindow: null
       };
   }
   if (local.activeCursorSdkModelId && aiProviders().some((provider) => provider.id === "cursor" && isProviderConnected(provider))) {
@@ -715,7 +870,9 @@ function activeAiProviderModel() {
       modelId: local.activeCursorSdkModelId,
       providerName: "Cursor",
       modelName: local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId,
-      label: `Cursor / ${local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId}`
+      label: `Cursor / ${local.activeCursorSdkModelId === "composer-2" ? "Composer 2" : local.activeCursorSdkModelId}`,
+      contextWindowTokens: null,
+      contextWindow: { mode: "provider_default", effectiveTokens: null }
     };
   }
   if (state.activeModel && typeof state.activeModel === "object") {
@@ -728,7 +885,9 @@ function activeAiProviderModel() {
         modelId,
         providerName: state.activeModel.providerName || (state.activeModel.local ? "Local" : "Provider"),
         modelName: state.activeModel.name || state.activeModel.modelId || "No model active",
-        label: `${state.activeModel.providerName || (state.activeModel.local ? "Local" : "Provider")} / ${state.activeModel.name || state.activeModel.modelId || "No model active"}`
+        label: `${state.activeModel.providerName || (state.activeModel.local ? "Local" : "Provider")} / ${state.activeModel.name || state.activeModel.modelId || "No model active"}`,
+        contextWindowTokens: state.activeModel.contextWindowTokens || null,
+        contextWindow: state.activeModel.contextWindow || null
       };
     }
   }
@@ -739,7 +898,9 @@ function activeAiProviderModel() {
       modelId: firstAvailable.modelId,
       providerName: firstAvailable.providerName || firstAvailable.detail || "Provider",
       modelName: firstAvailable.label,
-      label: `${firstAvailable.providerName || firstAvailable.detail || "Provider"} / ${firstAvailable.label}`
+      label: `${firstAvailable.providerName || firstAvailable.detail || "Provider"} / ${firstAvailable.label}`,
+      contextWindowTokens: firstAvailable.contextWindowTokens || null,
+      contextWindow: firstAvailable.contextWindow || null
     };
   }
   const activeProviderId = state.activeProviderId || "";
@@ -754,7 +915,9 @@ function activeAiProviderModel() {
         modelId: activeId,
         providerName: provider?.name || activeProviderId,
         modelName,
-        label: `${provider?.name || activeProviderId} / ${modelName}`
+        label: `${provider?.name || activeProviderId} / ${modelName}`,
+        contextWindowTokens: model?.contextWindowTokens || null,
+        contextWindow: model?.contextWindow || { mode: "provider_default", effectiveTokens: null }
       };
     }
   }
@@ -764,7 +927,9 @@ function activeAiProviderModel() {
       modelId: installedLocal.id,
       providerName: "Local",
       modelName: installedLocal.name,
-      label: `Local / ${installedLocal.name}`
+      label: `Local / ${installedLocal.name}`,
+      contextWindowTokens: installedLocal.contextWindowTokens || null,
+      contextWindow: installedLocal.contextWindow || null
     };
   }
   return {
@@ -772,7 +937,9 @@ function activeAiProviderModel() {
     modelId: "",
     providerName: "No provider",
     modelName: "Connect model",
-    label: "No model active"
+    label: "No model active",
+    contextWindowTokens: null,
+    contextWindow: null
   };
 }
 
@@ -1364,6 +1531,82 @@ function isGuestClient() {
   return Boolean(local.guestToken);
 }
 
+function currentSessionGuest() {
+  if (!isGuestClient()) return null;
+  const users = Array.isArray(local.appState?.session?.users) ? local.appState.session.users : [];
+  return users.find((user) => user.id === local.userId && user.role !== "host")
+    || users.find((user) => user.name === local.userName && user.role !== "host")
+    || null;
+}
+
+function effectiveSessionRole() {
+  if (!isGuestClient()) return "host";
+  return currentSessionGuest()?.role === "maintainer" ? "maintainer" : "viewer";
+}
+
+function canMutateProject() {
+  return !isGuestClient() || effectiveSessionRole() === "maintainer";
+}
+
+function requireProjectMutationAccess(action = "change project files") {
+  if (canMutateProject()) return true;
+  showAppNotice(`Viewer access cannot ${action}.`, {
+    title: "Read-only access",
+    detail: "Ask the host to change your role to Maintainer. You can still read the source, PDF, and chat."
+  });
+  return false;
+}
+
+function synchronizeEditorAccessRole(options = {}) {
+  if (route().view !== "editor" || !isGuestClient()) return false;
+  const role = effectiveSessionRole();
+  const renderedRole = options.renderedRole
+    || document.querySelector(".editor-shell")?.dataset.accessRole
+    || "";
+  if (renderedRole === role && !local.sessionAccessRoleTarget) return false;
+  if (local.sessionAccessRoleTarget === role) return true;
+
+  const discardedLocalDraft = role === "viewer" && ["Unsaved", "Saving..."].includes(local.saveStatus);
+  local.sessionAccessRoleTarget = role;
+  if (role === "viewer") {
+    clearTimeout(local.saveTimer);
+    local.saveTimer = null;
+    local.pendingSave = false;
+    settlePendingCollabSaves(false);
+    local.saveStatus = "Read only";
+  }
+  if (options.announce) {
+    showAppNotice(
+      role === "maintainer" ? "You can now edit this project." : "Your access is now read only.",
+      {
+        type: "success",
+        title: role === "maintainer" ? "Maintainer access" : "Viewer access",
+        detail: role === "maintainer"
+          ? "File tools and the AI Helper are available without reconnecting."
+          : discardedLocalDraft
+            ? "Your unsaved local draft was not shared. The host version is being restored."
+            : "You can continue reading the source, PDF, and chat."
+      }
+    );
+  }
+
+  void (async () => {
+    if (role === "viewer" && local.selectedFile) {
+      try {
+        await loadSelectedFile();
+        local.saveStatus = "Read only";
+      } catch {
+        // A later state update can still restore the selected file if it moved concurrently.
+      }
+    }
+    if (route().view === "editor" && effectiveSessionRole() === role) {
+      await render();
+    }
+    if (local.sessionAccessRoleTarget === role) local.sessionAccessRoleTarget = "";
+  })();
+  return true;
+}
+
 function connectCollab() {
   if (!isLiveSession()) {
     closeCollab();
@@ -1511,6 +1754,17 @@ function handleSessionEnded(reason, detail) {
   setView("ended", endedViewParams());
 }
 
+function handleAccessRevoked(reason, userId = "") {
+  if (userId && local.userId && userId !== local.userId) return;
+  local.guestToken = "";
+  local.userId = "";
+  sessionStorage.removeItem("localleaf.guestToken");
+  handleSessionEnded(
+    reason || "The host removed your access.",
+    "This invite no longer gives access. Ask the host for a new invitation if you need to return."
+  );
+}
+
 function showRemoteReconnectNotice(message) {
   if (!isGuestClient() && !local.joinRequestId) return;
   showAppNotice(message || "Trying to reconnect to the host.", {
@@ -1555,6 +1809,7 @@ function applyRemoteText(filePath, text) {
 
 function handleCollabMessage(payload) {
   if (payload.type === "sync_state") {
+    const renderedRole = document.querySelector(".editor-shell")?.dataset.accessRole || "";
     if (payload.state) local.appState = payload.state;
     if (payload.userId) local.userId = payload.userId;
     local.collabPresence = payload.presence || [];
@@ -1565,6 +1820,7 @@ function handleCollabMessage(payload) {
     if (payload.filePath === local.selectedFile && typeof payload.newText === "string") {
       applyRemoteText(payload.filePath, payload.newText);
     }
+    synchronizeEditorAccessRole({ renderedRole });
     updateUsersPresenceUi();
     return;
   }
@@ -1619,7 +1875,25 @@ function handleCollabMessage(payload) {
     return;
   }
 
+  if (payload.type === "role_changed") {
+    if (payload.userId && payload.userId !== local.userId) return;
+    const role = payload.role === "maintainer" ? "maintainer" : "viewer";
+    if (Array.isArray(local.appState?.session?.users)) {
+      local.appState.session.users = local.appState.session.users.map((user) => (
+        user.id === (payload.userId || local.userId) ? { ...user, role } : user
+      ));
+    }
+    synchronizeEditorAccessRole({ announce: true });
+    return;
+  }
+
+  if (payload.type === "access_revoked") {
+    handleAccessRevoked(payload.reason, payload.userId);
+    return;
+  }
+
   if (payload.type === "state_update" && payload.state) {
+    const renderedRole = document.querySelector(".editor-shell")?.dataset.accessRole || "";
     local.appState = payload.state;
     const selectedFileMissing = Boolean(local.selectedFile)
       && !(local.appState?.project?.files || []).some((file) => file.path === local.selectedFile);
@@ -1628,6 +1902,7 @@ function handleCollabMessage(payload) {
       return;
     }
     syncAiProposalsFromAppState();
+    synchronizeEditorAccessRole({ renderedRole, announce: true });
     if (selectedFileMissing) {
       clearTimeout(local.saveTimer);
       local.saveTimer = null;
@@ -1674,11 +1949,22 @@ function handleCollabMessage(payload) {
 
 function setView(view, extra = {}) {
   const previousView = route().view;
+  if (!["session", "active"].includes(view)) {
+    local.sessionGuestMenuAbortController?.abort();
+    local.sessionGuestMenuAbortController = null;
+  }
+  if (view !== "editor") {
+    local.sessionActionsMenuAbortController?.abort();
+    local.sessionActionsMenuAbortController = null;
+  }
   const params = new URLSearchParams();
   params.set("view", view);
   if (extra.name) params.set("name", extra.name);
   history.pushState({}, "", `/?${params.toString()}`);
   local.view = view;
+  local.pendingViewTransition = previousView !== view
+    ? { from: previousView, to: view }
+    : null;
   if (extra.token) {
     local.guestToken = extra.token;
     sessionStorage.setItem("localleaf.guestToken", extra.token);
@@ -1756,6 +2042,80 @@ function tunnelProviderOptionsMarkup(session = local.appState?.session, selected
   ].join("");
 }
 
+function sessionTunnelProviderPickerMarkup(session = local.appState?.session, selectedProviderId = preferredTunnelProviderId(session), disabled = false) {
+  const providers = availableTunnelProviders(session);
+  const selected = String(selectedProviderId || "");
+  const selectedProvider = providers.find((provider) => provider.id === selected) || null;
+  const unavailable = !providers.length;
+  const triggerLabel = unavailable
+    ? "No providers detected"
+    : selectedProvider?.name || "Automatic";
+  const triggerMeta = unavailable
+    ? "Check provider availability"
+    : selectedProvider
+      ? "Session choice"
+      : "Recommended";
+  const automaticOption = {
+    id: "",
+    name: "Automatic",
+    hint: "Uses the first provider that verifies."
+  };
+  const optionMarkup = unavailable
+    ? `<div class="session-provider-empty" role="status">No public-link providers are available on this computer.</div>`
+    : [automaticOption, ...providers].map((provider) => {
+      const providerId = String(provider.id || "");
+      const isSelected = providerId === selected;
+      return `
+        <button
+          type="button"
+          class="session-provider-option ${isSelected ? "selected" : ""}"
+          role="option"
+          aria-selected="${isSelected ? "true" : "false"}"
+          tabindex="-1"
+          data-session-tunnel-provider-option="${escapeHtml(providerId)}"
+        >
+          <span class="session-provider-option-copy">
+            <strong>${escapeHtml(provider.name)}</strong>
+            <small>${escapeHtml(provider.hint || "Use this provider for the current session.")}</small>
+          </span>
+          <span class="session-provider-option-check" aria-hidden="true">${editorToolIcon("check")}</span>
+        </button>`;
+    }).join("");
+
+  return `
+    <div class="session-provider-picker ${unavailable ? "is-unavailable" : ""}" data-session-provider-picker>
+      <div class="session-provider-label-row">
+        <span class="session-provider-label" id="sessionTunnelProviderLabel">Link provider</span>
+        <span class="session-provider-scope">This session</span>
+      </div>
+      <button
+        type="button"
+        class="session-provider-trigger"
+        id="sessionTunnelProvider"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+        aria-controls="sessionTunnelProviderMenu"
+        aria-labelledby="sessionTunnelProviderLabel sessionTunnelProviderValue"
+        ${disabled || unavailable ? "disabled" : ""}
+      >
+        <span class="session-provider-trigger-icon" aria-hidden="true">${uiGlyph("network")}</span>
+        <span class="session-provider-trigger-copy">
+          <strong id="sessionTunnelProviderValue">${escapeHtml(triggerLabel)}</strong>
+          <small>${escapeHtml(triggerMeta)}</small>
+        </span>
+        <span class="session-provider-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
+      </button>
+      <div
+        class="session-provider-menu"
+        id="sessionTunnelProviderMenu"
+        role="listbox"
+        aria-labelledby="sessionTunnelProviderLabel"
+        aria-hidden="true"
+        inert
+      >${optionMarkup}</div>
+    </div>`;
+}
+
 function selectedTunnelProvider(session = local.appState?.session) {
   const selectedId = preferredTunnelProviderId(session);
   return availableTunnelProviders(session).find((provider) => provider.id === selectedId) || null;
@@ -1764,6 +2124,19 @@ function selectedTunnelProvider(session = local.appState?.session) {
 function selectedSessionTunnelProvider(session = local.appState?.session) {
   const selectedId = sessionTunnelProviderId(session);
   return availableTunnelProviders(session).find((provider) => provider.id === selectedId) || null;
+}
+
+function sessionTunnelProviderHint(session = local.appState?.session, selectedProviderId = sessionTunnelProviderId(session)) {
+  const providers = availableTunnelProviders(session);
+  const selectedProvider = providers.find((provider) => provider.id === selectedProviderId) || null;
+  const activePreferenceId = String(session?.tunnel?.preferredProviderId || "");
+  if (selectedProviderId !== activePreferenceId) {
+    return session?.status === "live"
+      ? `Refresh to use ${selectedProvider?.name || "Automatic"}. Your Settings default stays unchanged.`
+      : `This session will use ${selectedProvider?.name || "Automatic"}. Your Settings default stays unchanged.`;
+  }
+  return selectedProvider?.hint
+    || (providers.length ? "Automatic uses the first provider that verifies." : "No public-link providers were detected.");
 }
 
 function compactInviteUrl(value) {
@@ -1957,6 +2330,14 @@ function editorToolIcon(name) {
     indent: `<svg ${attrs}><path d="M4 7h10" /><path d="M4 12h10" /><path d="M4 17h10" /><path d="m17 9 4 3-4 3" /></svg>`,
     complete: `<svg ${attrs}><path d="M14 4 9 20" /><path d="M17 6h3" /><path d="M18.5 4.5v3" /><path d="M4 17h3" /><path d="M5.5 15.5v3" /></svg>`,
     search: `<svg ${attrs}><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>`,
+    review: `<svg ${attrs}><path d="M3.8 12s3.1-5 8.2-5 8.2 5 8.2 5-3.1 5-8.2 5-8.2-5-8.2-5Z" /><circle cx="12" cy="12" r="2.3" /></svg>`,
+    arrowUp: `<svg ${attrs}><path d="M12 19V5" /><path d="m7 10 5-5 5 5" /></svg>`,
+    arrowDown: `<svg ${attrs}><path d="M12 5v14" /><path d="m7 14 5 5 5-5" /></svg>`,
+    close: `<svg ${attrs}><path d="m6.5 6.5 11 11" /><path d="m17.5 6.5-11 11" /></svg>`,
+    chevronRight: `<svg ${attrs}><path d="m9.5 7 5 5-5 5" /></svg>`,
+    file: `<svg ${attrs}><path d="M6 3.5h8l4 4V20H6V3.5Z" /><path d="M14 3.5V8h4" /></svg>`,
+    mainFile: `<svg ${attrs}><path d="M6 3.5h8l4 4V20H6V3.5Z" /><path d="M14 3.5V8h4" /><path d="M9 12h6" /><path d="M9 15h4" /></svg>`,
+    image: `<svg ${attrs}><rect x="4" y="5" width="16" height="14" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m6.5 17 4.2-4.2 2.5 2.5 2-2L19 17" /></svg>`,
     files: `<svg ${attrs}><path d="M4 6.5h6l2 2h8v9.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6.5Z" /><path d="M4 10h16" /></svg>`,
     newFile: `<svg ${attrs}><path d="M6 3.5h8l4 4V20H6V3.5Z" /><path d="M14 3.5V8h4" /><path d="M9 13h6" /><path d="M12 10v6" /></svg>`,
     newFolder: `<svg ${attrs}><path d="M3.5 7h6l1.7 2H20v8.5a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2V7Z" /><path d="M12 14h5" /><path d="M14.5 11.5v5" /></svg>`,
@@ -2332,33 +2713,142 @@ function projectView() {
   `, { rail: true, active: "home", dashboard: true, wide: true });
 }
 
+function sessionGuestRoleValue(context, id, fallback = "viewer") {
+  const key = `${context}:${id}`;
+  const saved = local.sessionGuestRoles[key];
+  if (saved === "viewer" || saved === "maintainer") return saved;
+  return fallback === "maintainer" ? "maintainer" : "viewer";
+}
+
+function sessionRolePickerMarkup({ context, id, value, disabled = false, label = "Guest role" }) {
+  const key = `${context}:${id}`;
+  const role = value === "maintainer" ? "maintainer" : "viewer";
+  const title = role === "maintainer" ? "Maintainer" : "Viewer";
+  const menuId = `sessionRoleMenu-${key.replace(/[^a-z0-9_-]/gi, "-")}`;
+  return `
+    <div class="session-role-picker" data-session-role-picker data-role-context="${escapeHtml(context)}" data-role-id="${escapeHtml(id)}" data-role-value="${role}">
+      <button class="session-role-trigger" type="button" aria-label="${escapeHtml(label)}: ${title}" aria-haspopup="listbox" aria-expanded="false" aria-controls="${menuId}" ${disabled ? "disabled" : ""}>
+        <span>${title}</span>
+        <span class="session-role-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
+      </button>
+      <div class="session-role-menu" id="${menuId}" role="listbox" aria-label="${escapeHtml(label)}" aria-hidden="true" inert>
+        <button type="button" role="option" data-session-role-option="viewer" aria-selected="${role === "viewer" ? "true" : "false"}">
+          <span><strong>Viewer</strong><small>Read source, PDF, and chat</small></span>
+          <span class="session-role-check" aria-hidden="true">${role === "viewer" ? "&#10003;" : ""}</span>
+        </button>
+        <button type="button" role="option" data-session-role-option="maintainer" aria-selected="${role === "maintainer" ? "true" : "false"}">
+          <span><strong>Maintainer</strong><small>Edit files and use AI</small></span>
+          <span class="session-role-check" aria-hidden="true">${role === "maintainer" ? "&#10003;" : ""}</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function sessionGuestManagerMarkup(session) {
+  const users = Array.isArray(session?.users) ? session.users : [];
+  const host = users.find((user) => user.role === "host") || { id: "host", name: "Host", role: "host", online: true };
+  const guests = users.filter((user) => user.role !== "host");
+  const pending = (Array.isArray(session?.joinRequests) ? session.joinRequests : [])
+    .filter((request) => request.status === "pending");
+  const maxGuests = Math.max(1, Number(session?.maxGuests || 5));
+  const full = guests.length >= maxGuests;
+  const pendingRows = pending.map((request) => {
+    const key = `pending:${request.id}`;
+    const busy = Boolean(local.sessionGuestBusy[key]);
+    const role = sessionGuestRoleValue("pending", request.id, "viewer");
+    const error = local.sessionGuestErrors[key] || "";
+    return `
+      <article class="session-guest-row session-guest-request" data-session-guest-row="${escapeHtml(key)}" aria-busy="${busy ? "true" : "false"}">
+        <div class="session-guest-identity">
+          <div class="avatar">${escapeHtml(request.name?.[0] || "?")}</div>
+          <div><strong>${escapeHtml(request.name || "Guest")}</strong><span>Waiting for approval</span></div>
+        </div>
+        <div class="session-guest-controls">
+          ${sessionRolePickerMarkup({ context: "pending", id: request.id, value: role, disabled: busy, label: `Role for ${request.name || "guest"}` })}
+          <button class="btn btn-primary session-guest-approve" type="button" data-session-guest-approve="${escapeHtml(request.id)}" ${busy || full ? "disabled" : ""}>${busy ? "Working&hellip;" : "Approve"}</button>
+          <button class="btn session-guest-decline" type="button" data-session-guest-decline="${escapeHtml(request.id)}" ${busy ? "disabled" : ""}>Decline</button>
+        </div>
+        ${error ? `<p class="session-guest-error" role="alert">${escapeHtml(error)}</p>` : ""}
+      </article>
+    `;
+  }).join("");
+  const guestRows = guests.map((user) => {
+    const key = `guest:${user.id}`;
+    const busy = Boolean(local.sessionGuestBusy[key]);
+    const role = user.role === "maintainer" ? "maintainer" : "viewer";
+    const error = local.sessionGuestErrors[key] || "";
+    return `
+      <article class="session-guest-row" data-session-guest-row="${escapeHtml(key)}" aria-busy="${busy ? "true" : "false"}">
+        <div class="session-guest-identity">
+          <div class="avatar">${escapeHtml(user.name?.[0] || "?")}</div>
+          <div><strong>${escapeHtml(user.name || "Guest")}</strong><span><i class="online-dot ${user.online ? "" : "offline"}" aria-hidden="true"></i>${user.online ? "Online" : "Offline"}</span></div>
+        </div>
+        <div class="session-guest-controls">
+          ${sessionRolePickerMarkup({ context: "guest", id: user.id, value: role, disabled: busy, label: `Role for ${user.name || "guest"}` })}
+          <button class="session-guest-remove" type="button" data-session-guest-remove="${escapeHtml(user.id)}" ${busy ? "disabled" : ""}>Remove access</button>
+        </div>
+        ${error ? `<p class="session-guest-error" role="alert">${escapeHtml(error)}</p>` : ""}
+      </article>
+    `;
+  }).join("");
+
+  return `
+    <div class="session-guest-manager" id="sessionGuestManager" data-session-guest-manager>
+      <div class="session-host-row" aria-label="Session host">
+        <div class="session-guest-identity">
+          <div class="avatar">${escapeHtml(host.name?.[0] || "H")}</div>
+          <div><strong>${escapeHtml(host.name || "Host")} <span class="session-you-label">You</span></strong><span>Host &middot; Controls this session</span></div>
+        </div>
+        <span class="online-dot" title="Online"></span>
+      </div>
+      <div class="session-guest-heading-row">
+        <div>
+          <h3 id="sessionGuestsHeading" tabindex="-1">Guests</h3>
+          <p>${guests.length} of ${maxGuests} guest spots used</p>
+        </div>
+        ${pending.length ? `<span class="session-pending-count">${pending.length} pending</span>` : ""}
+      </div>
+      ${full && pending.length ? `<p class="session-capacity-note" role="status">All guest spots are in use. Remove a guest before approving another.</p>` : ""}
+      <div class="session-guest-list">
+        ${pendingRows}
+        ${guestRows}
+        ${!pending.length && !guests.length ? `<div class="session-guests-empty"><strong>No guests yet</strong><span>New requests will appear here for approval.</span></div>` : ""}
+      </div>
+      <p class="session-guest-live-status" id="sessionGuestLiveStatus" role="status" aria-live="polite" aria-atomic="true">${escapeHtml(local.sessionGuestStatus)}</p>
+    </div>
+  `;
+}
+
 function sessionView() {
   const { project, session } = local.appState;
   const isLive = session.status === "live";
   const wasEnded = session.status === "ended";
   const hasInvite = Boolean(session.inviteUrl);
   const inviteState = tunnelInviteState(session);
+  const headerPhase = isLive
+    ? inviteState.phase
+    : local.sessionStartBusy
+      ? "pending"
+      : "idle";
+  const headerStatusLabel = isLive
+    ? inviteState.phase === "ready"
+      ? "Live"
+      : inviteState.phase === "failed"
+        ? "Link issue"
+        : "Preparing link"
+    : local.sessionStartBusy
+      ? "Starting"
+      : wasEnded
+        ? "Ended"
+        : "Not started";
   const providers = availableTunnelProviders(session);
   const selectedProviderId = sessionTunnelProviderId(session);
-  const activePreferenceId = String(session.tunnel?.preferredProviderId || "");
-  const selectedProvider = selectedSessionTunnelProvider(session);
-  const providerSelectionDiffers = selectedProviderId !== activePreferenceId;
   const canRefreshInvite = providers.length > 0 && !local.tunnelProviderSwitchBusy;
-  const providerHint = providerSelectionDiffers
-    ? isLive
-      ? `Refresh to use ${selectedProvider?.name || "Automatic"}. Your Settings default stays unchanged.`
-      : `This session will use ${selectedProvider?.name || "Automatic"}. Your Settings default stays unchanged.`
-    : selectedProvider?.hint || (providers.length ? "Automatic uses the first provider that verifies." : "No public-link providers were detected.");
+  const providerHint = sessionTunnelProviderHint(session, selectedProviderId);
   const refreshActionLabel = local.tunnelProviderSwitchBusy ? "Refreshing..." : "Refresh link";
   const visibleInviteUrl = compactInviteUrl(session.inviteUrl || "");
   const projectFileCount = project.files.filter((item) => item.type !== "directory").length;
-  const pending = session.joinRequests.filter((item) => item.status === "pending");
-  const pendingMarkup = pending.length
-    ? `<div class="approval-strip">
-        <div class="section-title">Join Requests</div>
-        ${pending.map(requestMarkup).join("")}
-      </div>`
-    : "";
   return windowShell(`
     <div class="session-share-page">
       <header class="session-share-head">
@@ -2366,14 +2856,17 @@ function sessionView() {
           ${icon("back")} <span>Back to Home</span>
         </button>
         <div class="session-share-heading">
-          <span class="pill ${isLive ? "" : "pill-warn"}">${isLive ? "Live" : wasEnded ? "Ended" : "Not started"}</span>
+          <span class="pill session-state-pill phase-${headerPhase}">
+            <span class="session-signal-bars" aria-hidden="true">
+              <span></span><span></span><span></span><span></span>
+            </span>
+            <span>${headerStatusLabel}</span>
+          </span>
           <h2>Host session</h2>
           <p>${isLive ? `${escapeHtml(project.name)} is ready to share.` : wasEnded ? "Sharing has stopped. Your project is still open on this computer." : `Start sharing ${escapeHtml(project.name)} when you are ready.`}</p>
         </div>
         ${isLive ? `<button class="btn btn-primary session-header-editor-button" id="openEditorFromSession" ${project.mainFile ? "" : "disabled"}>Open Editor</button>` : ""}
       </header>
-
-      ${pendingMarkup}
 
       <div class="session-share-grid">
         <main class="session-share-main">
@@ -2381,7 +2874,9 @@ function sessionView() {
             <div class="session-panel-title">${isLive ? "Share one invite link" : wasEnded ? "Session ended" : "Start sharing"}</div>
             ${isLive
               ? `<div class="session-link-state phase-${inviteState.phase}" aria-live="polite">
-                  <span class="session-link-state-dot" aria-hidden="true"></span>
+                  <span class="session-signal-bars session-link-signal" aria-hidden="true">
+                    <span></span><span></span><span></span><span></span>
+                  </span>
                   <div>
                     <strong>${escapeHtml(inviteState.title)}</strong>
                     <span>${escapeHtml(inviteState.detail)}</span>
@@ -2397,12 +2892,7 @@ function sessionView() {
                 <p class="session-share-instruction"><strong>Send only this link.</strong> Your friend asks to join, then you approve access.</p>
                 <div class="session-provider-control">
                   <div class="session-provider-choice">
-                    <label class="session-provider-field" for="sessionTunnelProvider">
-                      <span>Link provider</span>
-                      <select id="sessionTunnelProvider" ${providers.length && !local.tunnelProviderSwitchBusy ? "" : "disabled"}>
-                        ${tunnelProviderOptionsMarkup(session, selectedProviderId)}
-                      </select>
-                    </label>
+                    ${sessionTunnelProviderPickerMarkup(session, selectedProviderId, local.tunnelProviderSwitchBusy)}
                     <span class="session-provider-hint">${escapeHtml(providerHint)}</span>
                   </div>
                   <button class="btn session-refresh-button" id="refreshInviteLink" ${canRefreshInvite ? "" : "disabled"} aria-busy="${local.tunnelProviderSwitchBusy ? "true" : "false"}">${uiGlyph("refresh")} ${refreshActionLabel}</button>
@@ -2426,12 +2916,7 @@ function sessionView() {
                 </div>
                 <div class="session-provider-control session-provider-control-idle">
                   <div class="session-provider-choice">
-                    <label class="session-provider-field" for="sessionTunnelProvider">
-                      <span>Link provider</span>
-                      <select id="sessionTunnelProvider" ${providers.length ? "" : "disabled"}>
-                        ${tunnelProviderOptionsMarkup(session, selectedProviderId)}
-                      </select>
-                    </label>
+                    ${sessionTunnelProviderPickerMarkup(session, selectedProviderId)}
                     <span class="session-provider-hint">${escapeHtml(providerHint)}</span>
                   </div>
                 </div>
@@ -2446,16 +2931,7 @@ function sessionView() {
               <span>${projectFileCount} ${projectFileCount === 1 ? "file" : "files"} · ${escapeHtml(project.sizeLabel)}</span>
             </div>
             <div class="session-side-divider"></div>
-            <div class="session-panel-title">${isLive ? `People (${session.users.length} / ${session.maxUsers})` : "Shared access"}</div>
-            ${isLive ? `<div class="session-user-list">
-              ${session.users.map((user) => `
-                <div class="session-user-row">
-                  <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
-                  <div><strong>${escapeHtml(user.name)}${user.role === "host" ? " (You)" : ""}</strong><span>${escapeHtml(user.role)}</span></div>
-                  <span class="online-dot ${user.online ? "" : "offline"}" title="${user.online ? "Online" : "Offline"}"></span>
-                </div>
-              `).join("")}
-            </div>` : `<p class="session-inactive-access">No collaborators can access this project while sharing is off.</p>`}
+            ${isLive ? sessionGuestManagerMarkup(session) : `<div class="session-panel-title">Shared access</div><p class="session-inactive-access">No guests can access this project while sharing is off.</p>`}
           </section>
         </aside>
       </div>
@@ -2484,18 +2960,16 @@ function showEditorJoinRequest(request) {
       <div class="avatar">${escapeHtml(request.name?.[0] || "?")}</div>
       <div class="join-toast-copy">
         <strong>${escapeHtml(request.name || "Someone")} wants to join</strong>
-        <span>Approve editor access without leaving the editor.</span>
+        <span>Choose Viewer or Maintainer access in Host session.</span>
       </div>
-      <button class="btn btn-primary" data-toast-approve="${escapeHtml(request.id)}" style="height:32px">Allow</button>
+      <button class="btn btn-primary" data-toast-review="${escapeHtml(request.id)}" style="height:32px">Review</button>
       <button class="btn" data-toast-deny="${escapeHtml(request.id)}" style="height:32px">Deny</button>
     </section>
   `);
   const toast = document.querySelector(".join-toast");
-  toast?.querySelector("[data-toast-approve]")?.addEventListener("click", async (event) => {
-    await api("/api/join/approve", { method: "POST", body: { requestId: event.currentTarget.dataset.toastApprove, role: "editor" } });
-    toast.remove();
-    await loadState();
-    updateUsersPresenceUi();
+  toast?.querySelector("[data-toast-review]")?.addEventListener("click", () => {
+    local.sessionGuestFocusPending = true;
+    setView("session");
   });
   toast?.querySelector("[data-toast-deny]")?.addEventListener("click", async (event) => {
     await api("/api/join/deny", { method: "POST", body: { requestId: event.currentTarget.dataset.toastDeny } });
@@ -2945,6 +3419,8 @@ function localModelCardMarkup(model, activeId) {
   const bytesLabel = model.bytesReceived || model.totalBytes
     ? `${formatFileSize(model.bytesReceived || 0)} / ${formatFileSize(model.totalBytes || model.expectedBytes || 0)}`
     : model.sizeLabel || "";
+  const contextTokens = model.contextWindow?.effectiveTokens || model.contextWindowTokens || null;
+  const contextMode = model.contextWindow?.mode === "advanced_override" ? "Advanced" : "Automatic";
   return `
     <article class="local-model-card local-model-${escapeHtml(status)} ${isActive ? "is-active" : ""}">
       <div class="local-model-identity">
@@ -2957,6 +3433,7 @@ function localModelCardMarkup(model, activeId) {
           <p>${escapeHtml(model.description || "")}</p>
           <div class="local-model-meta">
             <span>${escapeHtml(model.sizeLabel || "")}</span>
+            ${contextTokens ? `<span class="local-model-context">${contextMode} context · ${escapeHtml(formatCompactContextTokens(contextTokens))}</span>` : ""}
             ${status === "failed" ? `<span class="local-model-problem">Download did not finish</span>` : ""}
           </div>
         </div>
@@ -3055,6 +3532,7 @@ function modelListRowMarkup(provider, model) {
       <div class="settings-list-main settings-model-toggle-main">
         <strong>${escapeHtml(model.name)}</strong>
         ${miniSwitchMarkup({ checked: enabled, label: enabled ? "Model shown in picker" : "Model hidden from picker", attrs: `data-model-enabled-provider="${escapeHtml(provider.id)}" data-model-enabled-id="${escapeHtml(model.id)}"` })}
+        <span class="settings-model-context">Provider managed</span>
         ${isActive ? `<span class="settings-status-tag">Active</span>` : ""}
       </div>
     </div>
@@ -3070,6 +3548,7 @@ function providerModelGroupMarkup(provider) {
   });
   if (!models.length) return "";
   const open = isProviderModelGroupOpen(provider.id);
+  const panelId = `settings-provider-models-${encodeURIComponent(String(provider.id || "provider"))}`;
   return `
     <section class="settings-model-group settings-provider-model-group ${providerEnabled ? "" : "provider-disabled"} ${open ? "open" : "collapsed"}">
       <div class="settings-provider-model-head">
@@ -3078,11 +3557,11 @@ function providerModelGroupMarkup(provider) {
           <strong>${escapeHtml(provider.name)}</strong>
           ${miniSwitchMarkup({ checked: providerEnabled, label: providerEnabled ? "Provider shown in picker" : "Provider hidden from picker", attrs: `data-provider-enabled="${escapeHtml(provider.id)}" data-provider-toggle-scope="models"` })}
         </div>
-        <button class="settings-provider-disclosure ${open ? "open" : ""}" type="button" data-toggle-provider-model-group="${escapeHtml(provider.id)}" aria-expanded="${open ? "true" : "false"}" title="${open ? "Collapse models" : "Expand models"}" aria-label="${open ? "Collapse" : "Expand"} ${escapeHtml(provider.name)} models">
-          <span aria-hidden="true"></span>
+        <button class="settings-provider-disclosure ${open ? "open" : ""}" type="button" data-toggle-provider-model-group="${escapeHtml(provider.id)}" data-provider-model-name="${escapeHtml(provider.name)}" aria-expanded="${open ? "true" : "false"}" aria-controls="${escapeHtml(panelId)}" title="${open ? "Collapse models" : "Expand models"}" aria-label="${open ? "Collapse" : "Expand"} ${escapeHtml(provider.name)} models">
+          ${editorToolIcon("chevronDown")}
         </button>
       </div>
-      <div class="settings-list-card settings-provider-models" ${open ? "" : "hidden"}>
+      <div class="settings-list-card settings-provider-models" id="${escapeHtml(panelId)}" ${open ? "" : "hidden"}>
         ${models.map((model) => modelListRowMarkup(provider, model)).join("")}
       </div>
     </section>
@@ -3339,8 +3818,8 @@ function showSettingsModal(section = "general") {
   });
   modal?.querySelectorAll("[data-toggle-provider-model-group]").forEach((button) => {
     button.addEventListener("click", () => {
-      toggleProviderModelGroup(button.dataset.toggleProviderModelGroup);
-      showSettingsModal("models");
+      const expanded = toggleProviderModelGroup(button.dataset.toggleProviderModelGroup);
+      updateProviderModelGroupDisclosure(button, expanded);
     });
   });
   modal?.querySelectorAll("[data-test-provider]").forEach((button) => {
@@ -3356,19 +3835,32 @@ function showSettingsModal(section = "general") {
 
 function providerFormRows(items, name, keyName, valueName) {
   const rows = items.length ? items : [""];
-  return rows.map((item) => {
+  return rows.map((item, index) => {
     const key = typeof item === "string" ? item : item?.[keyName] || item?.id || item?.name || "";
-    const value = typeof item === "string" ? "" : item?.[valueName] || item?.value || "";
-    const contextWindowTokens = typeof item === "string" ? "" : item?.contextWindowTokens || "";
+    const value = typeof item === "string"
+      ? ""
+      : item?.[valueName] || (valueName === "alias" ? item?.name : item?.value) || "";
+    const legacyContextWindow = name === "model" && typeof item !== "string" ? item?.contextWindowTokens || "" : "";
+    const rowLabel = name === "model" ? `model ${index + 1}` : `header ${index + 1}`;
     return `
       <div class="provider-form-row" data-provider-row="${escapeHtml(name)}">
-        <input name="${escapeHtml(name)}-${escapeHtml(keyName)}" placeholder="${escapeHtml(keyName === "model" ? "Model name" : "Header")}" value="${escapeHtml(key)}" />
-        <input name="${escapeHtml(name)}-${escapeHtml(valueName)}" placeholder="${escapeHtml(valueName === "value" ? "Value" : "Alias")}" value="${escapeHtml(value)}" />
-        ${name === "model" ? `<input name="model-context-window" type="number" inputmode="numeric" min="1024" max="10000000" step="1" placeholder="Context tokens (optional)" value="${escapeHtml(contextWindowTokens)}" aria-label="Context window tokens for ${escapeHtml(value || key || "model")}" />` : ""}
-        <button class="icon-button" type="button" data-remove-provider-row title="Remove row" aria-label="Remove row">x</button>
+        <input name="${escapeHtml(name)}-${escapeHtml(keyName)}" placeholder="${escapeHtml(keyName === "model" ? "Provider model ID" : "Header name")}" value="${escapeHtml(key)}" aria-label="${escapeHtml(keyName === "model" ? `Provider model ID for ${rowLabel}` : `Name for ${rowLabel}`)}" autocomplete="off" spellcheck="false" />
+        <input name="${escapeHtml(name)}-${escapeHtml(valueName)}" placeholder="${escapeHtml(valueName === "value" ? "Header value" : "Display label")}" value="${escapeHtml(value)}" aria-label="${escapeHtml(valueName === "value" ? `Value for ${rowLabel}` : `Display label for ${rowLabel}`)}" autocomplete="off" spellcheck="false" />
+        ${legacyContextWindow ? `<input name="model-context-window-legacy" type="hidden" value="${escapeHtml(legacyContextWindow)}" />` : ""}
+        <button class="icon-button provider-row-remove" type="button" data-remove-provider-row title="Remove ${escapeHtml(rowLabel)}" aria-label="Remove ${escapeHtml(rowLabel)}">${editorToolIcon("delete")}</button>
       </div>
     `;
   }).join("");
+}
+
+function providerFormColumnLabels(group) {
+  const model = group === "models";
+  return `
+    <div class="provider-form-column-labels" aria-hidden="true">
+      <span>${model ? "Provider model ID" : "Header name"}</span>
+      <span>${model ? "Display label" : "Header value"}</span>
+      <span></span>
+    </div>`;
 }
 
 function providerTemplateOptions(selectedId = "") {
@@ -3398,49 +3890,81 @@ function showProviderDialog(options = {}) {
   const shell = document.querySelector(".editor-shell") || app;
   shell.insertAdjacentHTML("beforeend", `
     <div class="settings-modal-backdrop provider-modal-backdrop" role="presentation">
-      <section class="settings-modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="providerDialogTitle">
+      <section class="settings-modal provider-modal" role="dialog" aria-modal="true" aria-labelledby="providerDialogTitle" aria-describedby="providerDialogDescription">
         <form id="providerForm">
-          <div class="settings-modal-head">
+          <div class="settings-modal-head provider-modal-head">
             <div>
               <h2 id="providerDialogTitle">${escapeHtml(title)}</h2>
-              <p>${escapeHtml(subtitle)}</p>
+              <p id="providerDialogDescription">${escapeHtml(subtitle)}</p>
             </div>
-            <button class="icon-button" data-close-provider type="button" title="Close provider dialog" aria-label="Close provider dialog">x</button>
+            <button class="icon-button provider-modal-close" data-close-provider type="button" title="Close provider dialog" aria-label="Close provider dialog">${editorToolIcon("close")}</button>
           </div>
           <div class="provider-form-body">
-            <label>Provider preset
-              <select name="templateId">
-                <option value="">Custom Provider</option>
-                ${providerTemplateOptions(provider?.builtin ? provider.id : "")}
-              </select>
-            </label>
-            <label>Provider ID <input name="providerId" required value="${escapeHtml(provider?.id || "")}" placeholder="openai-compatible" /></label>
-            <label>Display name <input name="displayName" required value="${escapeHtml(provider?.name || "")}" placeholder="OpenAI Compatible" /></label>
-            <label>Base URL <input name="baseUrl" value="${escapeHtml(provider?.baseUrl || "")}" placeholder="https://api.example.com/v1" /></label>
-            <label>API key <input name="apiKey" type="password" value="" placeholder="${provider?.hasApiKey ? "Leave blank to keep saved key" : "Stored encrypted on this computer"}" /></label>
+            <section class="provider-form-section provider-details-section">
+              <div class="provider-form-section-head provider-section-heading">
+                <span class="provider-section-icon" aria-hidden="true">${uiGlyph("network")}</span>
+                <div>
+                  <strong>Provider details</strong>
+                  <span>Use an OpenAI-compatible endpoint. Credentials stay on this computer.</span>
+                </div>
+              </div>
+              <div class="provider-form-field-grid">
+                <label class="provider-field-full"><span>Provider preset</span>
+                  <select name="templateId">
+                    <option value="">Custom Provider</option>
+                    ${providerTemplateOptions(provider?.builtin ? provider.id : "")}
+                  </select>
+                </label>
+                <label><span>Provider ID</span><input name="providerId" required value="${escapeHtml(provider?.id || "")}" placeholder="openai-compatible" autocomplete="off" spellcheck="false" /></label>
+                <label><span>Display name</span><input name="displayName" required value="${escapeHtml(provider?.name || "")}" placeholder="OpenAI Compatible" autocomplete="off" /></label>
+                <label class="provider-field-full"><span>Base URL</span><input name="baseUrl" value="${escapeHtml(provider?.baseUrl || "")}" placeholder="https://api.example.com/v1" inputmode="url" autocomplete="url" spellcheck="false" /></label>
+                <label class="provider-field-full"><span>API key</span><input name="apiKey" type="password" value="" placeholder="${provider?.hasApiKey ? "Leave blank to keep saved key" : "Stored encrypted on this computer"}" autocomplete="new-password" spellcheck="false" /></label>
+              </div>
+            </section>
             <section class="provider-form-section">
-              <div class="provider-form-section-head">
-                <strong>Models</strong>
+              <div class="provider-form-section-head provider-section-heading">
+                <span class="provider-section-icon" aria-hidden="true">${uiGlyph("ai")}</span>
+                <div>
+                  <strong>Models</strong>
+                  <span>Add the provider IDs LocalLeaf should show. Context window is managed by the provider.</span>
+                </div>
                 <button class="btn" type="button" data-add-model-row>${uiGlyph("plus")} Add model</button>
               </div>
+              ${providerFormColumnLabels("models")}
               <div class="provider-form-rows" data-provider-rows="models">
                 ${providerFormRows(provider?.models || [""], "model", "model", "alias")}
               </div>
             </section>
             <section class="provider-form-section">
-              <div class="provider-form-section-head">
-                <strong>Optional headers</strong>
+              <div class="provider-form-section-head provider-section-heading">
+                <span class="provider-section-icon" aria-hidden="true">${uiGlyph("settings")}</span>
+                <div>
+                  <strong>Optional headers</strong>
+                  <span>Only add headers required by this endpoint.</span>
+                </div>
                 <button class="btn" type="button" data-add-header-row>${uiGlyph("plus")} Add header</button>
               </div>
+              ${providerFormColumnLabels("headers")}
               <div class="provider-form-rows" data-provider-rows="headers">
                 ${providerFormRows(provider?.headers || [], "header", "name", "value")}
               </div>
             </section>
+            <details class="provider-form-advanced">
+              <summary>
+                <span>Advanced context handling</span>
+                <span class="provider-advanced-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
+              </summary>
+              <div class="provider-form-advanced-body">
+                <div class="provider-form-advanced-inner">
+                  <p>Context window is managed by the provider. LocalLeaf shows measured usage in AI Helper instead of presenting a manual context override. Compatibility metadata from an existing saved model is retained when you edit the provider.</p>
+                </div>
+              </div>
+            </details>
           </div>
           <div class="provider-form-actions">
             <span class="provider-dialog-test muted" id="providerDialogTest" aria-live="polite">Run test to verify</span>
             <button class="btn" type="button" id="testProviderForm">Test connection</button>
-            <button class="btn btn-primary" type="submit">Save / Submit</button>
+            <button class="btn btn-primary" type="submit">Save provider</button>
           </div>
         </form>
       </section>
@@ -3454,7 +3978,11 @@ function showProviderDialog(options = {}) {
   });
   modal?.querySelector("[data-close-provider]")?.addEventListener("click", close);
   modal?.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") close();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    }
   });
   modal?.querySelector('input[name="displayName"]')?.focus();
   modal?.querySelector("[data-add-model-row]")?.addEventListener("click", () => addProviderFormRow("models"));
@@ -3474,7 +4002,14 @@ function showProviderDialog(options = {}) {
     const button = event.target.closest?.("[data-remove-provider-row]");
     if (!button) return;
     const rows = button.closest(".provider-form-rows");
-    if (rows?.children.length > 1) button.closest(".provider-form-row")?.remove();
+    const row = button.closest(".provider-form-row");
+    if (!rows || !row) return;
+    if (rows.children.length > 1) {
+      row.remove();
+      return;
+    }
+    row.querySelectorAll("input").forEach((input) => { input.value = ""; });
+    row.querySelector("input")?.focus();
   });
   modal?.querySelector("#testProviderForm")?.addEventListener("click", () => testProviderConnection("", "", formProviderPayload()));
   modal?.querySelector("#providerForm")?.addEventListener("submit", (event) => {
@@ -3487,14 +4022,11 @@ function addProviderFormRow(group) {
   const rows = document.querySelector(`.provider-modal-backdrop [data-provider-rows="${group}"]`);
   if (!rows) return;
   const isModel = group === "models";
-  rows.insertAdjacentHTML("beforeend", `
-    <div class="provider-form-row" data-provider-row="${isModel ? "model" : "header"}">
-      <input name="${isModel ? "model-model" : "header-name"}" placeholder="${isModel ? "Model name" : "Header"}" />
-      <input name="${isModel ? "model-alias" : "header-value"}" placeholder="${isModel ? "Alias" : "Value"}" />
-      ${isModel ? `<input name="model-context-window" type="number" inputmode="numeric" min="1024" max="10000000" step="1" placeholder="Context tokens (optional)" aria-label="Context window tokens" />` : ""}
-      <button class="icon-button" type="button" data-remove-provider-row title="Remove row" aria-label="Remove row">x</button>
-    </div>
-  `);
+  rows.insertAdjacentHTML(
+    "beforeend",
+    providerFormRows([""], isModel ? "model" : "header", isModel ? "model" : "name", isModel ? "alias" : "value")
+  );
+  rows.lastElementChild?.querySelector("input")?.focus();
 }
 
 function formProviderPayload() {
@@ -3505,11 +4037,13 @@ function formProviderPayload() {
     .map((row) => {
       const id = row.querySelector('input[name="model-model"]')?.value.trim();
       const name = row.querySelector('input[name="model-alias"]')?.value.trim() || id;
-      const contextValue = row.querySelector('input[name="model-context-window"]')?.value.trim() || "";
+      const legacyContextWindow = Number(row.querySelector('input[name="model-context-window-legacy"]')?.value || 0);
       return id ? {
         id,
         name,
-        contextWindowTokens: contextValue ? Number(contextValue) : null
+        ...(Number.isFinite(legacyContextWindow) && legacyContextWindow >= 1024
+          ? { contextWindowTokens: legacyContextWindow }
+          : {})
       } : null;
     })
     .filter(Boolean);
@@ -3733,10 +4267,51 @@ function showInfoModal(kind) {
   const isHelp = kind === "help";
   const shell = document.querySelector(".editor-shell") || app;
   const helpItems = [
-    ["Share a project", "Open Session, choose an invite-link provider, and wait for the link to verify before sharing it with one friend."],
-    ["Compile and preview", "As the host, use Recompile in the editor. If a compile fails, LocalLeaf keeps the last good PDF available while you fix the source."],
-    ["Export your work", "Use Export in the editor to download the source ZIP or the latest compiled PDF."],
-    ["Review AI changes", "AI Helper drafts file edits and lists them in Changes, where you can review each proposal before it is applied."]
+    {
+      topic: "Projects",
+      question: "Where does LocalLeaf keep my project?",
+      answer: "A project is an ordinary folder on the host computer. You can create it in a destination you choose or import an existing ZIP. LocalLeaf reads and writes those files directly instead of moving the project into a separate cloud workspace."
+    },
+    {
+      topic: "Hosting",
+      question: "How do I invite someone to a session?",
+      answer: "Open Host Session, wait for one verified invite link, then send that link to your friend. Their request appears on the host for approval. The host computer and LocalLeaf must stay online while guests are working."
+    },
+    {
+      topic: "Access",
+      question: "What can a Viewer or Maintainer do?",
+      answer: "A Viewer can read source files, review the shared PDF, and use project chat. A Maintainer can also edit project files and use host-mediated AI. Only the host can compile, change guest access, refresh the invite link, or stop the session."
+    },
+    {
+      topic: "Collaboration",
+      question: "Can two people edit the same file at once?",
+      answer: "LocalLeaf currently synchronizes the whole file, so the last arrival wins when two browsers save the same file. For now, divide work across separate files and avoid editing the same .tex file at the same time. Reopen the file if another writer has just changed it."
+    },
+    {
+      topic: "Compilation",
+      question: "What happens when the PDF does not compile?",
+      answer: "Your source files remain saved. When a previous PDF has been validated, LocalLeaf keeps that last good copy visible while you inspect the compile warnings and logs. Fix the reported source, then recompile to replace it with a current PDF."
+    },
+    {
+      topic: "AI and privacy",
+      question: "Does AI send my project away from this computer?",
+      answer: "A LocalLeaf Local model runs on the host computer. If you choose a hosted provider, LocalLeaf sends the relevant request context to that provider, so its privacy terms apply. Provider keys, host settings, and the host's AI history are not shared with guests."
+    },
+    {
+      topic: "AI changes",
+      question: "How does AI change project files?",
+      answer: "AI Helper prepares a proposal and records it in Changes. Review the affected file and diff before approval. New files always need approval, and the host can decide whether ordinary edits ask first or use the allowed automatic edit mode."
+    },
+    {
+      topic: "Invite links",
+      question: "What does Refresh link do?",
+      answer: "Refresh creates and verifies a new invitation. The previous link can no longer approve another guest, so send the replacement to anyone who has not joined. Existing approvals remain, but connected guests may need the new link to reconnect."
+    },
+    {
+      topic: "Backups",
+      question: "How should I back up or move a project?",
+      answer: "Use Export to download the source ZIP or the latest compiled PDF. Because the project is already a normal folder, you can also back it up with your usual drive, version-control, or archive workflow. Stopping a hosted session never deletes the project files."
+    }
   ];
   shell.insertAdjacentHTML("beforeend", `
     <div class="settings-modal-backdrop info-modal-backdrop" role="presentation">
@@ -3744,28 +4319,31 @@ function showInfoModal(kind) {
         <div class="settings-modal-head">
           <div>
             <h2 id="infoModalTitle">${isHelp ? "LocalLeaf help" : "About LocalLeaf"}</h2>
-            <p id="infoModalSubtitle">${isHelp ? "Short answers for the core desktop workflow." : "Private, host-powered LaTeX collaboration."}</p>
+            <p id="infoModalSubtitle">${isHelp ? "Answers about projects, sharing, compiling, and AI." : "A local writing room for private, host-powered LaTeX work."}</p>
           </div>
           <button class="icon-button dialog-close-button" data-close-info title="Close" aria-label="Close"><svg class="dialog-close-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg></button>
         </div>
         ${isHelp ? `
           <div class="info-modal-body help-qa-list">
-            ${helpItems.map(([question, answer], index) => `
+            ${helpItems.map(({ topic, question, answer }, index) => `
               <details ${index === 0 ? "open" : ""}>
                 <summary>
                   <span class="help-step">${String(index + 1).padStart(2, "0")}</span>
-                  <strong>${escapeHtml(question)}</strong>
+                  <span class="help-question-copy">
+                    <small class="help-topic">${escapeHtml(topic)}</small>
+                    <strong>${escapeHtml(question)}</strong>
+                  </span>
                   <span class="help-disclosure">
                     <span class="help-disclosure-label help-disclosure-label-collapsed">Show answer</span>
                     <span class="help-disclosure-label help-disclosure-label-expanded">Hide answer</span>
                     <span class="help-disclosure-icon-bound" aria-hidden="true">
                       <svg class="help-disclosure-icon" viewBox="0 0 24 24" focusable="false">
-                        <path d="m9 6 6 6-6 6"></path>
+                        <path d="m6 9 6 6 6-6"></path>
                       </svg>
                     </span>
                   </span>
                 </summary>
-                <div class="help-answer"><p>${escapeHtml(answer)}</p></div>
+                <div class="help-answer"><div class="help-answer-inner"><p>${escapeHtml(answer)}</p></div></div>
               </details>
             `).join("")}
           </div>
@@ -3780,28 +4358,44 @@ function showInfoModal(kind) {
                 <span>Private by design</span>
                 <span>Host powered</span>
               </div>
-              <p class="about-summary">Projects stay on the host computer. Approved guests join from a browser to write and chat while the host compiles the PDF everyone reviews.</p>
+              <p class="about-summary">LocalLeaf keeps a LaTeX project with the person hosting the session. Approved guests join from a browser to read, write, and chat while the host remains responsible for the files, access, and compiled PDF.</p>
             </section>
-            <dl class="about-detail-list">
+            <section class="about-working-model" aria-labelledby="aboutWorkingModelTitle">
+              <h3 id="aboutWorkingModelTitle">How a session works</h3>
+              <p>The host opens a normal project folder, starts a temporary session, approves each guest, and compiles one shared PDF. Guests work in the browser without installing LocalLeaf or receiving access to the host computer.</p>
+            </section>
+            <dl class="about-detail-list" aria-label="LocalLeaf product details">
               <div class="about-detail">
                 <dt>Local files</dt>
-                <dd>Source remains on this computer.</dd>
+                <dd>Source remains in a folder chosen by the host.</dd>
               </div>
               <div class="about-detail">
                 <dt>Approved guests</dt>
-                <dd>Friends join from one verified link.</dd>
+                <dd>Every browser guest needs a verified link and host approval.</dd>
+              </div>
+              <div class="about-detail">
+                <dt>Clear roles</dt>
+                <dd>Viewers read and chat. Maintainers can also edit and use AI.</dd>
               </div>
               <div class="about-detail">
                 <dt>Host compile</dt>
-                <dd>The host creates the shared PDF.</dd>
+                <dd>LaTeX runs on the host and produces the PDF everyone reviews.</dd>
+              </div>
+              <div class="about-detail">
+                <dt>Optional AI</dt>
+                <dd>Use a local model or a provider. Every proposal appears in Changes, while permitted edits may be applied automatically.</dd>
               </div>
               <div class="about-detail">
                 <dt>Project chat</dt>
-                <dd>Conversation stays beside the work.</dd>
+                <dd>Session conversation stays beside the files and PDF.</dd>
               </div>
             </dl>
+            <section class="about-boundaries" aria-labelledby="aboutBoundariesTitle">
+              <h3 id="aboutBoundariesTitle">Current boundaries</h3>
+              <p>The host must stay online for a shared session. Same-file collaboration is whole-file and last-arrival-wins, so writers should coordinate before editing the same source file.</p>
+            </section>
             <div class="about-footer-row">
-              <span>Built for focused, self-hosted writing sessions.</span>
+              <span>Made for research groups and classmates who write LaTeX together and want to keep ownership of the project files.</span>
               <a class="btn about-website-link" href="${LOCALLEAF_SITE_URL}" target="_blank" rel="noopener">Visit website</a>
             </div>
           </div>
@@ -3992,6 +4586,33 @@ function normalizeRenameStem(value, extension = "") {
   return stem;
 }
 
+function projectEntryNameError(value, kind = "file") {
+  const name = String(value || "").trim();
+  if (!name) return `Enter a ${kind === "directory" ? "folder" : "file"} name.`;
+  if (name === "." || name === "..") return "Choose a different name.";
+  if (/[\\/]/.test(name)) return "Use a name only. Choose a folder separately.";
+  if (/[<>:\"|?*\u0000-\u001f]/.test(name)) return "That name contains a character Windows cannot use.";
+  if (/[. ]$/.test(name)) return "Names cannot end with a dot or space.";
+  if (name.length > 120) return "Keep the name to 120 characters or fewer.";
+  return "";
+}
+
+function normalizedNewFileName(value) {
+  const name = String(value || "").trim();
+  if (!name || name.startsWith(".")) return name;
+  return importFileExtension(name) ? name : `${name}.tex`;
+}
+
+function creatableProjectFileNameError(value) {
+  const basicError = projectEntryNameError(value, "file");
+  if (basicError) return basicError;
+  const name = normalizedNewFileName(value);
+  if (!isSupportedProjectFileName(name) || isSupportedImageProjectFileName(name)) {
+    return "Create a LaTeX or text project file here. Upload images and PDFs instead.";
+  }
+  return "";
+}
+
 function uniqueProjectPath(directory, preferredName) {
   const cleanDirectory = pathParts(directory).join("/");
   const cleanName = String(preferredName || "").trim() || "new file.tex";
@@ -4037,20 +4658,58 @@ function canPasteTreeItem(sourcePath, targetFolder = "") {
 }
 
 function renameInputMarkup(item) {
-  const parts = renameNameParts(item);
   const label = item.name || pathBasename(item.path);
   return `
-    <span class="tree-rename-wrap">
+    <div class="tree-rename-wrap ${local.renameSaving ? "is-saving" : ""}">
       <input class="tree-rename-input"
         data-rename-path="${escapeHtml(item.path)}"
         data-rename-kind="${escapeHtml(item.type)}"
-        data-rename-extension="${escapeHtml(parts.extension)}"
-        value="${escapeHtml(parts.stem)}"
+        value="${escapeHtml(label)}"
         spellcheck="false"
         autocomplete="off"
+        ${local.renameSaving ? "disabled" : ""}
+        ${local.renameError ? 'aria-invalid="true" aria-describedby="treeRenameError"' : ""}
         aria-label="Rename ${escapeHtml(label)}" />
-      ${parts.extension ? `<span class="tree-rename-extension">${escapeHtml(parts.extension)}</span>` : ""}
-    </span>
+      <span class="tree-rename-actions">
+        <button type="button" class="tree-inline-action tree-inline-confirm" data-tree-rename-confirm aria-label="Save new name" title="Save new name" ${local.renameSaving ? "disabled" : ""}>${editorToolIcon("check")}</button>
+        <button type="button" class="tree-inline-action" data-tree-rename-cancel aria-label="Cancel rename" title="Cancel rename" ${local.renameSaving ? "disabled" : ""}>${editorToolIcon("close")}</button>
+      </span>
+      ${local.renameError ? `<span class="tree-rename-error" id="treeRenameError" role="alert">${escapeHtml(local.renameError)}</span>` : ""}
+    </div>
+  `;
+}
+
+function treeRenameRowMarkup(item, depth = 0) {
+  return `
+    <div class="tree-rename-row ${depth > 0 ? "nested" : ""}" style="--depth:${depth}">
+      <span class="tree-rename-leading" aria-hidden="true">${fileIconFor(item)}</span>
+      ${renameInputMarkup(item)}
+    </div>
+  `;
+}
+
+function treeCreateDraftMarkup() {
+  const draft = local.treeCreateDraft;
+  if (!draft) return "";
+  const isFolder = draft.kind === "folder";
+  const location = draft.directory ? `Inside ${draft.directory}` : "Project root";
+  return `
+    <form class="tree-create-draft ${draft.saving ? "is-saving" : ""}" data-create-kind="${escapeHtml(draft.kind)}" aria-label="${isFolder ? "New folder" : "New file"}" aria-busy="${draft.saving ? "true" : "false"}">
+      <div class="tree-create-heading">
+        <span class="tree-create-icon" aria-hidden="true">${editorToolIcon(isFolder ? "newFolder" : "newFile")}</span>
+        <span class="tree-create-copy">
+          <strong>${isFolder ? "New folder" : "New file"}</strong>
+          <small>${escapeHtml(location)}</small>
+        </span>
+      </div>
+      <div class="tree-create-control">
+        <input class="tree-create-input" value="${escapeHtml(draft.name)}" spellcheck="false" autocomplete="off" ${draft.saving ? "disabled" : ""} ${draft.error ? 'aria-invalid="true"' : ""} aria-label="${isFolder ? "Folder name" : "File name"}" aria-describedby="treeCreateHint${draft.error ? " treeCreateError" : ""}" />
+        <button type="submit" class="tree-inline-action tree-inline-confirm" data-tree-create-confirm aria-label="Create ${isFolder ? "folder" : "file"}" title="Create ${isFolder ? "folder" : "file"}" ${draft.saving ? "disabled" : ""}>${editorToolIcon("check")}</button>
+        <button type="button" class="tree-inline-action" data-tree-create-cancel aria-label="Cancel new ${isFolder ? "folder" : "file"}" title="Cancel" ${draft.saving ? "disabled" : ""}>${editorToolIcon("close")}</button>
+      </div>
+      <small class="tree-create-hint" id="treeCreateHint">${isFolder ? "Enter a single folder name." : "No extension? LocalLeaf adds .tex."}</small>
+      ${draft.error ? `<span class="tree-create-error" id="treeCreateError" role="alert">${escapeHtml(draft.error)}</span>` : ""}
+    </form>
   `;
 }
 
@@ -4137,10 +4796,10 @@ function sortTreeNodes(nodes) {
 }
 
 function fileIconFor(item) {
-  if (item.type === "directory") return ">";
-  if (item.type === "image") return "[img]";
-  if (item.path === local.appState.project.mainFile) return "[main]";
-  return icon("file");
+  if (item.type === "directory") return editorToolIcon("files");
+  if (item.type === "image") return editorToolIcon("image");
+  if (item.path === local.appState.project.mainFile) return editorToolIcon("mainFile");
+  return editorToolIcon("file");
 }
 
 function renderTreeNode(node, selectedFile, depth = 0) {
@@ -4153,28 +4812,31 @@ function renderTreeNode(node, selectedFile, depth = 0) {
       name: node.name,
       type: "directory"
     };
-      const nameMarkup = local.renamingTreePath === node.path ? renameInputMarkup(renameItem) : `<span class="folder-name">${escapeHtml(node.name)}</span>`;
-      return `
-        <div class="tree-folder" data-depth="${depth}">
+      const folderRowMarkup = local.renamingTreePath === node.path
+        ? treeRenameRowMarkup(renameItem, depth)
+        : `
           <button class="tree-folder-row folder-toggle ${isSelected ? "active" : ""} ${depth > 0 ? "nested" : ""}"
             data-folder="${escapeHtml(node.path)}"
-          data-drag-path="${escapeHtml(node.path)}"
-          data-drag-kind="directory"
-          data-drop-folder="${escapeHtml(node.path)}"
-          draggable="true"
-          style="--depth:${depth}">
-          <span class="folder-caret">${isCollapsed ? ">" : "v"}</span>
-          ${nameMarkup}
-          <span class="folder-count">${children.length}</span>
-        </button>
-        ${isCollapsed ? "" : `<div class="tree-children">${children.map((child) => renderTreeNode(child, selectedFile, depth + 1)).join("")}</div>`}
+            data-drag-path="${escapeHtml(node.path)}"
+            data-drag-kind="directory"
+            data-drop-folder="${escapeHtml(node.path)}"
+            draggable="true"
+            style="--depth:${depth}">
+            <span class="folder-caret ${isCollapsed ? "" : "expanded"}">${editorToolIcon("chevronRight")}</span>
+            <span class="folder-name">${escapeHtml(node.name)}</span>
+            <span class="folder-count">${children.length}</span>
+          </button>`;
+      return `
+        <div class="tree-folder" data-depth="${depth}">
+          ${folderRowMarkup}
+          ${isCollapsed ? "" : `<div class="tree-children">${children.map((child) => renderTreeNode(child, selectedFile, depth + 1)).join("")}</div>`}
       </div>
     `;
   }
 
     const item = node.item;
     const selectable = isEditableFile(item) || isImageAsset(item);
-    const labelMarkup = local.renamingTreePath === item.path ? renameInputMarkup(item) : `<span class="file-label">${escapeHtml(item.name)}</span>`;
+    if (local.renamingTreePath === item.path) return treeRenameRowMarkup(item, depth);
     return `
       <button class="file-button tree-file ${item.path === selectedFile && !local.selectedFolder ? "active" : ""} ${item.type === "image" ? "image-file" : ""} ${selectable ? "" : "not-selectable"} ${depth > 0 ? "nested" : ""}"
       data-file="${escapeHtml(item.path)}"
@@ -4185,7 +4847,7 @@ function renderTreeNode(node, selectedFile, depth = 0) {
       style="--depth:${depth}"
       draggable="true"
       aria-disabled="${selectable ? "false" : "true"}">
-      <span>${fileIconFor(item)}</span>${labelMarkup}
+      <span>${fileIconFor(item)}</span><span class="file-label">${escapeHtml(item.name)}</span>
     </button>
   `;
 }
@@ -4206,13 +4868,13 @@ function renderImageGroup(files, selectedFile) {
   return `
     <div class="image-group">
       <button class="tree-folder-row image-section-toggle" style="--depth:0">
-        <span class="folder-caret">${local.imagesCollapsed ? ">" : "v"}</span>
+        <span class="folder-caret ${local.imagesCollapsed ? "" : "expanded"}">${editorToolIcon("chevronRight")}</span>
         <span class="folder-name">Images</span>
         <span class="folder-count">${images.length}</span>
       </button>
         ${local.imagesCollapsed ? "" : `<div class="tree-children">
           ${isEmpty ? `<div class="tree-empty">No images in this project.</div>` : ""}
-          ${images.map((item) => `
+          ${images.map((item) => local.renamingTreePath === item.path ? treeRenameRowMarkup(item, 1) : `
             <button class="file-button tree-file image-file ${item.path === selectedFile && !local.selectedFolder ? "active" : ""} nested"
             data-file="${escapeHtml(item.path)}"
             data-kind="image"
@@ -4221,7 +4883,7 @@ function renderImageGroup(files, selectedFile) {
             data-drag-kind="image"
             draggable="true"
             style="--depth:1">
-            <span>[img]</span>${local.renamingTreePath === item.path ? renameInputMarkup(item) : `<span class="file-label">${escapeHtml(item.path)}</span>`}
+            <span>${editorToolIcon("image")}</span><span class="file-label">${escapeHtml(item.path)}</span>
           </button>
         `).join("")}
       </div>`}
@@ -4247,6 +4909,13 @@ function treeContextMenuMarkup() {
       ${escapeHtml(label)}
     </button>
   `;
+  if (!canMutateProject()) {
+    return `
+      <div class="tree-context-menu" style="left:${menu.x}px;top:${menu.y}px" role="menu" aria-label="File tree menu">
+        ${button("download", "Download", { disabled: !canDownload })}
+      </div>
+    `;
+  }
   return `
     <div class="tree-context-menu" style="left:${menu.x}px;top:${menu.y}px" role="menu" aria-label="File tree menu">
       ${button("rename", "Rename", { disabled: !canRename })}
@@ -4893,7 +5562,7 @@ function outlineTreeMarkup(outlineItems = [], currentTitle = "") {
         const active = currentTitle && item.title === currentTitle;
         return `
           <button class="outline-row ${active ? "active" : ""}" type="button" role="treeitem" style="--outline-depth:${item.level}">
-            <span class="outline-caret" aria-hidden="true">${hasChildren ? "⌄" : ""}</span>
+            <span class="outline-caret ${hasChildren ? "has-children" : ""}" aria-hidden="true">${hasChildren ? editorToolIcon("chevronRight") : ""}</span>
             <span class="outline-title">${escapeHtml(item.title)}</span>
           </button>
         `;
@@ -4926,21 +5595,21 @@ const EDITOR_STYLE_OPTIONS = [
 
 function editorStyleDropdownMarkup() {
   return `
-    <div class="editor-style-menu-wrap">
+    <div class="editor-style-menu-wrap ${local.editorStyleMenuOpen ? "open" : ""}">
       <button class="editor-style-button ${local.editorStyleMenuOpen ? "active" : ""}" id="editorStyleButton" type="button" title="Insert section command" aria-label="Insert section command" aria-haspopup="menu" aria-expanded="${local.editorStyleMenuOpen ? "true" : "false"}">
         <span>Normal text</span>
-        <span class="style-chevron" aria-hidden="true"></span>
+        <span class="style-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
       </button>
-      ${local.editorStyleMenuOpen ? editorStyleMenuMarkup() : ""}
+      ${editorStyleMenuMarkup()}
     </div>
   `;
 }
 
 function editorStyleMenuMarkup() {
   return `
-    <div class="editor-style-menu" role="menu" aria-label="Text style">
+    <div class="editor-style-menu" role="menu" aria-label="Text style" aria-hidden="${local.editorStyleMenuOpen ? "false" : "true"}" ${local.editorStyleMenuOpen ? "" : "inert"}>
       ${EDITOR_STYLE_OPTIONS.map((item) => `
-        <button type="button" class="editor-style-option ${escapeHtml(item.className)}" data-style-value="${escapeHtml(item.value)}" role="menuitem">
+        <button type="button" class="editor-style-option ${escapeHtml(item.className)}" data-style-value="${escapeHtml(item.value)}" role="menuitem" tabindex="-1">
           ${escapeHtml(item.label)}
         </button>
       `).join("")}
@@ -4980,10 +5649,15 @@ function editorFormatToolbarMarkup() {
         <button class="editor-mode-pill active" type="button" role="tab" data-editor-mode="code" aria-selected="true">Code Editor</button>
         <button class="editor-mode-pill coming-soon" type="button" role="tab" aria-selected="false" disabled title="Visual Editor is coming soon">Visual Editor <span>soon</span></button>
       </div>
-      <button class="editor-tool-button ${local.searchOpen ? "active" : ""}" id="editorSearchToggle" title="Search and replace" aria-label="Search and replace">
-        ${editorToolIcon("search")}
-      </button>
-      <span class="format-row-spacer"></span>
+      <span class="format-row-spacer editor-search-reserved-space" aria-hidden="true"></span>
+      <div class="editor-search-launcher ${local.searchOpen ? "is-open" : ""}" id="editorSearchLauncher" role="search" aria-label="Quick search">
+        <div class="editor-search-launcher-surface">
+          <input id="editorQuickSearchInput" type="search" value="${escapeHtml(local.searchQuery)}" placeholder="Search" aria-label="Search" autocomplete="off" spellcheck="false" />
+          <button class="editor-tool-button ${local.searchOpen ? "active" : ""}" id="editorSearchToggle" type="button" title="Search and replace" aria-label="Open search and replace" aria-controls="editorSearchPanel" aria-expanded="${local.searchOpen ? "true" : "false"}">
+            ${editorToolIcon("search")}
+          </button>
+        </div>
+      </div>
       <button class="editor-chat-tab-button" id="showChatRailInline" title="Show chat" aria-label="Show chat">
         ${editorToolIcon("chat")}
         <span>Chat</span>
@@ -4998,6 +5672,20 @@ function searchStatusMarkup() {
     ${local.searchLoading ? `<span class="search-spinner" aria-hidden="true"></span>` : ""}
     <span id="searchStatusText">${escapeHtml(status)}</span>
   `;
+}
+
+function setEditorSearchQuery(value) {
+  local.searchQuery = String(value || "");
+  local.visualSearchIndex = 0;
+  local.searchResultIndex = -1;
+  local.searchStatus = "";
+  ["#editorQuickSearchInput", "#editorSearchInput"].forEach((selector) => {
+    const input = document.querySelector(selector);
+    if (input && input.value !== local.searchQuery) input.value = local.searchQuery;
+  });
+  if (!local.searchOpen) return;
+  if (local.searchScope === "project") scheduleProjectSearch();
+  else updateSearchPanelDynamicState();
 }
 
 function projectSearchResultsMarkup() {
@@ -5026,29 +5714,29 @@ function editorSearchPanelMarkup() {
   if (!local.searchOpen) return "";
   const projectScope = local.searchScope === "project";
   return `
-    <section class="editor-search-popover" role="search" aria-label="Search and replace">
+    <section class="editor-search-popover" id="editorSearchPanel" role="search" aria-label="Search and replace">
       <div class="editor-search-scope" role="group" aria-label="Search scope">
-        <button type="button" class="${projectScope ? "active" : ""}" data-search-scope="project">All files</button>
-        <button type="button" class="${!projectScope ? "active" : ""}" data-search-scope="file">Current file</button>
+        <button type="button" class="${projectScope ? "active" : ""}" data-search-scope="project" aria-pressed="${projectScope ? "true" : "false"}">All files</button>
+        <button type="button" class="${!projectScope ? "active" : ""}" data-search-scope="file" aria-pressed="${!projectScope ? "true" : "false"}">Current file</button>
       </div>
       <div class="editor-search-fields">
         <div class="editor-search-input-row">
           <input id="editorSearchInput" value="${escapeHtml(local.searchQuery)}" placeholder="Search for" autocomplete="off" />
-          <button class="search-toggle ${local.searchMatchCase ? "active" : ""}" id="searchMatchCase" title="Match case" aria-label="Match case">Aa</button>
-          <button class="search-toggle ${local.searchRegex ? "active" : ""}" id="searchRegex" title="Use regular expression" aria-label="Use regular expression">.*</button>
-          <button class="search-toggle ${local.searchWholeWord ? "active" : ""}" id="searchWholeWord" title="Whole word" aria-label="Whole word">W</button>
+          <button class="search-toggle ${local.searchMatchCase ? "active" : ""}" id="searchMatchCase" title="Match case" aria-label="Match case" aria-pressed="${local.searchMatchCase ? "true" : "false"}">Aa</button>
+          <button class="search-toggle ${local.searchRegex ? "active" : ""}" id="searchRegex" title="Use regular expression" aria-label="Use regular expression" aria-pressed="${local.searchRegex ? "true" : "false"}">.*</button>
+          <button class="search-toggle ${local.searchWholeWord ? "active" : ""}" id="searchWholeWord" title="Whole word" aria-label="Whole word" aria-pressed="${local.searchWholeWord ? "true" : "false"}">W</button>
         </div>
         <input id="editorReplaceInput" value="${escapeHtml(local.searchReplace)}" placeholder="Replace with" autocomplete="off" />
       </div>
       <div class="editor-search-actions">
-        <button class="editor-tool-button" id="searchPrevious" title="Previous match" aria-label="Previous match">&uarr;</button>
-        <button class="editor-tool-button" id="searchNext" title="Next match" aria-label="Next match">&darr;</button>
+        <button class="editor-tool-button" id="searchPrevious" title="Previous match" aria-label="Previous match">${editorToolIcon("arrowUp")}</button>
+        <button class="editor-tool-button" id="searchNext" title="Next match" aria-label="Next match">${editorToolIcon("arrowDown")}</button>
         <button class="btn" id="replaceOne" ${projectScope ? "disabled" : ""}>Replace</button>
-        <button class="btn" id="replaceAll">${projectScope ? "Replace All Files" : "Replace All"}</button>
+        <button class="btn btn-primary" id="replaceAll">${projectScope ? "Replace all files" : "Replace all"}</button>
         <span class="search-status" id="searchStatus">${searchStatusMarkup()}</span>
-        <button class="editor-tool-button" id="closeSearchPanel" title="Close search" aria-label="Close search">x</button>
+        <button class="editor-tool-button" id="closeSearchPanel" title="Close search" aria-label="Close search">${editorToolIcon("close")}</button>
       </div>
-      ${projectScope ? `<div class="project-search-note">All-files search opens matches across the project. Replace All asks before changing every text file.</div>` : ""}
+      ${projectScope ? `<div class="project-search-note">Searches every text file. Replace all asks for confirmation.</div>` : ""}
       ${projectSearchResultsMarkup()}
     </section>
   `;
@@ -5179,9 +5867,9 @@ function compileLogSummaryMarkup(lines = []) {
   const counts = compileLogCounts(lines);
   return `
     <div class="log-summary" aria-label="Compile log summary">
-      <span class="log-chip error">${counts.error} errors</span>
-      <span class="log-chip warning">${counts.warning} warnings</span>
-      <span class="log-chip info">${counts.info + counts.success} info</span>
+      <span class="log-chip error"><strong>${counts.error}</strong><span>Errors</span></span>
+      <span class="log-chip warning"><strong>${counts.warning}</strong><span>Warnings</span></span>
+      <span class="log-chip info"><strong>${counts.info + counts.success}</strong><span>Info</span></span>
     </div>
   `;
 }
@@ -5250,7 +5938,7 @@ function compilePinnedIssuesMarkup() {
     ${hasErrors ? `
       <section class="pinned-log-group error" aria-label="Pinned compile errors">
         <div class="pinned-log-head">
-          <strong>Pinned errors</strong>
+          <strong>Errors</strong>
           <span>Fix these to clear them</span>
         </div>
         ${local.pinnedCompileErrors.map((line) => pinnedLogLineMarkup(line, "error")).join("")}
@@ -6122,17 +6810,17 @@ function editorMoreMenuMarkup(state) {
         <span>${escapeHtml(state.project.name)}</span>
       </div>
       <div class="editor-more-section">
-        ${menuButton("settings", "Settings", "Theme and update checks", { icon: icon("settings") })}
+        ${isGuestClient() ? "" : menuButton("settings", "Settings", "Theme and update checks", { icon: icon("settings") })}
         ${menuButton("help", "Help", "Q&A and app guidance", { icon: icon("help") })}
         ${menuButton("about", "About", "Website and project info", { icon: icon("info") })}
-        ${updateCheckButtonMarkup("editorCheckUpdates", "Check for updates", "editor-more-update", { menuItem: true })}
-        <a class="editor-more-item" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" role="menuitem">
+        ${isGuestClient() ? "" : updateCheckButtonMarkup("editorCheckUpdates", "Check for updates", "editor-more-update", { menuItem: true })}
+        ${isGuestClient() ? "" : `<a class="editor-more-item" href="${authUrl("/api/export/zip")}" download="${escapeHtml(downloadFileName(state.project.name, ".zip"))}" role="menuitem">
           <span class="editor-menu-icon">${icon("download")}</span>
           <span class="editor-menu-copy">
             <span>Download ZIP</span>
             <small>Save the whole project</small>
           </span>
-        </a>
+        </a>`}
       </div>
       <div class="editor-more-section">
         <div class="editor-more-section-title">Layout</div>
@@ -6223,28 +6911,152 @@ function bindEditorMoreActions() {
       else if (action === "toggle-pdf") toggleLayoutPane("preview");
       else if (action === "toggle-logs") toggleLayoutPane("logs");
       else if (action === "toggle-chat") setRightRailVisible(!local.rightRailVisible);
-      render();
     });
   });
+}
+
+function chatSessionActionsMarkup(canShare) {
+  if (isGuestClient()) return "";
+  return `
+    <div class="chat-session-actions" data-chat-session-actions>
+      <button class="chat-session-actions-trigger" id="chatSessionActionsButton" type="button" title="Host session actions" aria-label="Host session actions" aria-haspopup="menu" aria-expanded="false" aria-controls="chatSessionActionsMenu">
+        <span class="chat-session-actions-settings" aria-hidden="true">${uiGlyph("settings")}</span>
+        <span class="chat-session-actions-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
+      </button>
+      <div class="chat-session-actions-menu" id="chatSessionActionsMenu" role="menu" aria-label="Host session actions" aria-hidden="true" inert>
+        <button type="button" role="menuitem" data-chat-session-action="share" ${canShare ? "" : "disabled"}>
+          ${editorToolIcon("link")}
+          <span>Share link</span>
+        </button>
+        <button type="button" role="menuitem" data-chat-session-action="manage">
+          ${uiGlyph("users")}
+          <span>Manage guests</span>
+        </button>
+      </div>
+    </div>
+  `;
 }
 
 function chatHeaderMarkup() {
   const session = local.appState.session;
   const canShare = Boolean(session.inviteUrl);
+  const isLive = session.status === "live";
   return `
     <div class="panel-head chat-head">
       <div class="chat-title">
         <strong>Chat</strong>
-        <small>${session.status === "live" ? "Session live" : "Start a session to share"}</small>
+        <small><span class="chat-session-state ${isLive ? "is-live" : ""}" aria-hidden="true"></span>${isLive ? "Session live" : "Session offline"}</small>
       </div>
       <div class="chat-actions">
         <button class="chat-share-button" id="shareInviteFromChat" title="${canShare ? "Copy invite link" : "Start a session first"}" aria-label="Copy invite link" ${canShare ? "" : "disabled"}>
           <span class="link-glyph" aria-hidden="true"></span>
           <span>Share</span>
         </button>
+        ${chatSessionActionsMarkup(canShare)}
       </div>
     </div>
   `;
+}
+
+function chatEmptyMarkup() {
+  return `
+    <div class="chat-empty" role="status">
+      <span class="chat-empty-rule" aria-hidden="true"></span>
+      <strong class="chat-empty-title">No messages yet</strong>
+      <span class="chat-empty-copy">Start a note for everyone in this session.</span>
+    </div>
+  `;
+}
+
+function bindChatSessionActions() {
+  local.sessionActionsMenuAbortController?.abort();
+  local.sessionActionsMenuAbortController = null;
+
+  const controller = new AbortController();
+  const { signal } = controller;
+  const shareButton = document.querySelector("#shareInviteFromChat");
+  shareButton?.addEventListener("click", (event) => copyInvite(event.currentTarget), { signal });
+
+  const wrapper = document.querySelector("[data-chat-session-actions]");
+  const trigger = wrapper?.querySelector("#chatSessionActionsButton");
+  const menu = wrapper?.querySelector("#chatSessionActionsMenu");
+  if (!wrapper || !trigger || !menu) {
+    local.sessionActionsMenuAbortController = controller;
+    return;
+  }
+
+  const enabledItems = () => [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')];
+  const setOpen = (open, options = {}) => {
+    const nextOpen = Boolean(open);
+    wrapper.classList.toggle("is-open", nextOpen);
+    trigger.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+    menu.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+    if (nextOpen) {
+      menu.inert = false;
+      const items = enabledItems();
+      const target = options.focus === "last" ? items.at(-1) : options.focus ? items[0] : null;
+      target?.focus({ preventScroll: true });
+      return;
+    }
+    if (options.restoreFocus) trigger.focus({ preventScroll: true });
+    menu.inert = true;
+  };
+
+  trigger.addEventListener("click", () => {
+    const opening = trigger.getAttribute("aria-expanded") !== "true";
+    setOpen(opening, { focus: opening ? "first" : "", restoreFocus: !opening });
+  }, { signal });
+  trigger.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End", "Escape"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Escape") {
+      setOpen(false, { restoreFocus: true });
+      return;
+    }
+    const focus = ["ArrowUp", "End"].includes(event.key) ? "last" : "first";
+    setOpen(true, { focus });
+  }, { signal });
+
+  menu.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false, { restoreFocus: true });
+      return;
+    }
+    if (event.key === "Tab") {
+      window.setTimeout(() => setOpen(false), 0);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = enabledItems();
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = Math.max(0, items.indexOf(document.activeElement));
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[nextIndex]?.focus({ preventScroll: true });
+  }, { signal });
+
+  menu.querySelector('[data-chat-session-action="share"]')?.addEventListener("click", async () => {
+    await copyInvite(shareButton || trigger);
+    setOpen(false, { restoreFocus: true });
+  }, { signal });
+  menu.querySelector('[data-chat-session-action="manage"]')?.addEventListener("click", () => {
+    setOpen(false);
+    controller.abort();
+    if (local.sessionActionsMenuAbortController === controller) local.sessionActionsMenuAbortController = null;
+    local.sessionGuestFocusPending = true;
+    setView("session");
+  }, { signal });
+  document.addEventListener("pointerdown", (event) => {
+    if (trigger.getAttribute("aria-expanded") !== "true" || wrapper.contains(event.target)) return;
+    setOpen(false, { restoreFocus: true });
+  }, { signal });
+
+  local.sessionActionsMenuAbortController = controller;
 }
 
 function chatMessageMarkup(message) {
@@ -6287,21 +7099,27 @@ function rightRailTabsMarkup() {
 
 function chatRailPanelMarkup() {
   const state = local.appState;
+  const users = Array.isArray(state.session.users) ? state.session.users : [];
+  const onlineCount = users.filter((user) => user.online !== false).length;
   return `
     <section class="chat-panel right-rail-panel ${local.rightRailTab === "chat" ? "active" : ""}" ${local.rightRailTab === "chat" ? "" : "hidden"}>
       ${chatHeaderMarkup()}
       <div class="chat-list">
-        ${state.chat.length ? state.chat.map(chatMessageMarkup).join("") : `<div class="chat-empty">No messages yet.</div>`}
+        ${state.chat.length ? state.chat.map(chatMessageMarkup).join("") : chatEmptyMarkup()}
       </div>
       <section class="users-panel chat-users-inline">
-        <div class="panel-head">Users (${state.session.users.length})</div>
+        <div class="chat-users-head">
+          <strong>People</strong>
+          <span>${users.length} participant${users.length === 1 ? "" : "s"} · ${onlineCount} online</span>
+        </div>
         <div class="users-list">
-          ${state.session.users.map(userRowMarkup).join("")}
+          ${users.map(userRowMarkup).join("")}
         </div>
       </section>
       <form class="chat-input" id="chatForm">
-        <input id="chatText" placeholder="Send a message" />
-        <button class="btn" style="height:30px">Send</button>
+        <label class="sr-only" for="chatText">Message everyone in this session</label>
+        <input id="chatText" placeholder="Message everyone" autocomplete="off" />
+        <button class="btn btn-primary chat-send-button" type="submit">Send</button>
       </form>
     </section>
   `;
@@ -6707,6 +7525,15 @@ function formatContextTokens(value, approximate = false) {
   return `${approximate ? "≈" : ""}${new Intl.NumberFormat().format(Number(value))}`;
 }
 
+function formatCompactContextTokens(value) {
+  const tokens = Number(value);
+  if (!Number.isFinite(tokens) || tokens <= 0) return "Unavailable";
+  if (tokens < 1024) return new Intl.NumberFormat().format(tokens);
+  const thousands = tokens / 1024;
+  const rounded = Number.isInteger(thousands) ? thousands : Math.round(thousands * 10) / 10;
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(rounded)}K`;
+}
+
 function contextLevel(percent) {
   if (Number(percent) >= 90) return { key: "danger", label: "Nearly full" };
   if (Number(percent) >= 75) return { key: "warning", label: "Getting full" };
@@ -6722,11 +7549,9 @@ function aiModelChipMarkup() {
     ? Math.max(0, Math.min(100, Number(usage.window.percentUsed)))
     : null;
   const level = contextLevel(percent);
-  const unknownCapacity = usage?.window?.contextWindowTokens === null
-    || usage?.window?.contextWindowTokens === undefined
-    || !Number.isFinite(Number(usage.window.contextWindowTokens));
   const contextSession = currentAiSession();
   const localProviderAliases = new Set(["local", "localleaf-local"]);
+  const localModelActive = localProviderAliases.has(active.providerId);
   const providerChanged = Boolean(
     contextSession?.providerId
     && active.providerId
@@ -6734,6 +7559,22 @@ function aiModelChipMarkup() {
     && !(localProviderAliases.has(contextSession.providerId) && localProviderAliases.has(active.providerId))
   );
   const staleModel = Boolean(usage && (providerChanged || (contextSession?.modelId && contextSession.modelId !== active.modelId)));
+  const usageCapacity = !staleModel && Number(usage?.window?.contextWindowTokens) > 0
+    ? Number(usage.window.contextWindowTokens)
+    : null;
+  const activeCapacity = Number(active.contextWindow?.effectiveTokens ?? active.contextWindowTokens) > 0
+    ? Number(active.contextWindow?.effectiveTokens ?? active.contextWindowTokens)
+    : null;
+  const capacityTokens = usageCapacity || activeCapacity;
+  const unknownCapacity = !Number.isFinite(capacityTokens) || capacityTokens <= 0;
+  const capacityLabel = localModelActive
+    ? capacityTokens
+      ? `${active.contextWindow?.mode === "advanced_override" ? "Advanced" : "Automatic"} · ${formatCompactContextTokens(capacityTokens)}`
+      : "Automatic"
+    : "Provider managed";
+  const contextPolicyCopy = localModelActive
+    ? "LocalLeaf chooses a stable local window and confirms the capacity reported by the running model."
+    : "The provider manages this model's context window. LocalLeaf does not send a context-size override.";
   const query = local.aiModelSearch.trim().toLowerCase();
   const items = modelPickerItems().filter((item) => {
     if (!query) return true;
@@ -6766,7 +7607,7 @@ function aiModelChipMarkup() {
   const truncationReasons = (usage?.truncation?.reasons || []).map((reason) => String(reason).replaceAll("_", " "));
   return `
     <div class="ai-model-picker ${local.aiModelPickerOpen ? "open" : ""}">
-      <button class="ai-context-model-control" id="aiModelChip" type="button" aria-haspopup="dialog" aria-expanded="${local.aiModelPickerOpen ? "true" : "false"}" aria-controls="aiContextPopover" aria-describedby="aiContextButtonStatus">
+      <button class="ai-context-model-control" id="aiModelChip" type="button" aria-haspopup="dialog" aria-expanded="${local.aiModelPickerOpen ? "true" : "false"}" aria-controls="aiContextPopover" aria-describedby="aiContextButtonStatus" ${isGuestClient() ? "disabled title=\"The host manages models\"" : ""}>
         <span class="ai-context-ring ${unknownCapacity ? "unknown" : ""} ${level.key === "warning" ? "getting-full" : level.key === "danger" ? "nearly-full" : ""} ${local.aiContextUpdating ? "is-updating" : ""}" style="--context-percent:${percent ?? 0}" data-capacity="${unknownCapacity ? "unknown" : "known"}" data-level="${level.key}" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" pathLength="100"></circle><circle cx="8" cy="8" r="6" pathLength="100"></circle></svg></span>
         <span>${escapeHtml(active.modelName || active.providerName || "Connect model")}</span>
         <span class="ai-context-model-chevron" aria-hidden="true">${editorToolIcon("chevronDown")}</span>
@@ -6778,13 +7619,12 @@ function aiModelChipMarkup() {
           ${percent !== null ? `<div class="ai-context-progress ${level.key === "danger" ? "nearly-full" : ""}" data-level="${level.key}" style="--context-percent:${percent}"><span></span></div>` : ""}
           <dl class="ai-context-details">
             <dt>Last request</dt><dd>${escapeHtml(tokenLabel)}</dd>
-            <dt>Capacity</dt><dd>${unknownCapacity ? "Unknown" : escapeHtml(formatContextTokens(usage.window.contextWindowTokens))}</dd>
+            <dt>Capacity</dt><dd>${escapeHtml(capacityLabel)}</dd>
             <dt>Chat turns</dt><dd>${usage ? `${Number(usage.history?.includedTurns || 0)} / ${Number(usage.history?.availableTurns || 0)}` : "—"}</dd>
             <dt>Measurement</dt><dd>${usage ? (usage.status === "not_applicable" ? "Not applicable" : approximate ? "Estimated" : usage.usage?.source === "provider_reported" ? "Measured" : "Unavailable") : "—"}</dd>
           </dl>
           ${truncationReasons.length ? `<p>Truncated: ${escapeHtml(truncationReasons.join(", "))}.</p>` : ""}
-          <p>LocalLeaf rebuilds context each request. A new session clears recent chat, but project context is still included.</p>
-          ${unknownCapacity && usage && usage.status !== "not_applicable" ? `<button type="button" data-open-model-settings>Configure context window</button>` : ""}
+          <p>${escapeHtml(contextPolicyCopy)} LocalLeaf rebuilds project context for each request.</p>
           ${Number(percent || 0) >= 90 ? `<button type="button" data-ai-session-new ${local.aiSessions.length >= 30 ? "disabled title=\"Delete a session to create another\"" : ""}>${local.aiSessions.length >= 30 ? "Delete a session to create another" : "Start new session"}</button>` : ""}
           <div class="ai-context-model-list">
             <div class="ai-context-model-toolbar"><input id="aiModelSearch" value="${escapeHtml(local.aiModelSearch)}" placeholder="Search models" autocomplete="off" aria-label="Search models" /><button type="button" data-open-provider-dialog title="Connect provider" aria-label="Connect provider">${uiGlyph("plus")}</button><button type="button" data-open-model-settings title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button></div>
@@ -6819,25 +7659,6 @@ function aiSendButtonMarkup() {
   `;
 }
 
-function aiFormatToolbarMarkup() {
-  const tools = [
-    { action: "bold", label: "Bold", shortcut: "Ctrl/Cmd+B", keyshortcuts: "Control+B Meta+B", glyph: "<strong>B</strong>" },
-    { action: "italic", label: "Italic", shortcut: "Ctrl/Cmd+I", keyshortcuts: "Control+I Meta+I", glyph: "<em>I</em>" },
-    { action: "inlineCode", label: "Inline code", shortcut: "Ctrl/Cmd+E", keyshortcuts: "Control+E Meta+E", glyph: "<code>&lt;/&gt;</code>" },
-    { action: "codeBlock", label: "Code block", shortcut: "Ctrl/Cmd+Shift+K", keyshortcuts: "Control+Shift+K Meta+Shift+K", glyph: "<code>{ }</code>" },
-    { action: "unorderedList", label: "Bulleted list", shortcut: "Ctrl/Cmd+Shift+8", keyshortcuts: "Control+Shift+8 Meta+Shift+8", glyph: "<span>&bull;&nbsp;&mdash;</span>" },
-    { action: "orderedList", label: "Numbered list", shortcut: "Ctrl/Cmd+Shift+7", keyshortcuts: "Control+Shift+7 Meta+Shift+7", glyph: "<span>1.</span>" },
-    { action: "link", label: "Link", shortcut: "Ctrl/Cmd+K", keyshortcuts: "Control+K Meta+K", glyph: "<span class=\"ai-format-link-glyph\">&#8599;</span>" }
-  ];
-  return `
-    <div class="ai-format-toolbar" role="toolbar" aria-label="Format AI message with Markdown">
-      ${tools.map((tool) => `
-        <button type="button" data-ai-format="${tool.action}" title="${tool.label} (${tool.shortcut})" aria-label="${tool.label}" aria-keyshortcuts="${tool.keyshortcuts}">${tool.glyph}</button>
-      `).join("")}
-    </div>
-  `;
-}
-
 function aiSessionDeleteDialogMarkup() {
   const session = local.aiSessions.find((item) => item.id === local.aiSessionDeleteId);
   return `
@@ -6861,7 +7682,7 @@ function aiHelperPanelMarkup() {
         <div>
           <strong>AI Helper</strong>
         </div>
-        <button class="icon-button chat-tool" id="openAiSettings" title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button>
+        ${isGuestClient() ? "" : `<button class="icon-button chat-tool" id="openAiSettings" title="Manage models" aria-label="Manage models">${uiGlyph("settings")}</button>`}
       </div>
       ${aiSessionMenuMarkup()}
       <div class="ai-chat-wrap ${local.aiTranscriptSwitching ? "ai-transcript-switching" : ""}">
@@ -6873,7 +7694,6 @@ function aiHelperPanelMarkup() {
       </div>
       ${aiQueuedPromptStripMarkup()}
       <form class="ai-input-form" id="aiHelperForm">
-        ${aiFormatToolbarMarkup()}
         <textarea id="aiPrompt" rows="2" placeholder="Ask AI Helper..." aria-label="Message AI Helper" aria-describedby="aiComposerHint">${escapeHtml(local.aiPrompt)}</textarea>
         <span class="ai-composer-hint" id="aiComposerHint">Markdown supported. Enter sends; Shift+Enter adds a line.</span>
         <div class="ai-composer-footer">
@@ -6926,9 +7746,9 @@ function aiRunChangeMarkup(run) {
           <span class="diff-removed">-${stats.removed}</span>
         </button>
         <div class="ai-run-actions">
-          <button type="button" data-undo-ai-run="${escapeHtml(run.runId)}" data-run-group="${escapeHtml(run.id)}" ${canUndo ? "" : "disabled"}>Undo</button>
-          <button type="button" data-review-ai-run="${escapeHtml(run.runId)}" data-run-group="${escapeHtml(run.id)}" aria-label="Review this change and show its PDF location">Review</button>
-          <button type="button" data-toggle-ai-run="${escapeHtml(run.id)}" title="${expanded ? "Collapse run" : "Expand run"}" aria-label="${expanded ? "Collapse run" : "Expand run"}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(detailsId)}">${expanded ? "^" : "v"}</button>
+          <button type="button" class="ai-run-undo-action" data-undo-ai-run="${escapeHtml(run.runId)}" data-run-group="${escapeHtml(run.id)}" title="${canUndo ? "Undo applied changes" : "Nothing to undo"}" aria-label="Undo applied changes" ${canUndo ? "" : "disabled"}>${editorToolIcon("undo")}<span class="sr-only">Undo</span></button>
+          <button type="button" class="ai-run-review-action" data-review-ai-run="${escapeHtml(run.runId)}" data-run-group="${escapeHtml(run.id)}" aria-label="Review this change and show its PDF location">${editorToolIcon("review")}<span>Review</span></button>
+          <button type="button" class="ai-run-disclosure" data-toggle-ai-run="${escapeHtml(run.id)}" title="${expanded ? "Collapse run" : "Expand run"}" aria-label="${expanded ? "Collapse run" : "Expand run"}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(detailsId)}">${editorToolIcon("chevronDown")}<span class="sr-only">${expanded ? "Collapse run" : "Expand run"}</span></button>
         </div>
       </div>
       ${expanded ? `<div class="ai-run-files" id="${escapeHtml(detailsId)}">${run.proposals.map(aiHistoryCardMarkup).join("")}</div>` : ""}
@@ -6964,6 +7784,45 @@ function rightRailMarkup() {
   `;
 }
 
+function applyProjectMutationAccessUi() {
+  const shell = document.querySelector(".editor-shell");
+  if (!shell) return;
+  const canEdit = canMutateProject();
+  shell.classList.toggle("viewer-read-only", !canEdit);
+  shell.dataset.accessRole = effectiveSessionRole();
+  if (canEdit) return;
+
+  const mutationSelectors = [
+    "#saveButton", "#newFile", "#newFolder", "#uploadFile", "#renameFile", "#deleteFile",
+    "[data-editor-command]", "[data-style-value]", "#editorTableButton", "#editorReplaceInput",
+    "#replaceOne", "#replaceAll", "#aiPrompt", ".ai-send-button", "#openAiSettings", "#aiModelChip",
+    "[data-ai-session-new]", "[data-apply-ai-proposal]", "[data-reject-ai-proposal]",
+    "[data-revert-ai-proposal]", "[data-ai-quick]", "[data-open-provider-dialog]", "[data-open-model-settings]"
+  ];
+  document.querySelectorAll(mutationSelectors.join(",")).forEach((control) => {
+    if ("disabled" in control) control.disabled = true;
+    control.setAttribute("aria-disabled", "true");
+    control.title = "Viewer access is read only";
+  });
+  document.querySelectorAll('[contenteditable="true"]').forEach((element) => {
+    if (element.closest(".editor-shell")) element.setAttribute("contenteditable", "false");
+  });
+  document.querySelectorAll("[data-drag-path]").forEach((element) => {
+    element.draggable = false;
+    element.removeAttribute("draggable");
+  });
+  const fallback = document.querySelector(".editor-fallback-textarea");
+  if (fallback) {
+    fallback.readOnly = true;
+    fallback.setAttribute("aria-readonly", "true");
+  }
+  const aiForm = document.querySelector("#aiHelperForm");
+  aiForm?.setAttribute("aria-disabled", "true");
+  if (aiForm && !document.querySelector(".viewer-access-note")) {
+    aiForm.insertAdjacentHTML("beforebegin", `<p class="viewer-access-note" role="note"><strong>Viewer access</strong><span>Ask the host for Maintainer access to use AI editing.</span></p>`);
+  }
+}
+
 function refreshRightRailUi() {
   const rail = document.querySelector(".right-rail");
   if (!rail || route().view !== "editor") {
@@ -6977,6 +7836,7 @@ function refreshRightRailUi() {
   rail.outerHTML = rightRailMarkup();
   bindRightRailControls();
   bindChatForm();
+  applyProjectMutationAccessUi();
   const nextAiList = document.querySelector(".ai-chat-list");
   const nextChangesList = document.querySelector(".change-history-list");
   if (nextAiList) {
@@ -7067,33 +7927,6 @@ function autoGrowAiPrompt(input = document.querySelector("#aiPrompt")) {
   if (!input) return;
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, 148)}px`;
-}
-
-function applyAiPromptFormat(action) {
-  const input = document.querySelector("#aiPrompt");
-  const formatter = window.LocalLeafMarkdown?.formatSelection;
-  if (!input || typeof formatter !== "function") return;
-  const result = formatter(input.value, input.selectionStart, input.selectionEnd, action);
-  input.value = result.value;
-  local.aiPrompt = result.value;
-  const queued = findQueuedAiPrompt(local.aiEditingQueuedPromptId);
-  if (queued) queued.message = local.aiPrompt;
-  autoGrowAiPrompt(input);
-  updateAiSendButtonState();
-  input.focus({ preventScroll: true });
-  input.setSelectionRange(result.selectionStart, result.selectionEnd);
-}
-
-function aiPromptFormatShortcut(event) {
-  if (!(event.ctrlKey || event.metaKey) || event.altKey) return "";
-  const key = String(event.key || "").toLowerCase();
-  if (key === "b") return "bold";
-  if (key === "i") return "italic";
-  if (key === "e") return "inlineCode";
-  if (key === "k") return event.shiftKey ? "codeBlock" : "link";
-  if (event.shiftKey && event.code === "Digit8") return "unorderedList";
-  if (event.shiftKey && event.code === "Digit7") return "orderedList";
-  return "";
 }
 
 async function stopAiRun(sessionId = local.aiActiveRunSessionId) {
@@ -7228,6 +8061,7 @@ function commitQueuedPromptEdit() {
 }
 
 async function askAiHelper(message, options = {}) {
+  if (!requireProjectMutationAccess("use the AI Helper")) return;
   const prompt = String(message || local.aiPrompt || "").trim();
   if (!prompt) return;
   if (local.aiEditingQueuedPromptId && !options.steer) {
@@ -7397,6 +8231,7 @@ async function askAiHelper(message, options = {}) {
 }
 
 async function approveAiProposal(proposalId, options = {}) {
+  if (!requireProjectMutationAccess("apply AI edits")) return null;
   const proposal = findAiProposal(proposalId);
   if (!proposal) return;
   if (proposal.actionable === false) {
@@ -7476,6 +8311,7 @@ async function approveAiProposal(proposalId, options = {}) {
 }
 
 async function rejectAiProposal(proposalId) {
+  if (!requireProjectMutationAccess("manage AI edits")) return null;
   const proposal = findAiProposal(proposalId);
   if (proposal?.actionable === false) {
     showAppNotice("This historical proposal is no longer actionable after LocalLeaf restarted.", {
@@ -7917,6 +8753,7 @@ async function openSurvivingProjectFile() {
 }
 
 async function revertAiProposal(proposalId, options = {}) {
+  if (!requireProjectMutationAccess("revert AI edits")) return null;
   const proposal = findAiProposal(proposalId);
   if (!proposal) return null;
   if (proposal.actionable === false) {
@@ -7994,6 +8831,7 @@ async function undoAiRun(runKey) {
 }
 
 function bindRightRailControls() {
+  bindChatSessionActions();
   bindAiChatScrollState();
   if (local.rightRailTab === "ai" && local.aiForceScrollBottom) {
     requestAnimationFrame(() => {
@@ -8239,10 +9077,6 @@ function bindRightRailControls() {
       first.focus();
     }
   });
-  document.querySelectorAll("[data-ai-format]").forEach((button) => {
-    button.addEventListener("mousedown", (event) => event.preventDefault());
-    button.addEventListener("click", () => applyAiPromptFormat(button.dataset.aiFormat));
-  });
   document.querySelector("#aiPrompt")?.addEventListener("input", (event) => {
     local.aiPrompt = event.currentTarget.value;
     const queued = findQueuedAiPrompt(local.aiEditingQueuedPromptId);
@@ -8251,13 +9085,6 @@ function bindRightRailControls() {
     updateAiSendButtonState();
   });
   document.querySelector("#aiPrompt")?.addEventListener("keydown", (event) => {
-    const formatAction = aiPromptFormatShortcut(event);
-    if (formatAction) {
-      event.preventDefault();
-      event.stopPropagation();
-      applyAiPromptFormat(formatAction);
-      return;
-    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       askAiHelper();
@@ -8409,7 +9236,7 @@ function showExportModal() {
 async function selectProjectFile(filePath, options = {}) {
   const item = fileMeta(filePath);
   if (!item || (!isEditableFile(item) && !isImageAsset(item))) return false;
-  if (!await saveCurrentFile()) return false;
+  if (canMutateProject() && !await saveCurrentFile()) return false;
   if (options.isCurrent && !options.isCurrent()) return false;
   const editorContent = isEditableFile(item)
     ? (await api(`/api/file?path=${encodeURIComponent(filePath)}`)).content
@@ -8418,7 +9245,7 @@ async function selectProjectFile(filePath, options = {}) {
   local.selectedFile = filePath;
   local.selectedFolder = "";
   expandToFile(filePath);
-  local.saveStatus = "Saved";
+  local.saveStatus = canMutateProject() ? "Saved" : "Read only";
   if (isEditableFile(item)) {
     local.editorContent = editorContent;
     local.editorMode = readEditorModeForFile(filePath);
@@ -8442,6 +9269,7 @@ function editorView() {
   const selection = selectedFileState(file);
   const isCompiling = local.compileBusy || state.compile.status === "running";
   const canCompile = !isGuestClient();
+  const canEditProject = canMutateProject();
   const editorSurface = editorSurfaceMarkup(file, selection.selectedMeta);
   const preview = compiledPreviewMarkup();
   const hostBackButton = isGuestClient() ? "" : `
@@ -8459,7 +9287,7 @@ function editorView() {
               ${editorToolIcon("menu")}
             </button>
             ${editorMoreMenuMarkup(state)}
-            <button class="btn editor-save-button" id="saveButton" ${selection.canEditSelected ? "" : "disabled"}>
+            <button class="btn editor-save-button" id="saveButton" ${selection.canEditSelected && canEditProject ? "" : "disabled"} title="${canEditProject ? "Save current file" : "Viewer access is read only"}">
               <span class="save-glyph" aria-hidden="true"></span>
               <span>Save</span>
             </button>
@@ -8473,7 +9301,7 @@ function editorView() {
               <span class="compile-spinner"></span>
               <span>${isCompiling ? "Compiling..." : canCompile ? "Recompile" : "Host compiles"}</span>
             </button>
-            <button class="btn" id="exportButton" style="height:32px">Export</button>
+            <button class="btn" id="exportButton" style="height:32px" ${isGuestClient() ? "disabled title=\"Only the host can export this project\"" : ""}>Export</button>
           </div>
         </div>
         ${editorFormatToolbarMarkup()}
@@ -8490,17 +9318,18 @@ function editorView() {
               <button class="icon-button files-hide-button" id="hideFilesPanel" title="Hide files panel" aria-label="Hide files panel">${layoutGlyph("sidebar")}</button>
             </div>
             <div class="file-actions">
-              <button class="mini-button icon-mini-button" id="newFile" title="New file" aria-label="New file">${editorToolIcon("newFile")}</button>
-              <button class="mini-button icon-mini-button" id="newFolder" title="New folder" aria-label="New folder">${editorToolIcon("newFolder")}</button>
-              <button class="mini-button icon-mini-button" id="uploadFile" title="Upload file" aria-label="Upload file">${editorToolIcon("upload")}</button>
-              <button class="mini-button icon-mini-button" id="renameFile" title="Rename selected item" aria-label="Rename selected item">${editorToolIcon("rename")}</button>
-              <button class="mini-button icon-mini-button danger-mini" id="deleteFile" title="Delete selected item" aria-label="Delete selected item">${editorToolIcon("delete")}</button>
+              <button class="mini-button file-create-action" id="newFile" title="${canEditProject ? "New file" : "Viewer access is read only"}" aria-label="New file" ${canEditProject ? "" : "disabled"}>${editorToolIcon("newFile")}<span>New file</span></button>
+              <button class="mini-button file-create-action" id="newFolder" title="${canEditProject ? "New folder" : "Viewer access is read only"}" aria-label="New folder" ${canEditProject ? "" : "disabled"}>${editorToolIcon("newFolder")}<span>New folder</span></button>
+              <button class="mini-button icon-mini-button" id="uploadFile" title="${canEditProject ? "Upload file" : "Viewer access is read only"}" aria-label="Upload file" ${canEditProject ? "" : "disabled"}>${editorToolIcon("upload")}</button>
+              <button class="mini-button icon-mini-button" id="renameFile" title="${canEditProject ? "Rename selected item" : "Viewer access is read only"}" aria-label="Rename selected item" ${canEditProject ? "" : "disabled"}>${editorToolIcon("rename")}</button>
+              <button class="mini-button icon-mini-button danger-mini" id="deleteFile" title="${canEditProject ? "Delete selected item" : "Viewer access is read only"}" aria-label="Delete selected item" ${canEditProject ? "" : "disabled"}>${editorToolIcon("delete")}</button>
             </div>
           </div>
           <div class="file-search">
             <input id="fileSearch" value="${escapeHtml(local.fileFilter)}" placeholder="Search files" />
           </div>
           <div class="file-list tree-list">
+            ${treeCreateDraftMarkup()}
             ${renderProjectTree(state.project.files, file)}
           </div>
           <div class="sidebar-section-resizer" data-sidebar-section-resizer="files" title="Resize files and images"></div>
@@ -8546,7 +9375,7 @@ function editorView() {
         <footer class="log-dock">
           <div class="log-resizer" id="logResizer" title="Resize logs"></div>
           <div class="log-tabs">
-            <button class="active">Logs</button>
+            <button class="active">Compile log</button>
             ${compileLogSummaryMarkup(compileLogs)}
         </div>
         <div class="log-output">
@@ -8594,6 +9423,7 @@ function bindCommon() {
   document.querySelector("#goHome")?.addEventListener("click", () => setView("home"));
   document.querySelector("#railCollapse")?.addEventListener("click", () => {
     local.hostRailCollapsed = !local.hostRailCollapsed;
+    local.pendingHostRailMotion = local.hostRailCollapsed ? "collapsing" : "expanding";
     localStorage.setItem("localleaf.hostRailCollapsed", local.hostRailCollapsed ? "1" : "0");
     render();
   });
@@ -8601,7 +9431,10 @@ function bindCommon() {
   document.querySelector("#railSession")?.addEventListener("click", () => setView("session"));
   document.querySelector("#railRecent")?.addEventListener("click", () => {
     setView("home");
-    setTimeout(() => document.querySelector(".home-current-panel")?.scrollIntoView({ block: "start", behavior: "smooth" }), 0);
+    setTimeout(() => document.querySelector(".home-current-panel")?.scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth"
+    }), 0);
   });
   document.querySelector("#railTemplates")?.addEventListener("click", () => {
     showAppNotice("Templates are coming soon.", { title: "Templates", detail: "The starter project remains available through New Project." });
@@ -8614,6 +9447,7 @@ function bindCommon() {
 }
 
 function goBackHome() {
+  const previousView = route().view;
   closeCollab();
   local.joinRequestId = null;
   local.guestToken = "";
@@ -8624,6 +9458,9 @@ function goBackHome() {
   local.sessionEndedDetail = "Ask the host to start it again.";
   history.pushState({}, "", "/");
   local.view = "home";
+  local.pendingViewTransition = previousView !== "home"
+    ? { from: previousView, to: "home" }
+    : null;
   render();
 }
 
@@ -9174,16 +10011,409 @@ async function requestAnotherTunnelProvider() {
   }
 }
 
+function bindSessionTunnelProviderPicker() {
+  local.sessionProviderMenuAbortController?.abort();
+  local.sessionProviderMenuAbortController = null;
+
+  const picker = document.querySelector("[data-session-provider-picker]");
+  const trigger = picker?.querySelector("#sessionTunnelProvider");
+  const menu = picker?.querySelector("#sessionTunnelProviderMenu");
+  if (!picker || !trigger || !menu) return;
+
+  const options = () => [...menu.querySelectorAll("[data-session-tunnel-provider-option]")];
+  const setOpen = (open, { focusOption = false, restoreTrigger = false } = {}) => {
+    const nextOpen = Boolean(open && !trigger.disabled);
+    picker.classList.toggle("open", nextOpen);
+    trigger.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+    menu.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+    menu.inert = !nextOpen;
+    if (nextOpen && focusOption) {
+      const choices = options();
+      (choices.find((option) => option.getAttribute("aria-selected") === "true") || choices[0])?.focus();
+    } else if (!nextOpen && restoreTrigger) {
+      trigger.focus({ preventScroll: true });
+    }
+  };
+  const chooseProvider = (providerId) => {
+    const normalized = String(providerId || "");
+    if (normalized && !availableTunnelProviders().some((provider) => provider.id === normalized)) return;
+    local.sessionTunnelProviderOverrideId = normalized;
+    const selectedProvider = availableTunnelProviders().find((provider) => provider.id === normalized) || null;
+    const value = trigger.querySelector("#sessionTunnelProviderValue");
+    const meta = trigger.querySelector(".session-provider-trigger-copy small");
+    const hint = picker.parentElement?.querySelector(".session-provider-hint");
+    if (value) value.textContent = selectedProvider?.name || "Automatic";
+    if (meta) meta.textContent = selectedProvider ? "Session choice" : "Recommended";
+    if (hint) hint.textContent = sessionTunnelProviderHint(local.appState?.session, normalized);
+    options().forEach((option) => {
+      const selected = String(option.dataset.sessionTunnelProviderOption || "") === normalized;
+      option.classList.toggle("selected", selected);
+      option.setAttribute("aria-selected", selected ? "true" : "false");
+    });
+    setOpen(false, { restoreTrigger: true });
+  };
+
+  trigger.addEventListener("click", () => {
+    setOpen(trigger.getAttribute("aria-expanded") !== "true");
+  });
+  trigger.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End", "Escape"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Escape") {
+      setOpen(false, { restoreTrigger: true });
+      return;
+    }
+    setOpen(true);
+    const choices = options();
+    const selectedIndex = Math.max(0, choices.findIndex((option) => option.getAttribute("aria-selected") === "true"));
+    const targetIndex = event.key === "ArrowUp" || event.key === "End"
+      ? choices.length - 1
+      : event.key === "Home"
+        ? 0
+        : selectedIndex;
+    choices[targetIndex]?.focus();
+  });
+  options().forEach((option, optionIndex, choices) => {
+    option.addEventListener("click", () => chooseProvider(option.dataset.sessionTunnelProviderOption));
+    option.addEventListener("keydown", (event) => {
+      if (["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        chooseProvider(option.dataset.sessionTunnelProviderOption);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false, { restoreTrigger: true });
+        return;
+      }
+      if (event.key === "Tab") {
+        setOpen(false);
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? choices.length - 1
+          : (optionIndex + (event.key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
+      choices[nextIndex]?.focus();
+    });
+  });
+
+  const controller = new AbortController();
+  local.sessionProviderMenuAbortController = controller;
+  document.addEventListener("pointerdown", (event) => {
+    if (!picker.contains(event.target)) setOpen(false);
+  }, { signal: controller.signal });
+  picker.addEventListener("focusout", () => {
+    window.setTimeout(() => {
+      if (!picker.isConnected || !picker.contains(document.activeElement)) setOpen(false);
+    }, 0);
+  });
+}
+
+function refreshSessionGuestManagerUi() {
+  const current = document.querySelector("#sessionGuestManager");
+  if (!current || !local.appState?.session) return;
+  current.outerHTML = sessionGuestManagerMarkup(local.appState.session);
+  bindSessionGuestManager();
+}
+
+function updateSessionGuestInState(nextUser) {
+  if (!nextUser?.id || !Array.isArray(local.appState?.session?.users)) return;
+  const existing = local.appState.session.users.findIndex((user) => user.id === nextUser.id);
+  if (existing >= 0) local.appState.session.users.splice(existing, 1, { ...local.appState.session.users[existing], ...nextUser });
+  else local.appState.session.users.push(nextUser);
+}
+
+function setSessionGuestRowState(key, options = {}) {
+  if (options.busy === true) local.sessionGuestBusy[key] = true;
+  else if (options.busy === false) delete local.sessionGuestBusy[key];
+  if (options.error !== undefined) {
+    if (options.error) local.sessionGuestErrors[key] = String(options.error);
+    else delete local.sessionGuestErrors[key];
+  }
+  if (options.status !== undefined) local.sessionGuestStatus = String(options.status || "");
+  refreshSessionGuestManagerUi();
+}
+
+async function approveSessionGuest(requestId) {
+  const key = `pending:${requestId}`;
+  const role = sessionGuestRoleValue("pending", requestId, "viewer");
+  const request = local.appState?.session?.joinRequests?.find((item) => item.id === requestId);
+  setSessionGuestRowState(key, { busy: true, error: "", status: "" });
+  try {
+    const result = await api("/api/join/approve", { method: "POST", body: { requestId, role } });
+    if (request) request.status = "approved";
+    updateSessionGuestInState(result.user);
+    delete local.sessionGuestRoles[key];
+    setSessionGuestRowState(key, {
+      busy: false,
+      error: "",
+      status: `${request?.name || result.user?.name || "Guest"} joined as ${role === "maintainer" ? "Maintainer" : "Viewer"}.`
+    });
+  } catch (error) {
+    setSessionGuestRowState(key, { busy: false, error: error.message || "LocalLeaf could not approve this request." });
+  }
+}
+
+async function declineSessionGuest(requestId) {
+  const key = `pending:${requestId}`;
+  const request = local.appState?.session?.joinRequests?.find((item) => item.id === requestId);
+  setSessionGuestRowState(key, { busy: true, error: "", status: "" });
+  try {
+    await api("/api/join/deny", { method: "POST", body: { requestId } });
+    if (request) request.status = "denied";
+    delete local.sessionGuestRoles[key];
+    setSessionGuestRowState(key, {
+      busy: false,
+      error: "",
+      status: `${request?.name || "Guest"}'s request was declined.`
+    });
+  } catch (error) {
+    setSessionGuestRowState(key, { busy: false, error: error.message || "LocalLeaf could not decline this request." });
+  }
+}
+
+async function changeSessionGuestRole(userId, role, options = {}) {
+  const key = `guest:${userId}`;
+  const user = local.appState?.session?.users?.find((item) => item.id === userId);
+  if (!user || user.role === role) return;
+  setSessionGuestRowState(key, { busy: true, error: "", status: "" });
+  try {
+    const result = await api("/api/session/guest/role", { method: "POST", body: { userId, role } });
+    updateSessionGuestInState(result.user);
+    setSessionGuestRowState(key, {
+      busy: false,
+      error: "",
+      status: `${user.name}'s role is now ${role === "maintainer" ? "Maintainer" : "Viewer"}.`
+    });
+  } catch (error) {
+    setSessionGuestRowState(key, { busy: false, error: error.message || "LocalLeaf could not change this role." });
+  }
+  if (options.restoreFocus) {
+    window.setTimeout(() => {
+      document.querySelector(`[data-session-role-picker][data-role-context="guest"][data-role-id="${CSS.escape(userId)}"] .session-role-trigger`)?.focus({ preventScroll: true });
+    }, 0);
+  }
+}
+
+function bindSessionRolePickers() {
+  local.sessionGuestMenuAbortController?.abort();
+  const controller = new AbortController();
+  const { signal } = controller;
+  const pickers = [...document.querySelectorAll("[data-session-role-picker]")];
+  const closePicker = (picker, options = {}) => {
+    const trigger = picker.querySelector(".session-role-trigger");
+    const menu = picker.querySelector(".session-role-menu");
+    picker.classList.remove("is-open");
+    trigger?.setAttribute("aria-expanded", "false");
+    menu?.setAttribute("aria-hidden", "true");
+    if (menu) menu.inert = true;
+    if (options.restoreFocus) trigger?.focus({ preventScroll: true });
+  };
+  const openPicker = (picker, focus = "selected") => {
+    pickers.forEach((item) => {
+      if (item !== picker) closePicker(item);
+    });
+    const trigger = picker.querySelector(".session-role-trigger");
+    const menu = picker.querySelector(".session-role-menu");
+    picker.classList.add("is-open");
+    trigger?.setAttribute("aria-expanded", "true");
+    menu?.setAttribute("aria-hidden", "false");
+    if (menu) menu.inert = false;
+    const options = [...(menu?.querySelectorAll('[role="option"]:not(:disabled)') || [])];
+    const target = focus === "last"
+      ? options.at(-1)
+      : focus === "first"
+        ? options[0]
+        : options.find((item) => item.getAttribute("aria-selected") === "true") || options[0];
+    target?.focus({ preventScroll: true });
+  };
+
+  pickers.forEach((picker) => {
+    const trigger = picker.querySelector(".session-role-trigger");
+    const menu = picker.querySelector(".session-role-menu");
+    const options = [...(menu?.querySelectorAll('[role="option"]') || [])];
+    trigger?.addEventListener("click", () => {
+      if (picker.classList.contains("is-open")) closePicker(picker, { restoreFocus: true });
+      else openPicker(picker);
+    }, { signal });
+    trigger?.addEventListener("keydown", (event) => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Escape") closePicker(picker, { restoreFocus: true });
+      else openPicker(picker, ["ArrowUp", "End"].includes(event.key) ? "last" : "first");
+    }, { signal });
+    menu?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePicker(picker, { restoreFocus: true });
+        return;
+      }
+      if (event.key === "Tab") {
+        window.setTimeout(() => {
+          if (picker.isConnected && !picker.contains(document.activeElement)) closePicker(picker);
+        }, 0);
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const currentIndex = Math.max(0, options.indexOf(document.activeElement));
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? options.length - 1
+          : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[nextIndex]?.focus({ preventScroll: true });
+    }, { signal });
+    options.forEach((option) => {
+      option.addEventListener("click", () => {
+        const role = option.dataset.sessionRoleOption === "maintainer" ? "maintainer" : "viewer";
+        const context = picker.dataset.roleContext || "pending";
+        const id = picker.dataset.roleId || "";
+        if (context === "pending") {
+          local.sessionGuestRoles[`pending:${id}`] = role;
+          picker.dataset.roleValue = role;
+          trigger.querySelector("span:first-child").textContent = role === "maintainer" ? "Maintainer" : "Viewer";
+          trigger.setAttribute("aria-label", `${trigger.getAttribute("aria-label")?.split(":")[0] || "Guest role"}: ${role === "maintainer" ? "Maintainer" : "Viewer"}`);
+          options.forEach((item) => {
+            const selected = item.dataset.sessionRoleOption === role;
+            item.setAttribute("aria-selected", selected ? "true" : "false");
+            const check = item.querySelector(".session-role-check");
+            if (check) check.textContent = selected ? String.fromCharCode(10003) : "";
+          });
+          closePicker(picker, { restoreFocus: true });
+          return;
+        }
+        closePicker(picker, { restoreFocus: true });
+        void changeSessionGuestRole(id, role, { restoreFocus: true });
+      }, { signal });
+    });
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    pickers.forEach((picker) => {
+      if (picker.classList.contains("is-open") && !picker.contains(event.target)) closePicker(picker);
+    });
+  }, { signal });
+  local.sessionGuestMenuAbortController = controller;
+}
+
+function setGuestRemoveDialogBusy(modal, busy, message = "", type = "status") {
+  if (!modal) return;
+  modal.dataset.busy = busy ? "true" : "false";
+  const cancel = modal.querySelector("[data-cancel-guest-remove]");
+  const confirm = modal.querySelector("[data-confirm-guest-remove]");
+  if (cancel) cancel.disabled = busy;
+  if (confirm) {
+    confirm.disabled = busy;
+    confirm.textContent = busy ? "Removing..." : "Remove access";
+  }
+  const status = modal.querySelector(".guest-remove-status");
+  if (status) {
+    status.hidden = !message;
+    status.textContent = message;
+    status.setAttribute("role", type === "error" ? "alert" : "status");
+  }
+}
+
+function showGuestRemoveDialog(userId, returnFocus = document.activeElement) {
+  const user = local.appState?.session?.users?.find((item) => item.id === userId && item.role !== "host");
+  if (!user) return;
+  document.querySelector(".guest-remove-backdrop")?.remove();
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="guest-remove-backdrop" role="presentation" data-busy="false">
+      <section class="guest-remove-dialog" role="alertdialog" aria-modal="true" aria-labelledby="guestRemoveTitle" aria-describedby="guestRemoveDescription">
+        <div>
+          <p class="guest-remove-eyebrow">Guest access</p>
+          <h2 id="guestRemoveTitle">Remove ${escapeHtml(user.name)}?</h2>
+          <p id="guestRemoveDescription">They will leave this session immediately. Their invite token will stop working.</p>
+        </div>
+        <p class="guest-remove-status" role="status" aria-live="polite" hidden></p>
+        <div class="guest-remove-actions">
+          <button class="btn" type="button" data-cancel-guest-remove>Cancel</button>
+          <button class="btn btn-danger" type="button" data-confirm-guest-remove>Remove access</button>
+        </div>
+      </section>
+    </div>
+  `);
+  const modal = document.querySelector(".guest-remove-backdrop");
+  installModalFocusManagement(modal, returnFocus);
+  const close = () => {
+    if (modal?.dataset.busy === "true") return;
+    removeModal(modal, { fallbackFocusSelector: `[data-session-guest-remove="${CSS.escape(userId)}"]` });
+  };
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) close();
+  });
+  modal?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    close();
+  });
+  modal?.querySelector("[data-cancel-guest-remove]")?.addEventListener("click", close);
+  modal?.querySelector("[data-confirm-guest-remove]")?.addEventListener("click", async () => {
+    const key = `guest:${userId}`;
+    setGuestRemoveDialogBusy(modal, true, "Removing access...");
+    local.sessionGuestBusy[key] = true;
+    delete local.sessionGuestErrors[key];
+    refreshSessionGuestManagerUi();
+    try {
+      await api("/api/session/guest/remove", { method: "POST", body: { userId } });
+      local.appState.session.users = local.appState.session.users.filter((item) => item.id !== userId);
+      delete local.sessionGuestBusy[key];
+      delete local.sessionGuestErrors[key];
+      local.sessionGuestStatus = `${user.name}'s access was removed.`;
+      removeModal(modal, { restoreFocus: false });
+      refreshSessionGuestManagerUi();
+      window.setTimeout(() => document.querySelector("#sessionGuestsHeading")?.focus({ preventScroll: true }), 0);
+    } catch (error) {
+      delete local.sessionGuestBusy[key];
+      local.sessionGuestErrors[key] = error.message || "LocalLeaf could not remove this guest.";
+      setGuestRemoveDialogBusy(modal, false, local.sessionGuestErrors[key], "error");
+      refreshSessionGuestManagerUi();
+      modal?.querySelector("[data-confirm-guest-remove]")?.focus({ preventScroll: true });
+    }
+  });
+  window.setTimeout(() => modal?.querySelector("[data-cancel-guest-remove]")?.focus({ preventScroll: true }), 0);
+}
+
+function bindSessionGuestManager() {
+  if (!document.querySelector("#sessionGuestManager")) return;
+  bindSessionRolePickers();
+  document.querySelectorAll("[data-session-guest-approve]").forEach((button) => {
+    button.addEventListener("click", () => void approveSessionGuest(button.dataset.sessionGuestApprove));
+  });
+  document.querySelectorAll("[data-session-guest-decline]").forEach((button) => {
+    button.addEventListener("click", () => void declineSessionGuest(button.dataset.sessionGuestDecline));
+  });
+  document.querySelectorAll("[data-session-guest-remove]").forEach((button) => {
+    button.addEventListener("click", () => showGuestRemoveDialog(button.dataset.sessionGuestRemove, button));
+  });
+}
+
+function focusSessionGuestManager() {
+  if (!local.sessionGuestFocusPending) return;
+  local.sessionGuestFocusPending = false;
+  window.requestAnimationFrame(() => {
+    const heading = document.querySelector("#sessionGuestsHeading");
+    if (!heading) return;
+    heading.focus({ preventScroll: true });
+    heading.scrollIntoView({
+      block: "center",
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth"
+    });
+  });
+}
+
 function bindSession() {
+  bindSessionTunnelProviderPicker();
+  bindSessionGuestManager();
   document.querySelector("#copyInvite")?.addEventListener("click", (event) => copyInvite(event.currentTarget));
   document.querySelectorAll("[data-start-session]").forEach((button) => {
     button.addEventListener("click", startSession);
-  });
-  document.querySelector("#sessionTunnelProvider")?.addEventListener("change", (event) => {
-    const providerId = String(event.currentTarget.value || "");
-    if (providerId && !availableTunnelProviders().some((provider) => provider.id === providerId)) return;
-    local.sessionTunnelProviderOverrideId = providerId;
-    render();
   });
   document.querySelector("#refreshInviteLink")?.addEventListener("click", requestAnotherTunnelProvider);
   document.querySelector("#openEditorFromSession")?.addEventListener("click", async () => {
@@ -9193,24 +10423,12 @@ function bindSession() {
   document.querySelector("#stopSession")?.addEventListener("click", stopSession);
   document.querySelector("#backHome")?.addEventListener("click", () => setView("home"));
   document.querySelector("#goSession")?.addEventListener("click", () => setView("session"));
-  document.querySelectorAll(".approve-request").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await api("/api/join/approve", { method: "POST", body: { requestId: button.dataset.id, role: "editor" } });
-      await loadState();
-      render();
-    });
-  });
-  document.querySelectorAll(".deny-request").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await api("/api/join/deny", { method: "POST", body: { requestId: button.dataset.id } });
-      await loadState();
-      render();
-    });
-  });
+  focusSessionGuestManager();
 }
 
 function markEditorChanged(source) {
   if (local.applyingRemoteEdit) return;
+  if (!canMutateProject()) return;
   local.editorContent = typeof source === "string" ? source : source?.value || "";
   local.saveStatus = "Unsaved";
   const status = document.querySelector(".editor-subtitle");
@@ -9274,6 +10492,7 @@ function pathAfterDirectoryMove(pathValue, from, to) {
 }
 
 async function moveTreeItemToFolder(sourcePath, targetFolder) {
+  if (!requireProjectMutationAccess("move project items")) return;
   if (!canDropTreeItem(sourcePath, targetFolder)) return;
   const source = treeItem(sourcePath);
   const nextPath = joinProjectPath(targetFolder, pathBasename(source.path));
@@ -9351,6 +10570,7 @@ function downloadTreeItem(pathValue) {
 }
 
 async function copyTreeItemToFolder(sourcePath, targetFolder) {
+  if (!requireProjectMutationAccess("copy project items")) return;
   if (!canPasteTreeItem(sourcePath, targetFolder)) return;
   const source = treeItem(sourcePath);
   const nextPath = uniqueCopyPath(sourcePath, targetFolder);
@@ -9385,6 +10605,7 @@ async function handleTreeContextMenuAction(action) {
   const pathValue = menu.path;
   const targetFolder = menu.targetFolder || "";
   closeTreeContextMenu();
+  if (action !== "download" && !requireProjectMutationAccess("change project files")) return;
 
   if (action === "rename") {
     if (pathValue) startInlineRename(pathValue);
@@ -9423,7 +10644,7 @@ async function handleTreeContextMenuAction(action) {
         local.selectedFolder = "";
         local.selectedFile = entry?.path || pathValue;
       }
-      await deleteSelectedFile();
+      await deleteSelectedFile(document.querySelector("#deleteFile"));
     }
     return;
   }
@@ -9912,6 +11133,7 @@ function mountVisualRawEditors(host, getText, handleInput, documentNode) {
       parent: mount,
       value: source,
       filePath: local.selectedFile,
+      readOnly: !canMutateProject(),
       suggestions: local.editorSuggestions || {},
       visibleLineBreaks: false,
       onSearch: openEditorSearchPanel,
@@ -9987,7 +11209,7 @@ function mountCodeEditor() {
   const host = document.querySelector("#editorText.editor-code-mount");
   if (!host) return;
   if (!window.LocalLeafEditor) {
-    host.innerHTML = `<textarea class="editor-textarea editor-fallback-textarea" spellcheck="false">${escapeHtml(local.editorContent)}</textarea>`;
+    host.innerHTML = `<textarea class="editor-textarea editor-fallback-textarea" spellcheck="false" ${canMutateProject() ? "" : "readonly aria-readonly=\"true\""}>${escapeHtml(local.editorContent)}</textarea>`;
     return;
   }
   if (local.codeEditor?.host === host) return;
@@ -9997,6 +11219,7 @@ function mountCodeEditor() {
     value: local.editorContent,
     filePath: local.selectedFile,
     mode: "code",
+    readOnly: !canMutateProject(),
     diagnostics: compileDiagnosticsForFile(local.selectedFile),
     suggestions: local.editorSuggestions || {},
     onChange: (text) => markEditorChanged(text),
@@ -10021,6 +11244,12 @@ function mountVisualEditor() {
   if (local.visualEditor?.host === host) return;
   destroyCodeEditor();
   const documentNode = host.querySelector("#visualEditorDocument");
+  if (!canMutateProject()) {
+    documentNode?.querySelectorAll('[contenteditable="true"]').forEach((element) => element.setAttribute("contenteditable", "false"));
+    documentNode?.querySelectorAll("input, textarea, select, button").forEach((element) => {
+      element.disabled = true;
+    });
+  }
   const getText = () => visualDomToLatex(documentNode);
   const handleInput = (event) => {
     convertLatestTypedMath(event?.target);
@@ -10643,6 +11872,7 @@ function runEditorSearch(direction = "next") {
 }
 
 function runEditorReplace(all = false) {
+  if (!requireProjectMutationAccess("replace project text")) return;
   if (!local.searchQuery) return;
   if (local.searchScope === "project") {
     if (!all) {
@@ -10677,6 +11907,7 @@ function runEditorReplace(all = false) {
 }
 
 async function replaceAllProjectMatches() {
+  if (!requireProjectMutationAccess("replace project text")) return;
   const query = local.searchQuery.trim();
   if (!query) return;
   const estimated = local.searchResults.length;
@@ -10727,14 +11958,19 @@ function refreshEditorToolbarPanels() {
   const topbar = document.querySelector(".editor-topbar");
   if (!topbar) return;
   syncEditorModeUi();
-  document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
+  const searchToggle = document.querySelector("#editorSearchToggle");
+  searchToggle?.classList.toggle("active", local.searchOpen);
+  searchToggle?.setAttribute("aria-expanded", local.searchOpen ? "true" : "false");
+  document.querySelector("#editorSearchLauncher")?.classList.toggle("is-open", local.searchOpen);
   document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
   const styleButton = document.querySelector("#editorStyleButton");
   styleButton?.classList.toggle("active", local.editorStyleMenuOpen);
   styleButton?.setAttribute("aria-expanded", local.editorStyleMenuOpen ? "true" : "false");
   const styleWrap = document.querySelector(".editor-style-menu-wrap");
-  styleWrap?.querySelector(".editor-style-menu")?.remove();
-  if (local.editorStyleMenuOpen) styleWrap?.insertAdjacentHTML("beforeend", editorStyleMenuMarkup());
+  styleWrap?.classList.toggle("open", local.editorStyleMenuOpen);
+  const styleMenu = styleWrap?.querySelector(".editor-style-menu");
+  styleMenu?.setAttribute("aria-hidden", local.editorStyleMenuOpen ? "false" : "true");
+  if (styleMenu) styleMenu.inert = !local.editorStyleMenuOpen;
   topbar.querySelector(".editor-search-popover")?.remove();
   topbar.querySelector(".editor-table-popover")?.remove();
   topbar.insertAdjacentHTML("beforeend", editorSearchPanelMarkup() + tablePickerMarkup());
@@ -10742,6 +11978,7 @@ function refreshEditorToolbarPanels() {
   positionToolbarPopover(".editor-table-popover", "#editorTableButton", "start");
   bindEditorStyleMenu();
   bindEditorToolbarPanels();
+  applyProjectMutationAccessUi();
 }
 
 function positionToolbarPopover(popoverSelector, anchorSelector, align = "start") {
@@ -10779,6 +12016,7 @@ function visualInsertionTarget(documentNode) {
 }
 
 function insertVisualTable(rows = 2, cols = 2) {
+  if (!requireProjectMutationAccess("format project text")) return;
   const documentNode = document.querySelector("#visualEditorDocument");
   if (!documentNode) return;
   const rowData = Array.from({ length: rows }, () => Array.from({ length: cols }, () => ""));
@@ -10800,6 +12038,7 @@ function insertVisualTable(rows = 2, cols = 2) {
 }
 
 function insertVisualFigure() {
+  if (!requireProjectMutationAccess("format project text")) return;
   const documentNode = document.querySelector("#visualEditorDocument");
   if (!documentNode) return;
   const blockHtml = visualBlockMarkup({
@@ -10817,6 +12056,7 @@ function insertVisualFigure() {
 }
 
 function insertVisualMathBlock(text = "x") {
+  if (!requireProjectMutationAccess("format project text")) return;
   const documentNode = document.querySelector("#visualEditorDocument");
   if (!documentNode) return;
   const blockHtml = visualBlockMarkup({
@@ -10981,6 +12221,8 @@ async function pollJoinStatus() {
   clearRemoteReconnectNotice();
   if (status.status === "approved") {
     local.guestToken = status.token;
+    local.userId = status.userId || "";
+    sessionStorage.setItem("localleaf.guestToken", status.token);
     await loadState();
     local.selectedFile = local.appState.project.mainFile;
     await loadSelectedFile();
@@ -10989,6 +12231,10 @@ async function pollJoinStatus() {
   }
   if (status.status === "denied") {
     app.innerHTML = endedView();
+    return;
+  }
+  if (status.status === "removed") {
+    handleAccessRevoked("The host removed your access.", status.userId || "");
     return;
   }
   setTimeout(pollJoinStatus, 1200);
@@ -11026,7 +12272,6 @@ function bindEditor() {
   document.querySelector("#hideChatRail")?.addEventListener("click", () => setRightRailVisible(false));
   document.querySelector("#showChatRail")?.addEventListener("click", () => setRightRailVisible(true));
   document.querySelector("#showChatRailInline")?.addEventListener("click", () => setRightRailVisible(true));
-  document.querySelector("#shareInviteFromChat")?.addEventListener("click", (event) => copyInvite(event.currentTarget));
   document.querySelector("#sidebarResizer")?.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     local.resizingSidebar = true;
@@ -11058,6 +12303,7 @@ function bindEditor() {
   bindEditorToolbar();
   bindRightRailControls();
   mountActiveEditor();
+  applyProjectMutationAccessUi();
   bindPdfPreviewControls();
   bindPdfWheelZoom();
   bindPdfPreviewInteractions();
@@ -11147,15 +12393,47 @@ function bindSidebarControls() {
   bindClick("#newFolder", createFolder);
   bindClick("#uploadFile", uploadProjectFile);
   bindClick("#renameFile", renameSelectedFile);
-  bindClick("#deleteFile", deleteSelectedFile);
+  const deleteButton = document.querySelector("#deleteFile");
+  if (deleteButton) {
+    deleteButton.onclick = (event) => {
+      event.preventDefault();
+      deleteSelectedFile(event.currentTarget);
+    };
+  }
   bindClick("#hideFilesPanel", () => setSidebarVisible(false));
   bindFileTreeInteractions();
   bindTreeContextMenu();
 }
 
 function bindFileTreeInteractions() {
+  const canEditProject = canMutateProject();
+  const createDraft = document.querySelector(".tree-create-draft");
+  if (createDraft) {
+    const input = createDraft.querySelector(".tree-create-input");
+    createDraft.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await commitTreeCreateDraft(input);
+    });
+    createDraft.querySelector("[data-tree-create-cancel]")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      cancelTreeCreateDraft();
+    });
+    input?.addEventListener("input", () => {
+      if (!local.treeCreateDraft) return;
+      local.treeCreateDraft.name = input.value;
+      local.treeCreateDraft.error = "";
+      createDraft.querySelector(".tree-create-error")?.remove();
+      input.removeAttribute("aria-invalid");
+    });
+    input?.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      cancelTreeCreateDraft();
+    });
+  }
   document.querySelectorAll(".file-button").forEach((button) => {
     const requestRename = (event) => {
+      if (!canEditProject) return;
       if (event.target?.closest?.(".tree-rename-wrap")) return;
       if (button.dataset.selectable !== "1") return;
       event.preventDefault();
@@ -11172,7 +12450,7 @@ function bindFileTreeInteractions() {
     button.addEventListener("click", async (event) => {
       if (event.target?.closest?.(".tree-rename-wrap")) return;
       if (button.dataset.selectable !== "1") return;
-      if (event.detail > 1) {
+      if (event.detail > 1 && canEditProject) {
         startInlineRename(button.dataset.file);
         return;
       }
@@ -11181,6 +12459,7 @@ function bindFileTreeInteractions() {
   });
   document.querySelectorAll(".folder-toggle").forEach((button) => {
     const requestRename = (event) => {
+      if (!canEditProject) return;
       if (event.target.closest?.(".tree-rename-wrap")) return;
       event.preventDefault();
       event.stopPropagation();
@@ -11196,7 +12475,7 @@ function bindFileTreeInteractions() {
     button.addEventListener("click", (event) => {
       if (event.target.closest?.(".tree-rename-wrap")) return;
       const folder = button.dataset.folder;
-      if (event.detail > 1) {
+      if (event.detail > 1 && canEditProject) {
         startInlineRename(folder);
         return;
       }
@@ -11207,7 +12486,7 @@ function bindFileTreeInteractions() {
     });
   });
   document.querySelector(".file-list")?.addEventListener("contextmenu", (event) => {
-    if (event.target.closest?.(".file-button, .tree-folder-row, .tree-rename-wrap")) return;
+    if (event.target.closest?.(".file-button, .tree-folder-row, .tree-rename-wrap, .tree-create-draft")) return;
     showTreeContextMenu(event, "");
   });
   document.querySelector(".image-section-toggle")?.addEventListener("click", () => {
@@ -11237,6 +12516,12 @@ function bindFileTreeInteractions() {
   document.querySelectorAll(".tree-rename-input").forEach((input) => {
     input.addEventListener("click", (event) => event.stopPropagation());
     input.addEventListener("mousedown", (event) => event.stopPropagation());
+    input.addEventListener("input", () => {
+      local.renameError = "";
+      input.removeAttribute("aria-invalid");
+      input.removeAttribute("aria-describedby");
+      input.closest(".tree-rename-wrap")?.querySelector(".tree-rename-error")?.remove();
+    });
     input.closest(".tree-rename-wrap")?.addEventListener("mousedown", (event) => event.stopPropagation());
     input.closest(".tree-rename-wrap")?.addEventListener("click", (event) => event.stopPropagation());
     input.addEventListener("dragstart", (event) => event.stopPropagation());
@@ -11250,11 +12535,15 @@ function bindFileTreeInteractions() {
         cancelInlineRename();
       }
     });
-    input.addEventListener("blur", () => {
-      setTimeout(() => {
-        if (document.activeElement?.classList?.contains("tree-rename-input")) return;
-        commitInlineRename(input);
-      }, 0);
+    input.closest(".tree-rename-wrap")?.querySelector("[data-tree-rename-confirm]")?.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await commitInlineRename(input);
+    });
+    input.closest(".tree-rename-wrap")?.querySelector("[data-tree-rename-cancel]")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelInlineRename();
     });
   });
   bindTreeDragAndDrop();
@@ -11271,6 +12560,13 @@ function bindTreeContextMenu() {
 }
 
 function bindTreeDragAndDrop() {
+  if (!canMutateProject()) {
+    document.querySelectorAll("[data-drag-path]").forEach((item) => {
+      item.draggable = false;
+      item.removeAttribute("draggable");
+    });
+    return;
+  }
   document.querySelectorAll("[data-drag-path]").forEach((item) => {
     item.addEventListener("dragstart", (event) => {
       local.draggedTreePath = item.dataset.dragPath || "";
@@ -11330,12 +12626,29 @@ function bindTreeDragAndDrop() {
   });
 }
 
+function setEditorStyleMenuOpen(open, { focusOption = "", restoreTrigger = false } = {}) {
+  local.editorStyleMenuOpen = Boolean(open);
+  if (local.editorStyleMenuOpen) {
+    local.searchOpen = false;
+    local.tablePickerOpen = false;
+  }
+  refreshEditorToolbarPanels();
+  const trigger = document.querySelector("#editorStyleButton");
+  const options = [...document.querySelectorAll(".editor-style-menu [role='menuitem']")];
+  if (local.editorStyleMenuOpen && focusOption) {
+    (focusOption === "last" ? options.at(-1) : options[0])?.focus({ preventScroll: true });
+  } else if (!local.editorStyleMenuOpen && restoreTrigger) {
+    trigger?.focus({ preventScroll: true });
+  }
+}
+
 function bindEditorToolbar() {
   document.querySelectorAll("[data-editor-mode]").forEach((button) => {
     button.addEventListener("click", () => setEditorMode(button.dataset.editorMode));
   });
   document.querySelectorAll("[data-editor-command]").forEach((button) => {
     button.addEventListener("click", () => {
+      if (!requireProjectMutationAccess("format project text")) return;
       const command = button.dataset.editorCommand;
       if (command === "table" && local.visualEditor) {
         local.visualEditor.exec(command);
@@ -11345,33 +12658,95 @@ function bindEditorToolbar() {
       else local.visualEditor?.exec(command);
     });
   });
-    document.querySelector("#editorSearchToggle")?.addEventListener("click", () => {
-      if (local.searchOpen) closeEditorSearchPanel();
+  const quickSearchLauncher = document.querySelector("#editorSearchLauncher");
+  const quickSearchSurface = quickSearchLauncher?.querySelector(".editor-search-launcher-surface");
+  const quickSearchInput = document.querySelector("#editorQuickSearchInput");
+  quickSearchSurface?.addEventListener("click", (event) => {
+    if (event.target.closest("button, input")) return;
+    quickSearchInput?.focus();
+  });
+  quickSearchInput?.addEventListener("input", (event) => {
+    setEditorSearchQuery(event.currentTarget.value);
+  });
+  quickSearchInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (local.searchOpen) runEditorSearch(event.shiftKey ? "prev" : "next");
       else openEditorSearchPanel();
-    });
-    document.querySelector("#editorStyleButton")?.addEventListener("click", (event) => {
+    } else if (event.key === "Escape") {
+      event.preventDefault();
       event.stopPropagation();
-      local.editorStyleMenuOpen = !local.editorStyleMenuOpen;
-      local.searchOpen = false;
-      local.tablePickerOpen = false;
-      refreshEditorToolbarPanels();
-    });
-    bindEditorStyleMenu();
-    document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
-    document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
+      if (local.searchOpen) closeEditorSearchPanel();
+      else {
+        quickSearchInput.blur();
+        local.codeEditor?.focus?.();
+      }
+    }
+  });
+  document.querySelector("#editorSearchToggle")?.addEventListener("click", () => {
+    if (local.searchOpen) closeEditorSearchPanel();
+    else openEditorSearchPanel();
+  });
+  document.querySelector("#editorStyleButton")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const opening = !local.editorStyleMenuOpen;
+    setEditorStyleMenuOpen(opening, { focusOption: opening && event.detail === 0 ? "first" : "" });
+  });
+  bindEditorStyleMenu();
+  document.querySelector("#editorSearchToggle")?.classList.toggle("active", local.searchOpen);
+  document.querySelector("#editorSearchToggle")?.setAttribute("aria-expanded", local.searchOpen ? "true" : "false");
+  quickSearchLauncher?.classList.toggle("is-open", local.searchOpen);
+  document.querySelector("#editorTableButton")?.classList.toggle("active", local.tablePickerOpen);
   positionToolbarPopover(".editor-search-popover", "#editorSearchToggle", "center");
   positionToolbarPopover(".editor-table-popover", "#editorTableButton", "start");
-    bindEditorToolbarPanels();
-  }
+  bindEditorToolbarPanels();
+}
 
 function bindEditorStyleMenu() {
-  document.querySelectorAll("[data-style-value]").forEach((button) => {
+  const trigger = document.querySelector("#editorStyleButton");
+  if (trigger && trigger.dataset.styleKeyboardBound !== "true") {
+    trigger.dataset.styleKeyboardBound = "true";
+    trigger.addEventListener("keydown", (event) => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Escape") {
+        setEditorStyleMenuOpen(false, { restoreTrigger: true });
+        return;
+      }
+      const focusOption = event.key === "ArrowUp" || event.key === "End" ? "last" : "first";
+      setEditorStyleMenuOpen(true, { focusOption });
+    });
+  }
+  const options = [...document.querySelectorAll("[data-style-value]")];
+  options.forEach((button, index) => {
+    if (button.dataset.styleBound === "true") return;
+    button.dataset.styleBound = "true";
     button.addEventListener("click", () => {
+      if (!requireProjectMutationAccess("format project text")) return;
       const value = button.dataset.styleValue || "normal";
       if (local.codeEditor) local.codeEditor.exec("style", value);
       else local.visualEditor?.exec("style", value);
-      local.editorStyleMenuOpen = false;
-      refreshEditorToolbarPanels();
+      setEditorStyleMenuOpen(false, { restoreTrigger: true });
+    });
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setEditorStyleMenuOpen(false, { restoreTrigger: true });
+        return;
+      }
+      if (event.key === "Tab") {
+        window.setTimeout(() => setEditorStyleMenuOpen(false), 0);
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? options.length - 1
+          : (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[nextIndex]?.focus({ preventScroll: true });
     });
   });
 }
@@ -11380,12 +12755,7 @@ function bindEditorToolbarPanels() {
   const searchInput = document.querySelector("#editorSearchInput");
   const replaceInput = document.querySelector("#editorReplaceInput");
   searchInput?.addEventListener("input", (event) => {
-    local.searchQuery = event.target.value;
-    local.visualSearchIndex = 0;
-    local.searchResultIndex = -1;
-    local.searchStatus = "";
-    if (local.searchScope === "project") scheduleProjectSearch();
-    else updateSearchPanelDynamicState();
+    setEditorSearchQuery(event.target.value);
   });
   searchInput?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -11505,15 +12875,35 @@ function setRightRailVisible(visible) {
 function applyEditorLayoutState() {
   const shell = document.querySelector(".editor-shell");
   if (!shell) return;
+  const wasCollapsed = {
+    sidebar: shell.classList.contains("sidebar-collapsed"),
+    source: shell.classList.contains("source-collapsed"),
+    preview: shell.classList.contains("preview-collapsed"),
+    rightRail: shell.classList.contains("right-rail-collapsed"),
+    logs: shell.classList.contains("logs-hidden")
+  };
   shell.classList.toggle("sidebar-collapsed", !local.sidebarVisible);
   shell.classList.toggle("source-collapsed", !local.sourcePaneVisible);
   shell.classList.toggle("preview-collapsed", !local.previewPaneVisible);
   shell.classList.toggle("right-rail-collapsed", !local.rightRailVisible);
   shell.classList.toggle("logs-hidden", !local.logsVisible);
+  if (wasCollapsed.sidebar && local.sidebarVisible) playEditorPaneEnter(shell, "sidebar-opening");
+  if (wasCollapsed.source && local.sourcePaneVisible) playEditorPaneEnter(shell, "source-opening");
+  if (wasCollapsed.preview && local.previewPaneVisible) playEditorPaneEnter(shell, "preview-opening");
+  if (wasCollapsed.rightRail && local.rightRailVisible) playEditorPaneEnter(shell, "right-rail-opening");
+  if (wasCollapsed.logs && local.logsVisible) playEditorPaneEnter(shell, "logs-opening");
   applySidebarSectionStyles();
   document.querySelector("#toggleSourcePane")?.classList.toggle("active", local.sourcePaneVisible);
   document.querySelector("#togglePreviewPane")?.classList.toggle("active", local.previewPaneVisible);
   document.querySelector("#toggleLogs")?.classList.toggle("active", local.logsVisible);
+}
+
+function playEditorPaneEnter(shell, className) {
+  if (!shell || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+  shell.classList.add(className);
+  window.setTimeout(() => {
+    if (shell.isConnected) shell.classList.remove(className);
+  }, 280);
 }
 
 function updateSidebarUi() {
@@ -11522,7 +12912,7 @@ function updateSidebarUi() {
   const textFiles = state.project.files.filter((item) => item.type === "text");
   const fileList = document.querySelector(".file-list");
   if (fileList) {
-    fileList.innerHTML = renderProjectTree(state.project.files, file);
+    fileList.innerHTML = `${treeCreateDraftMarkup()}${renderProjectTree(state.project.files, file)}`;
   }
   const imagePanel = document.querySelector(".sidebar-images-panel");
   if (imagePanel) {
@@ -11574,7 +12964,7 @@ function updateEditorSourceUi() {
     }
 
   const saveButton = document.querySelector("#saveButton");
-  if (saveButton) saveButton.disabled = !selection.canEditSelected;
+  if (saveButton) saveButton.disabled = !selection.canEditSelected || !canMutateProject();
   const mainButton = document.querySelector("#setMainFile");
   if (mainButton) mainButton.disabled = !selection.canSetMain;
   const status = document.querySelector(".editor-subtitle");
@@ -11582,6 +12972,7 @@ function updateEditorSourceUi() {
 
   bindSourceControls();
   updateEditorDiagnostics();
+  applyProjectMutationAccessUi();
 }
 
 function updateChatPanel() {
@@ -11589,14 +12980,15 @@ function updateChatPanel() {
   if (!list || !local.appState) return;
   list.innerHTML = local.appState.chat.length
     ? local.appState.chat.map(chatMessageMarkup).join("")
-    : `<div class="chat-empty">No messages yet.</div>`;
+    : chatEmptyMarkup();
   settleEditorUi();
 }
 
 function updateUsersPresenceUi() {
   const list = document.querySelector(".users-list");
   if (!list || !local.appState) return;
-  list.innerHTML = local.appState.session.users.map((user) => `
+  const users = Array.isArray(local.appState.session.users) ? local.appState.session.users : [];
+  list.innerHTML = users.map((user) => `
     <div class="user-row">
       <div class="avatar">${escapeHtml(user.name[0] || "?")}</div>
       <div>
@@ -11606,6 +12998,11 @@ function updateUsersPresenceUi() {
       <span class="online-dot ${user.online ? "" : "offline"}" title="${user.online ? "Online" : "Offline"}"></span>
     </div>
   `).join("");
+  const summary = document.querySelector(".chat-users-head span");
+  if (summary) {
+    const onlineCount = users.filter((user) => user.online !== false).length;
+    summary.textContent = `${users.length} participant${users.length === 1 ? "" : "s"} · ${onlineCount} online`;
+  }
 }
 
 function updateCompileUi(options = {}) {
@@ -11842,9 +13239,11 @@ function settleEditorUi() {
     local.focusFileSearch = false;
   }
   focusRenameInput();
+  focusTreeCreateDraft();
 }
 
 async function saveCurrentFile() {
+  if (!canMutateProject()) return true;
   if (!local.selectedFile) return true;
   if (!isEditableFile(fileMeta(local.selectedFile))) return true;
   prepareEditorForPersistence();
@@ -11913,16 +13312,28 @@ async function saveCurrentFile() {
 }
 
 function focusRenameInput() {
-  if (!local.renamingTreePath) return;
+  if (!local.renamingTreePath || local.renameSaving) return;
   const input = document.querySelector(".tree-rename-input");
   if (!input) return;
   input.focus();
   input.select();
 }
 
+function focusTreeCreateDraft() {
+  if (!local.treeCreateDraft || !local.treeCreateFocus || local.treeCreateDraft.saving) return;
+  const input = document.querySelector(".tree-create-input");
+  if (!input) return;
+  input.focus();
+  input.select();
+  local.treeCreateFocus = false;
+}
+
 function startInlineRename(pathValue) {
+  if (!requireProjectMutationAccess("rename project items")) return;
   const item = treeItem(pathValue);
   if (!item || item.type === "binary") return;
+  local.treeCreateDraft = null;
+  local.treeCreateFocus = false;
   if (item.type === "directory") {
     local.selectedFolder = item.path;
   } else {
@@ -11932,6 +13343,7 @@ function startInlineRename(pathValue) {
   }
   local.renamingTreePath = item.path;
   local.renamingTreeKind = item.type;
+  local.renameError = "";
   updateSidebarUi();
 }
 
@@ -11940,10 +13352,18 @@ function cancelInlineRename() {
   local.renamingTreePath = "";
   local.renamingTreeKind = "";
   local.renameSaving = false;
+  local.renameError = "";
+  updateSidebarUi();
+}
+
+function showInlineRenameError(message) {
+  local.renameError = String(message || "That item could not be renamed.");
+  local.renameSaving = false;
   updateSidebarUi();
 }
 
 async function commitInlineRename(input) {
+  if (!requireProjectMutationAccess("rename project items")) return;
   if (!input || local.renameSaving) return;
   const from = input.dataset.renamePath || "";
   if (!from || local.renamingTreePath !== from) return;
@@ -11952,33 +13372,32 @@ async function commitInlineRename(input) {
     cancelInlineRename();
     return;
   }
-  const extension = input.dataset.renameExtension || "";
-  const nextStem = normalizeRenameStem(input.value, extension);
-  if (!nextStem) {
-    alert("Enter a file or folder name.");
-    focusRenameInput();
+  const nextName = String(input.value || "").trim();
+  const nameError = projectEntryNameError(nextName, entry.type);
+  if (nameError) {
+    showInlineRenameError(nameError);
     return;
   }
-  if (/[\\/]/.test(nextStem)) {
-    alert("Use a name only. To move files, drag them into a folder.");
-    focusRenameInput();
+  if (entry.type !== "directory" && !isSupportedProjectFileName(nextName)) {
+    showInlineRenameError("Use a supported LaTeX, text, data, image, or PDF file extension.");
     return;
   }
-  const nextName = `${nextStem}${extension}`;
   const nextPath = joinProjectPath(pathDirname(entry.path), nextName);
   if (nextPath === entry.path) {
     local.renamingTreePath = "";
     local.renamingTreeKind = "";
+    local.renameError = "";
     updateSidebarUi();
     return;
   }
   if (projectPathExists(nextPath, entry.path)) {
-    alert("A file or folder with that name already exists here.");
-    focusRenameInput();
+    showInlineRenameError("A file or folder with that name already exists here.");
     return;
   }
 
   local.renameSaving = true;
+  local.renameError = "";
+  updateSidebarUi();
   try {
     const result = await api("/api/file/rename", {
       method: "POST",
@@ -12002,61 +13421,115 @@ async function commitInlineRename(input) {
     local.renamingTreePath = "";
     local.renamingTreeKind = "";
     local.renameSaving = false;
+    local.renameError = "";
     local.saveStatus = "Renamed";
     render();
   } catch (error) {
-    local.renameSaving = false;
-    alert(error.message);
-    focusRenameInput();
+    showInlineRenameError(error.message);
   }
 }
 
-async function createFile(baseDirOverride = undefined) {
+function startTreeCreateDraft(kind, baseDirOverride = undefined) {
+  if (!requireProjectMutationAccess(kind === "folder" ? "create folders" : "create files")) return;
   const baseDir = typeof baseDirOverride === "string" ? baseDirOverride : selectedDirectoryPath();
-  const filePath = uniqueProjectPath(baseDir, "new file.tex");
+  const preferredName = kind === "folder" ? "folder" : "untitled.tex";
+  const candidateName = pathBasename(uniqueProjectPath(baseDir, preferredName));
+  local.renamingTreePath = "";
+  local.renamingTreeKind = "";
+  local.renameSaving = false;
+  local.renameError = "";
+  local.treeCreateDraft = {
+    kind,
+    directory: pathParts(baseDir).join("/"),
+    name: candidateName,
+    saving: false,
+    error: ""
+  };
+  local.treeCreateFocus = true;
+  if (baseDir) {
+    local.selectedFolder = baseDir;
+    local.collapsedFolders.delete(baseDir);
+  }
+  updateSidebarUi();
+}
+
+function cancelTreeCreateDraft() {
+  if (!local.treeCreateDraft || local.treeCreateDraft.saving) return;
+  local.treeCreateDraft = null;
+  local.treeCreateFocus = false;
+  updateSidebarUi();
+}
+
+function treeCreateError(message) {
+  if (!local.treeCreateDraft) return;
+  local.treeCreateDraft.saving = false;
+  local.treeCreateDraft.error = String(message || "That item could not be created.");
+  local.treeCreateFocus = true;
+  updateSidebarUi();
+}
+
+async function commitTreeCreateDraft(input) {
+  if (!requireProjectMutationAccess("create project items")) return;
+  const draft = local.treeCreateDraft;
+  if (!draft || draft.saving) return;
+  const rawName = String(input?.value ?? draft.name ?? "").trim();
+  const nameError = draft.kind === "folder"
+    ? projectEntryNameError(rawName, "directory")
+    : creatableProjectFileNameError(rawName);
+  if (nameError) {
+    treeCreateError(nameError);
+    return;
+  }
+
+  const name = draft.kind === "folder" ? rawName : normalizedNewFileName(rawName);
+  const path = joinProjectPath(draft.directory, name);
+  if (projectPathExists(path)) {
+    treeCreateError("A file or folder with that name already exists here.");
+    return;
+  }
+
+  draft.name = name;
+  draft.error = "";
+  draft.saving = true;
+  updateSidebarUi();
   try {
-    const result = await api("/api/file/create", {
+    const result = await api(draft.kind === "folder" ? "/api/folder/create" : "/api/file/create", {
       method: "POST",
-      body: {
-        path: filePath,
-        content: filePath.endsWith(".tex") ? "% New LocalLeaf file\n" : ""
-      }
+      body: draft.kind === "folder"
+        ? { path }
+        : { path, content: path.toLowerCase().endsWith(".tex") ? "% New LocalLeaf file\n" : "" }
     });
     await loadState();
-    local.selectedFile = result.path;
-    local.selectedFolder = "";
-    expandToFile(result.path);
-    await loadSelectedFile();
-    local.renamingTreePath = result.path;
-    local.renamingTreeKind = "text";
-    local.saveStatus = "Created";
-    render();
+    local.treeCreateDraft = null;
+    local.treeCreateFocus = false;
+    if (draft.kind === "folder") {
+      local.selectedFolder = result.path;
+      local.collapsedFolders.delete(result.path);
+      local.saveStatus = "Folder created";
+      updateSidebarUi();
+    } else {
+      local.selectedFile = result.path;
+      local.selectedFolder = "";
+      expandToFile(result.path);
+      await loadSelectedFile();
+      local.saveStatus = "Created";
+      render();
+    }
   } catch (error) {
-    alert(error.message);
+    treeCreateError(error.message);
   }
 }
 
-async function createFolder(baseDirOverride = undefined) {
-  const baseDir = typeof baseDirOverride === "string" ? baseDirOverride : selectedDirectoryPath();
-  const folderPath = uniqueProjectPath(baseDir, "new folder");
-  try {
-    const result = await api("/api/folder/create", {
-      method: "POST",
-      body: { path: folderPath }
-    });
-    await loadState();
-    local.selectedFolder = result.path;
-    local.collapsedFolders.delete(result.path);
-    local.renamingTreePath = result.path;
-    local.renamingTreeKind = "directory";
-    local.saveStatus = "Folder created";
-    render();
-  } catch (error) {
-    alert(error.message);
-  }
+function createFile(baseDirOverride = undefined) {
+  startTreeCreateDraft("file", baseDirOverride);
+}
+
+function createFolder(baseDirOverride = undefined) {
+  startTreeCreateDraft("folder", baseDirOverride);
 }
 
 async function uploadProjectFile(baseDirOverride = undefined) {
+  if (!requireProjectMutationAccess("upload project files")) return;
   const baseDirOverridePath = typeof baseDirOverride === "string" ? baseDirOverride : undefined;
   const input = document.createElement("input");
   input.type = "file";
@@ -12129,11 +13602,45 @@ async function renameSelectedFile() {
   startInlineRename(entry.path);
 }
 
-async function deleteSelectedFile() {
-  const entry = selectedTreeEntry();
-  if (!entry) return;
-  const confirmed = confirm(`Delete ${entry.path}? This removes it from the host project folder.`);
-  if (!confirmed) return;
+function setDeleteFileDialogState(modal, options = {}) {
+  if (!modal) return;
+  const busy = Boolean(options.busy);
+  const status = modal.querySelector("#fileDeleteStatus");
+  const cancelButton = modal.querySelector("#cancelFileDelete");
+  const deleteButton = modal.querySelector("#confirmFileDelete");
+  const itemType = modal.dataset.itemType || "file";
+  modal.dataset.busy = busy ? "true" : "false";
+  modal.querySelector(".file-delete-dialog")?.setAttribute("aria-busy", busy ? "true" : "false");
+  if (cancelButton) cancelButton.disabled = busy;
+  if (deleteButton) {
+    deleteButton.disabled = busy;
+    deleteButton.textContent = busy ? "Deleting..." : `Delete ${itemType}`;
+  }
+  if (status) {
+    const message = options.message || (busy ? `Deleting ${itemType}...` : "");
+    status.hidden = !message;
+    status.textContent = message;
+    status.classList.toggle("is-pending", busy);
+    status.classList.toggle("is-error", options.type === "error");
+    status.setAttribute("role", options.type === "error" ? "alert" : "status");
+    status.setAttribute("aria-live", options.type === "error" ? "assertive" : "polite");
+  }
+}
+
+function hideDeleteFileDialog(options = {}) {
+  const modal = document.querySelector(".file-delete-backdrop");
+  const { force = false, ...removeOptions } = options;
+  if (modal?.dataset.busy === "true" && !force) return;
+  removeModal(modal, {
+    fallbackFocusSelector: "#deleteFile",
+    ...removeOptions
+  });
+}
+
+async function confirmDeleteFile(modal, entry) {
+  if (!requireProjectMutationAccess("delete project items")) return;
+  if (!modal || modal.dataset.busy === "true") return;
+  setDeleteFileDialogState(modal, { busy: true });
   try {
     await api("/api/file/delete", {
       method: "POST",
@@ -12145,13 +13652,75 @@ async function deleteSelectedFile() {
     expandToFile(local.selectedFile);
     await loadSelectedFile();
     local.saveStatus = "Deleted";
-    render();
+    await render();
+    removeModal(modal, { restoreFocus: false });
+    window.setTimeout(() => {
+      const deleteButton = document.querySelector("#deleteFile");
+      const fallback = document.querySelector(".file-button.active, #newFile");
+      (deleteButton && !deleteButton.disabled ? deleteButton : fallback)?.focus({ preventScroll: true });
+    }, 0);
   } catch (error) {
-    alert(error.message);
+    setDeleteFileDialogState(modal, {
+      type: "error",
+      message: error?.message || "LocalLeaf could not delete this item."
+    });
+    modal.querySelector("#confirmFileDelete")?.focus({ preventScroll: true });
   }
 }
 
+function deleteSelectedFile(returnFocus = document.activeElement) {
+  if (!requireProjectMutationAccess("delete project items")) return;
+  const entry = selectedTreeEntry();
+  if (!entry) return;
+  const itemType = entry.type === "directory" ? "folder" : "file";
+  const itemTypeLabel = itemType === "folder" ? "Folder" : "File";
+  const existingModal = document.querySelector(".file-delete-backdrop");
+  const focusTarget = returnFocus instanceof HTMLElement && returnFocus.isConnected
+    ? returnFocus
+    : document.querySelector("#deleteFile");
+  removeModal(existingModal, { restoreFocus: false });
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="file-delete-backdrop" role="presentation" data-item-type="${itemType}" data-busy="false">
+      <section class="file-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="fileDeleteTitle" aria-describedby="fileDeleteDescription fileDeleteTarget" aria-busy="false">
+        <div class="file-delete-copy">
+          <h2 id="fileDeleteTitle">Delete ${itemType}?</h2>
+          <p id="fileDeleteDescription">This removes it from the host project folder. This action cannot be undone.</p>
+        </div>
+        <div class="file-delete-target" id="fileDeleteTarget">
+          <span class="file-delete-target-type">${itemTypeLabel}</span>
+          <strong class="file-delete-target-name" title="${escapeHtml(entry.path)}">${escapeHtml(entry.path)}</strong>
+        </div>
+        <p class="file-delete-status" id="fileDeleteStatus" role="status" aria-live="polite" hidden></p>
+        <div class="file-delete-actions">
+          <button class="btn file-delete-cancel" id="cancelFileDelete" type="button">Cancel</button>
+          <button class="btn file-delete-confirm" id="confirmFileDelete" type="button">Delete ${itemType}</button>
+        </div>
+      </section>
+    </div>
+  `);
+
+  const modal = document.querySelector(".file-delete-backdrop");
+  const entrySnapshot = { path: entry.path, type: entry.type };
+  const close = () => hideDeleteFileDialog();
+  installModalFocusManagement(modal, focusTarget);
+  modal?.addEventListener("click", (event) => {
+    if (event.target === modal) close();
+  });
+  modal?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  });
+  modal?.querySelector("#cancelFileDelete")?.addEventListener("click", close);
+  modal?.querySelector("#confirmFileDelete")?.addEventListener("click", () => {
+    void confirmDeleteFile(modal, entrySnapshot);
+  });
+  window.setTimeout(() => modal?.querySelector("#cancelFileDelete")?.focus({ preventScroll: true }), 0);
+}
+
 async function setMainFile() {
+  if (!requireProjectMutationAccess("change the main document")) return;
   if (!local.selectedFile) return;
   try {
     await api("/api/project/main-file", {
@@ -12269,7 +13838,34 @@ async function render() {
     current = route();
   }
   destroyEditorSurfaces();
-  app.className = `app-shell app-shell-${current.view}`;
+  const viewTransition = local.pendingViewTransition?.to === current.view
+    ? local.pendingViewTransition
+    : null;
+  local.pendingViewTransition = null;
+  const hostRailView = !isGuestClient() && ["home", "project", "session", "active"].includes(current.view);
+  const hostRailMotion = hostRailView && ["expanding", "collapsing"].includes(local.pendingHostRailMotion)
+    ? local.pendingHostRailMotion
+    : "";
+  local.pendingHostRailMotion = "";
+  const hostRailEntrance = hostRailView && local.hostRailEntrancePending && !hostRailMotion;
+  if (hostRailEntrance) local.hostRailEntrancePending = false;
+  if (local.viewMotionTimer) {
+    window.clearTimeout(local.viewMotionTimer);
+    local.viewMotionTimer = null;
+  }
+  if (local.hostRailMotionTimer) {
+    window.clearTimeout(local.hostRailMotionTimer);
+    local.hostRailMotionTimer = null;
+  }
+  const hostRailMotionClass = hostRailMotion ? ` app-shell-rail-${hostRailMotion}` : hostRailEntrance ? " app-shell-rail-enter" : "";
+  app.className = `app-shell app-shell-${current.view}${viewTransition ? " app-shell-view-enter" : ""}${hostRailMotionClass}`;
+  if (viewTransition) {
+    app.dataset.transitionFrom = viewTransition.from || "home";
+    app.dataset.transitionTo = viewTransition.to;
+  } else {
+    delete app.dataset.transitionFrom;
+    delete app.dataset.transitionTo;
+  }
   if (current.view === "join") {
     app.innerHTML = joinView(current.code);
     bindJoin(current.code);
@@ -12298,6 +13894,20 @@ async function render() {
   settleEditorUi();
   renderUpdateToast();
   renderAppNotice();
+  if (viewTransition) {
+    local.viewMotionTimer = window.setTimeout(() => {
+      app.classList.remove("app-shell-view-enter");
+      delete app.dataset.transitionFrom;
+      delete app.dataset.transitionTo;
+      local.viewMotionTimer = null;
+    }, 360);
+  }
+  if (hostRailEntrance || hostRailMotion) {
+    local.hostRailMotionTimer = window.setTimeout(() => {
+      app.classList.remove("app-shell-rail-enter", "app-shell-rail-expanding", "app-shell-rail-collapsing");
+      local.hostRailMotionTimer = null;
+    }, 320);
+  }
 }
 
 function connectEvents() {
@@ -12323,12 +13933,14 @@ function connectEvents() {
     clearTimeout(local.eventDisconnectTimer);
     local.eventDisconnectTimer = null;
     clearRemoteReconnectNotice();
+    const renderedRole = document.querySelector(".editor-shell")?.dataset.accessRole || "";
     local.appState = JSON.parse(event.data);
     if (isGuestClient() && local.appState?.session?.status === "ended") {
       handleSessionEnded("The host has ended the session.");
       return;
     }
     syncAiProposalsFromAppState();
+    synchronizeEditorAccessRole({ renderedRole, announce: true });
     const current = route();
     if (current.view === "editor") {
       (Array.isArray(local.appState?.session?.joinRequests) ? local.appState.session.joinRequests : [])
@@ -12378,6 +13990,10 @@ function connectEvents() {
     loadState().then(() => {
       if (route().view === "editor") updateChatPanel();
     });
+  });
+  events.addEventListener("access-revoked", (event) => {
+    const payload = event.data ? JSON.parse(event.data) : {};
+    handleAccessRevoked(payload.reason, payload.userId);
   });
   events.addEventListener("session-ended", (event) => {
     const payload = event.data ? JSON.parse(event.data) : {};
@@ -12437,8 +14053,7 @@ window.addEventListener("pointerdown", (event) => {
 window.addEventListener("pointerdown", (event) => {
   if (!local.editorStyleMenuOpen) return;
   if (event.target.closest?.(".editor-style-menu-wrap")) return;
-  local.editorStyleMenuOpen = false;
-  refreshEditorToolbarPanels();
+  setEditorStyleMenuOpen(false);
 });
 
 window.addEventListener("pointerdown", (event) => {
@@ -12534,8 +14149,7 @@ window.addEventListener("keydown", (event) => {
     }
     if (local.editorStyleMenuOpen) {
       event.preventDefault();
-      local.editorStyleMenuOpen = false;
-      refreshEditorToolbarPanels();
+      setEditorStyleMenuOpen(false, { restoreTrigger: true });
       return;
     }
     if (closeEditorSearchPanel()) {

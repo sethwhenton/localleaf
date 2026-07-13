@@ -88,22 +88,67 @@ function createProject() {
   return projectRoot;
 }
 
-test("reports the clamped configured llama context window", async () => {
+test("reports an automatic local context plan and clamps the advanced override", async () => {
   const projectRoot = createProject();
   const previous = process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE;
-  const { app, baseUrl } = await startApp(projectRoot);
+  const { app, baseUrl } = await startApp(projectRoot, {
+    aiTotalMemoryBytes: 16 * 1024 ** 3
+  });
 
   try {
     for (const [configured, expected] of [["1024", 4096], ["24576", 24576], ["999999", 32768], ["invalid", 16384]]) {
       process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE = configured;
       const state = await request(baseUrl, "/api/state");
-      assert.equal(state.ai.models[0].contextWindowTokens, expected);
+      const model = state.ai.models[0];
+      assert.equal(model.contextWindowTokens, expected);
+      assert.equal(model.contextWindow.effectiveTokens, expected);
+      assert.equal(model.contextWindow.modelMaximumTokens, 32768);
+      assert.equal(model.contextWindow.mode, configured === "invalid" ? "automatic" : "advanced_override");
+      assert.equal(model.contextWindow.source, configured === "invalid" ? "host_memory" : "environment");
     }
   } finally {
     if (previous === undefined) delete process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE;
     else process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE = previous;
     await app.stop();
     fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("scales automatic local context to stable host-memory tiers without exceeding model metadata", async () => {
+  const previous = process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE;
+  delete process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE;
+  const cases = [
+    { memoryGiB: 4, expectedTokens: 4096, profile: "constrained" },
+    { memoryGiB: 8, expectedTokens: 8192, profile: "compact" },
+    { memoryGiB: 16, expectedTokens: 16384, profile: "balanced" },
+    { memoryGiB: 32, expectedTokens: 32768, profile: "expanded" }
+  ];
+
+  try {
+    for (const item of cases) {
+      const projectRoot = createProject();
+      const { app, baseUrl } = await startApp(projectRoot, {
+        aiTotalMemoryBytes: item.memoryGiB * 1024 ** 3
+      });
+      try {
+        const state = await request(baseUrl, "/api/state");
+        const model = state.ai.models[0];
+        assert.equal(model.contextWindowTokens, item.expectedTokens);
+        assert.deepEqual(model.contextWindow, {
+          mode: "automatic",
+          source: "host_memory",
+          resourceProfile: item.profile,
+          effectiveTokens: item.expectedTokens,
+          modelMaximumTokens: 32768
+        });
+      } finally {
+        await app.stop();
+        fs.rmSync(projectRoot, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE;
+    else process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE = previous;
   }
 });
 
@@ -677,6 +722,18 @@ test("estimates missing usage from the exact serialized provider request", async
     });
     const exactSerializedRequest = JSON.stringify(mock.calls.at(-1).body);
     const expectedTokens = Math.ceil(Buffer.byteLength(exactSerializedRequest, "utf8") / 3);
+    const providerRequest = mock.calls.at(-1).body;
+    assert.equal("context_window" in providerRequest, false);
+    assert.equal("context_length" in providerRequest, false);
+    assert.equal("num_ctx" in providerRequest, false);
+    const activeChoice = app.state.ai.models.publicState().activeModel;
+    assert.deepEqual(activeChoice.contextWindow, {
+      mode: "provider_default",
+      source: "provider",
+      resourceProfile: null,
+      effectiveTokens: null,
+      modelMaximumTokens: null
+    });
     assert.equal(result.contextUsage.usage.source, "server_estimate");
     assert.equal(result.contextUsage.usage.inputTokens, expectedTokens);
     assert.equal(result.contextUsage.usage.totalTokens, expectedTokens);

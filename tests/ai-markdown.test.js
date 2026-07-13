@@ -1,7 +1,26 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const markdown = require("../public/ai-markdown");
+const appSource = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+
+test("keeps the AI composer simple while accepting typed Markdown", () => {
+  assert.doesNotMatch(appSource, /ai-format-toolbar|data-ai-format|aiPromptFormatShortcut/);
+  assert.match(
+    appSource,
+    /<textarea id="aiPrompt"[^>]*aria-describedby="aiComposerHint"[^>]*>/
+  );
+  assert.match(
+    appSource,
+    /Markdown supported\. Enter sends; Shift\+Enter adds a line\./
+  );
+  assert.match(
+    appSource,
+    /event\.key === "Enter" && !event\.shiftKey && !event\.isComposing/
+  );
+});
 
 test("renders the supported AI Markdown blocks and inline formatting", () => {
   const output = markdown.renderMarkdown([

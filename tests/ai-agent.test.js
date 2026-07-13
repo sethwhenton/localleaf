@@ -180,6 +180,7 @@ test("keeps local model prompts within a bounded context budget", async () => {
   }
   const { app, baseUrl } = await startApp(projectRoot, {
     modelRoot: modelParent,
+    aiTotalMemoryBytes: 4 * 1024 ** 3,
     aiDownloadImpl: async ({ targetPath, model }) => {
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
       fs.writeFileSync(targetPath, "fake-gguf", "utf8");
@@ -199,10 +200,18 @@ test("keeps local model prompts within a bounded context budget", async () => {
     });
 
     let capturedPrompt = "";
+    let capturedMessages = [];
+    let capturedOptions = {};
     const richReply = "## Project summary\n\nThe draft uses **one** main file and a short article body.";
+    app.state.ai.models.prepareLocalModel = async () => ({
+      modelId: "qwen35-08b-light",
+      contextWindowTokens: 4096
+    });
     app.state.ai.models.askLocalModel = async (messages, options = {}) => {
+      capturedMessages = messages;
+      capturedOptions = options;
       capturedPrompt = messages.map((message) => String(message.content || "")).join("\n\n");
-      assert.equal(options.maxTokens, 1000);
+      assert.equal(options.maxTokens, 512);
       return {
         provider: { id: "localleaf-local", name: "LocalLeaf Local", type: "local-llama-cpp" },
         modelId: "qwen35-08b-light",
@@ -214,13 +223,30 @@ test("keeps local model prompts within a bounded context budget", async () => {
       method: "POST",
       body: {
         path: "main.tex",
-        message: "what is this project about?",
+        message: `${"界".repeat(1850)} what is this project about?`,
         aiProviderId: "localleaf-local"
       }
     });
 
     assert.equal(result.reply, richReply);
-    assert.ok(capturedPrompt.length < 42000, `prompt was too large: ${capturedPrompt.length}`);
+    const localModel = app.state.ai.models.publicState().models.find((model) => model.id === "qwen35-08b-light");
+    const serializedRequest = JSON.stringify({
+      model: localModel.filename,
+      messages: capturedMessages,
+      temperature: capturedOptions.temperature,
+      max_tokens: capturedOptions.maxTokens,
+      stream: false
+    });
+    const estimatedInputTokens = Math.ceil(Buffer.byteLength(serializedRequest, "utf8") / 3);
+    assert.equal(localModel.contextWindowTokens, 4096);
+    assert.ok(
+      estimatedInputTokens + capturedOptions.maxTokens + 256 <= localModel.contextWindowTokens,
+      `local request exceeded its guarded context budget: ${estimatedInputTokens} + ${capturedOptions.maxTokens}`
+    );
+    assert.match(capturedPrompt, /what is this project about\?/u);
+    assert.equal(result.contextUsage.window.contextWindowTokens, 4096);
+    assert.equal(result.contextUsage.truncation.occurred, true);
+    assert.ok(result.contextUsage.truncation.reasons.includes("context_window"));
     assert.match(capturedPrompt, /LocalLeaf truncated this file for context|LocalLeaf omitted the middle/u);
     assert.match(capturedPrompt, /LocalLeaf safe Markdown/u);
     assert.match(capturedPrompt, /Do not emit raw HTML, Markdown images, or links that are not credential-free HTTPS URLs\./u);

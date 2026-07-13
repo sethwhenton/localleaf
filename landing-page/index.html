@@ -5,520 +5,351 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="LocalLeaf is a free Overleaf-like LaTeX editor hosted from your own computer, with local collaboration, local compile, and optional AI help."
+      content="LocalLeaf turns one laptop into a host-powered LaTeX writing room with browser collaboration, local compile, and optional AI help."
     />
-    <title>LocalLeaf - LaTeX collaboration hosted by you</title>
+    <meta name="theme-color" content="#eae9e6" />
+    <title>LocalLeaf — The writing room is on your laptop</title>
     <link rel="icon" href="./assets/localleaf-icon.png" />
-    <script>
-      try {
-        const queryTheme = new URLSearchParams(location.search).get("theme");
-        const storedTheme = localStorage.getItem("localleaf.landingTheme");
-        document.documentElement.dataset.theme = /^(light|dark)$/.test(queryTheme || "")
-          ? queryTheme
-          : storedTheme || "light";
-      } catch {
-        document.documentElement.dataset.theme = "light";
-      }
-    </script>
-    <link rel="stylesheet" href="./styles.css?v=ai-mobile-slides" />
+    <link rel="preload" href="./assets/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="./assets/generated/localleaf-balloon-wordmark.png" as="image" type="image/png" fetchpriority="high" />
+    <link rel="stylesheet" href="./styles.css?v=hilden-localleaf-v1" />
   </head>
   <body>
-    <div class="page-shell" id="top">
-      <header class="site-header is-hidden" data-header>
-        <a class="brand" href="#top" aria-label="LocalLeaf home">
-          <img src="./assets/localleaf-logo-mark.svg" alt="" />
-          <span>LocalLeaf</span>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="scroll-progress" aria-hidden="true"><span data-progress></span></div>
+
+    <header class="site-header" data-header>
+      <a class="site-mark" href="#top" aria-label="LocalLeaf home">
+        <img src="./assets/localleaf-logo-mark.svg" alt="" width="44" height="44" />
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="#how">How it works</a>
+        <a href="#product">Product</a>
+        <a href="#ai">AI</a>
+        <a href="https://github.com/sethwhenton/localleaf">GitHub</a>
+      </nav>
+
+      <a
+        class="header-download swap-link"
+        href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup.exe"
+        download
+      >
+        <span class="swap-label"><span>Download</span><span aria-hidden="true">Download</span></span>
+      </a>
+
+      <button class="menu-button" type="button" aria-expanded="false" aria-controls="mobile-menu" data-menu-button>
+        Menu
+      </button>
+    </header>
+
+    <div class="mobile-menu" id="mobile-menu" aria-hidden="true" data-mobile-menu>
+      <div class="mobile-menu-top">
+        <a href="#top" aria-label="LocalLeaf home">
+          <img src="./assets/localleaf-logo-mark.svg" alt="" width="48" height="48" />
         </a>
+        <button type="button" data-menu-close>Close</button>
+      </div>
+      <nav aria-label="Mobile navigation">
+        <a href="#how">How it works</a>
+        <a href="#product">Product</a>
+        <a href="#ai">AI that asks first</a>
+        <a href="https://github.com/sethwhenton/localleaf">GitHub</a>
+      </nav>
+      <a
+        class="mobile-download"
+        href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup.exe"
+        download
+      >Download LocalLeaf</a>
+    </div>
 
-        <nav class="nav-links" aria-label="Primary navigation">
-          <a href="#preview">Preview</a>
-          <a href="#flow">Flow</a>
-          <a href="#ai">AI</a>
-          <a href="#qa">Q&amp;A</a>
-          <a href="https://github.com/sethwhenton/localleaf">GitHub</a>
-        </nav>
-
-        <div class="header-actions">
-          <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode" aria-pressed="false">
-            <span class="theme-toggle-track" aria-hidden="true">
-              <span class="theme-icon theme-icon-sun">
-                <svg viewBox="0 0 24 24" focusable="false">
-                  <circle cx="12" cy="12" r="4.2"></circle>
-                  <path d="M12 2.8v2.4M12 18.8v2.4M4.6 4.6l1.7 1.7M17.7 17.7l1.7 1.7M2.8 12h2.4M18.8 12h2.4M4.6 19.4l1.7-1.7M17.7 6.3l1.7-1.7"></path>
-                </svg>
-              </span>
-              <span class="theme-icon theme-icon-moon">
-                <svg viewBox="0 0 24 24" focusable="false">
-                  <path d="M19.6 15.1A7.6 7.6 0 0 1 8.9 4.4a7.8 7.8 0 1 0 10.7 10.7Z"></path>
-                </svg>
-              </span>
-              <span class="theme-toggle-thumb"></span>
-            </span>
-          </button>
-          <a
-            class="download-button header-download"
-            href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup.exe"
-            download
-          >
-            <span class="button-icon" aria-hidden="true"></span>
-            <span>Download</span>
-          </a>
+    <main id="main">
+      <section class="hero" id="top" data-header-tone="light">
+        <div class="wordmark-frame" aria-hidden="true">
+          <img
+            class="balloon-wordmark"
+            src="./assets/generated/localleaf-balloon-wordmark.png"
+            alt=""
+            width="2172"
+            height="724"
+            fetchpriority="high"
+            decoding="async"
+          />
         </div>
-      </header>
 
-      <main>
-        <section class="hero" aria-labelledby="hero-title">
-          <div class="hero-copy reveal">
-            <div class="hero-brand-lockup" aria-label="LocalLeaf">
-              <svg class="logo-build" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
-                <path
-                  class="logo-outline"
-                  d="M19 6h24l12 12v37c0 3-2 5-5 5H19c-3 0-5-2-5-5V11c0-3 2-5 5-5Z"
-                />
-                <path class="logo-fold" d="M43 6v10c0 2 2 4 4 4h9" />
-                <g class="logo-leaf">
-                  <path d="M7 48c0-15 9-26 26-31 8-2 18-2 26-2 1 10-1 19-7 26-8 11-22 15-35 11" />
-                  <path class="logo-vein-light" d="M5 60c9-18 24-29 45-35" />
-                  <path class="logo-vein" d="M5 60c9-18 24-29 45-35" />
-                </g>
-              </svg>
-            </div>
-
-            <p class="brand-line">Free. Local. Yours.</p>
-            <h1 id="hero-title">
-              The Overleaf-like editor
-              <span class="hosted-signal">
-                <span class="signal-system" aria-hidden="true">
-                  <span class="signal-orbit"></span>
-                  <span class="signal-mast"></span>
-                  <span class="signal-antenna"></span>
-                  <span class="signal-satellite signal-satellite-a"></span>
-                  <span class="signal-satellite signal-satellite-b"></span>
-                  <span class="signal-pulse signal-pulse-a"></span>
-                  <span class="signal-pulse signal-pulse-b"></span>
-                </span>
-                <span class="hosted-word">hosted</span>
-              </span>
-              by
-              <span class="you-accent">
-                <span class="you-text">you.</span>
-                <span class="falling-leaves" aria-hidden="true">
-                  <i></i><i></i><i></i><i></i><i></i>
-                </span>
-              </span>
-            </h1>
-
-            <div class="download-cluster" aria-label="Download LocalLeaf">
-              <a
-                class="download-button primary"
-                href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup.exe"
-                download
-              >
-                <span class="button-icon" aria-hidden="true"></span>
-                Download for Windows
-              </a>
-              <a
-                class="download-button secondary"
-                href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg"
-                download
-              >
-                Mac Apple Silicon
-              </a>
-              <a
-                class="download-button secondary"
-                href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg"
-                download
-              >
-                Mac Intel
-              </a>
-            </div>
-            <p class="release-note">Windows 10 / 11 and macOS. Latest release: v0.1.22</p>
-          </div>
-        </section>
-
-        <section class="preview-section" aria-labelledby="preview-title" data-preview-section>
-          <div class="preview-sticky">
-            <div class="section-heading reveal reveal-peek" id="preview">
-              <p>Preview</p>
-              <h2 id="preview-title">One laptop becomes the writing room.</h2>
-            </div>
-
-            <div class="preview-theater reveal">
-              <div class="preview-copy">
-                <span class="preview-kicker" data-preview-step>1 / 3</span>
-                <h3 data-preview-title>Open a project</h3>
-                <p data-preview-copy>
-                  Start with a LaTeX folder or ZIP. LocalLeaf keeps the working copy on the host computer.
-                </p>
-              </div>
-
-              <div class="app-window" aria-live="polite">
-                <div class="app-window-top">
-                  <span></span><span></span><span></span>
-                  <strong data-preview-window-title>LocalLeaf Host</strong>
-                </div>
-
-                <div class="screen-stack">
-                  <article class="app-shot app-shot-open product-screenshot is-active" data-preview-screen>
-                    <picture class="shot-layer">
-                      <img
-                        src="./assets/session-management-light.png"
-                        data-light="./assets/session-management-light.png"
-                        data-dark="./assets/session-management-dark.png"
-                        alt="LocalLeaf session management screen with invite link, session health, project status, and users"
-                      />
-                    </picture>
-                    <div class="host-home">
-                      <aside>
-                        <b>Recent projects</b>
-                        <span class="active">Thesis Draft</span>
-                        <span>Lab notes</span>
-                        <span>Quick report</span>
-                      </aside>
-                      <main>
-                        <div class="host-card primary-card">
-                          <small>Start</small>
-                          <strong>Open folder or ZIP</strong>
-                          <p>Choose the host project without uploading it.</p>
-                        </div>
-                        <div class="host-grid">
-                          <div><b>Files</b><span>4 editable</span></div>
-                          <div><b>Storage</b><span>Host computer</span></div>
-                        </div>
-                      </main>
-                    </div>
-                  </article>
-
-                  <article class="app-shot app-shot-host product-screenshot" data-preview-screen>
-                    <picture class="shot-layer">
-                      <img
-                        src="./assets/editor-human-chat-light.png"
-                        data-light="./assets/editor-human-chat-light.png"
-                        data-dark="./assets/editor-human-chat-dark.png"
-                        alt="LocalLeaf editor showing code, PDF preview, and human chat in the right rail"
-                      />
-                    </picture>
-                    <div class="session-view">
-                      <div class="session-main">
-                        <small>Session Management</small>
-                        <h4>Host this project</h4>
-                        <p>Copy the temporary link, approve guests, and stop the room when the draft is done.</p>
-                        <div class="session-link">https://leaf.local/session/8H2K</div>
-                      </div>
-                      <aside>
-                        <strong>Join requests</strong>
-                        <div class="request-row"><span>maya</span><button>Approve</button></div>
-                        <div class="request-row"><span>alex</span><button>Approve</button></div>
-                      </aside>
-                    </div>
-                  </article>
-
-                  <article class="app-shot app-shot-write product-screenshot" data-preview-screen>
-                    <picture class="shot-layer">
-                      <img
-                        src="./assets/editor-compile-logs-light.png"
-                        data-light="./assets/editor-compile-logs-light.png"
-                        data-dark="./assets/editor-compile-logs-dark.png"
-                        alt="LocalLeaf editor with compiled PDF output and compile logs open"
-                      />
-                    </picture>
-                    <div class="editor-view">
-                      <aside class="file-tree">
-                        <b>Files</b>
-                        <span class="active">main.tex</span>
-                        <span>methods.tex</span>
-                        <span>references.bib</span>
-                      </aside>
-                      <section class="code-pane">
-                        <div class="code-line orange"></div>
-                        <div class="code-line green"></div>
-                        <div class="code-line"></div>
-                        <div class="code-line short"></div>
-                        <div class="code-line orange"></div>
-                        <div class="code-line"></div>
-                      </section>
-                      <section class="pdf-pane">
-                        <b>Compiled Output</b>
-                        <div class="paper-mini">
-                          <span></span><span></span><span></span>
-                        </div>
-                      </section>
-                      <aside class="chat-pane">
-                        <b>Chat</b>
-                        <div class="bubble left">try the new paragraph</div>
-                        <div class="bubble right">updated it</div>
-                        <small>2 online</small>
-                      </aside>
-                    </div>
-                  </article>
-
-                  <article class="app-shot app-shot-compile" data-preview-screen>
-                    <div class="compile-view">
-                      <section>
-                        <b>Compiled Output</b>
-                        <div class="pdf-page">
-                          <h5>LocalLeaf</h5>
-                          <span></span><span></span><span></span><span></span>
-                        </div>
-                      </section>
-                      <aside>
-                        <strong>Logs</strong>
-                        <p class="success">Compiled successfully</p>
-                        <span>Running TeX...</span>
-                        <span>Writing main.pdf</span>
-                        <button>Export PDF</button>
-                      </aside>
-                    </div>
-                  </article>
-                </div>
-              </div>
-            </div>
-
-            <div class="slide-progress preview-progress" aria-hidden="true">
-              <span class="active" data-preview-dot></span>
-              <span data-preview-dot></span>
-              <span data-preview-dot></span>
-            </div>
-          </div>
-        </section>
-
-        <section class="statement-section" aria-label="LocalLeaf collaboration promise">
-          <div class="statement-shell">
-            <article class="statement reveal">
-              <span class="statement-icon link-icon" aria-hidden="true"></span>
-              <p>Open a project, share a link, approve collaborators, and write together.</p>
-            </article>
-            <article class="statement reveal">
-              <span class="statement-icon lock-icon" aria-hidden="true"></span>
-              <p>No accounts. No monthly server. No cloud storage.</p>
-            </article>
-            <article class="statement reveal">
-              <span class="statement-icon leaf-icon" aria-hidden="true"></span>
-              <p>Your draft stays on the host computer from first edit to final PDF.</p>
-            </article>
-          </div>
-        </section>
-
-        <section class="flow-section" aria-labelledby="flow-title">
-          <div class="flow-shell" id="flow">
-            <div class="flow-copy reveal">
-              <p class="section-label">Flow</p>
-              <h2 id="flow-title">A collaboration session without the cloud detour.</h2>
-              <p>
-                LocalLeaf uses secure temporary tunnels to connect collaborators to the host laptop, so projects stay local without renting a shared server.
-              </p>
-            </div>
-
-            <div class="flow-track" aria-label="LocalLeaf collaboration flow">
-              <svg class="flow-current" viewBox="0 0 520 560" aria-hidden="true" preserveAspectRatio="none">
-                <path
-                  d="M70 48 C430 52 440 144 136 156 C20 162 36 262 382 276 C522 282 504 388 136 402 C38 406 66 502 432 520"
-                />
-              </svg>
-
-              <article class="flow-step reveal">
-                <span>01</span>
-                <div>
-                  <h3>Choose</h3>
-                  <p>Open a LaTeX folder or ZIP project from the host computer.</p>
-                </div>
-              </article>
-              <article class="flow-step reveal">
-                <span>02</span>
-                <div>
-                  <h3>Host</h3>
-                  <p>LocalLeaf starts the editor, compiler, session controls, and tunnel link.</p>
-                </div>
-              </article>
-              <article class="flow-step reveal">
-                <span>03</span>
-                <div>
-                  <h3>Invite</h3>
-                  <p>Send the temporary link and approve people as they join.</p>
-                </div>
-              </article>
-              <article class="flow-step reveal">
-                <span>04</span>
-                <div>
-                  <h3>Write</h3>
-                  <p>Edit, chat, compile, preview, ask AI, and keep everyone in sync.</p>
-                </div>
-              </article>
-              <article class="flow-step reveal">
-                <span>05</span>
-                <div>
-                  <h3>Stop</h3>
-                  <p>End the session. The project remains saved on the host PC.</p>
-                </div>
-              </article>
-            </div>
-          </div>
-        </section>
-
-        <section class="ai-section" aria-labelledby="ai-title" data-ai-section>
-          <div class="ai-sticky">
-            <div class="ai-layout reveal" id="ai">
-              <div class="ai-copy">
-                <p class="section-label">AI</p>
-                <h2 id="ai-title" data-ai-title>Let AI assist you by asking for help, then approve the edit.</h2>
-                <p data-ai-copy>
-                  The AI Helper can read project context, explain LaTeX errors, draft safer replacements, and ask before it touches your files.
-                </p>
-                <div class="ai-points" data-ai-points>
-                  <span>Approval cards before writes</span>
-                  <span>Diffs tracked in Changes</span>
-                  <span>Safe text edits only by default</span>
-                </div>
-              </div>
-
-              <figure class="ai-image-frame">
-                <img
-                  src="./assets/editor-ai-helper-light.png"
-                  data-theme-image
-                  data-light="./assets/editor-ai-helper-light.png"
-                  data-dark="./assets/editor-ai-helper-dark.png"
-                  alt="LocalLeaf AI Helper panel showing a user message, assistant response, and edit approval card"
-                />
-                <figcaption data-ai-caption>AI requests edit access before LocalLeaf applies a file change.</figcaption>
-              </figure>
-            </div>
-
-            <div class="slide-progress" aria-hidden="true">
-              <span class="active" data-ai-dot></span>
-              <span data-ai-dot></span>
-              <span data-ai-dot></span>
-            </div>
-          </div>
-        </section>
-
-        <section class="split-proof">
-          <figure class="proof-photo reveal">
-            <img
-              src="./assets/student-campus-group.png"
-              alt="A diverse group of smiling university students standing outside a campus building and looking up at the camera"
-            />
-          </figure>
-
-          <div class="proof-copy reveal">
-            <span class="section-label">For real working groups</span>
-            <h2>Built for student groups, thesis drafts, lab notes, and quick reports.</h2>
-            <p>
-              LocalLeaf gives the host a quiet control center and gives collaborators an Overleaf-style editor in the browser.
-            </p>
-            <div class="proof-control" aria-label="LocalLeaf host controls">
-              <div>
-                <span>Host</span>
-                <strong>Approves people before they join</strong>
-              </div>
-              <div>
-                <span>AI</span>
-                <strong>Uses local models or your provider key</strong>
-              </div>
-              <div>
-                <span>Files</span>
-                <strong>Stay on the host computer</strong>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="qa-section" aria-labelledby="qa-title">
-          <div class="section-heading reveal" id="qa">
-            <p>Q&amp;A</p>
-            <h2 id="qa-title">Small answers before you install.</h2>
-          </div>
-
-          <div class="qa-list">
-            <details class="reveal" open>
-              <summary>Do collaborators install anything?</summary>
-              <p>No. Collaborators join through a browser link after the host approves them.</p>
-            </details>
-            <details class="reveal">
-              <summary>Can AI run locally?</summary>
-              <p>Yes. LocalLeaf can download supported GGUF models and run them through the bundled local runtime on the host machine.</p>
-            </details>
-            <details class="reveal">
-              <summary>Can I bring my own API key?</summary>
-              <p>Yes. You can connect OpenAI-compatible providers and route AI requests through your own configured key.</p>
-            </details>
-            <details class="reveal">
-              <summary>Can AI edit files without permission?</summary>
-              <p>By default, no. LocalLeaf shows approval cards, diffs, and a Changes history before applying safe text edits.</p>
-            </details>
-            <details class="reveal">
-              <summary>Where are project files stored?</summary>
-              <p>On the host computer. LocalLeaf is designed around local files and temporary sessions.</p>
-            </details>
-            <details class="reveal">
-              <summary>What happens when the host closes the app?</summary>
-              <p>The session ends, collaborators disconnect, and the project remains saved on the host computer.</p>
-            </details>
-          </div>
-        </section>
-
-        <section class="final-cta">
-          <svg class="logo-build final-logo reveal" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
-            <path
-              class="logo-outline"
-              d="M19 6h24l12 12v37c0 3-2 5-5 5H19c-3 0-5-2-5-5V11c0-3 2-5 5-5Z"
-            />
-            <path class="logo-fold" d="M43 6v10c0 2 2 4 4 4h9" />
-            <g class="logo-leaf">
-              <path d="M7 48c0-15 9-26 26-31 8-2 18-2 26-2 1 10-1 19-7 26-8 11-22 15-35 11" />
-              <path class="logo-vein-light" d="M5 60c9-18 24-29 45-35" />
-              <path class="logo-vein" d="M5 60c9-18 24-29 45-35" />
-            </g>
-          </svg>
-          <h2 class="reveal">Write together. Hosted by you.</h2>
-          <span class="final-wordmark-wrap reveal">
-            <img
-              class="final-wordmark"
-              src="./assets/localleaf-wordmark-3d.svg"
-              data-light="./assets/localleaf-wordmark-3d.svg"
-              data-dark="./assets/localleaf-wordmark-3d-dark.svg"
-              alt="LocalLeaf"
-            />
-            <span class="final-wordmark-flare" aria-hidden="true"></span>
-          </span>
-          <div class="download-cluster centered reveal" aria-label="Download LocalLeaf">
+        <div class="hero-print hero-print-home" data-parallax="0.12" aria-hidden="true">
+          <img src="./assets/home-dashboard-light.png" alt="" width="1440" height="900" />
+        </div>
+        <div class="hero-print hero-print-session" data-parallax="-0.08" aria-hidden="true">
+          <img src="./assets/session-management-light.png" alt="" width="1600" height="900" />
+        </div>
+        <div class="hero-copy" data-hero-copy>
+          <h1>The writing room<br />is on your laptop.</h1>
+          <p>Open a project. Share one link. Compile where the files live.</p>
+          <div class="hero-actions">
+            <a class="button button-dark swap-link" href="#how">
+              <span class="swap-label"><span>See how it works</span><span aria-hidden="true">See how it works</span></span>
+            </a>
             <a
-              class="download-button primary"
+              class="button button-lime swap-link"
               href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup.exe"
               download
             >
-              <span class="button-icon" aria-hidden="true"></span>
-              Download for Windows
-            </a>
-            <a
-              class="download-button secondary"
-              href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg"
-              download
-            >
-              Mac Apple Silicon
-            </a>
-            <a
-              class="download-button secondary"
-              href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg"
-              download
-            >
-              Mac Intel
+              <span class="swap-label"><span>Download LocalLeaf</span><span aria-hidden="true">Download LocalLeaf</span></span>
             </a>
           </div>
-        </section>
-      </main>
+        </div>
+        <p class="hero-scroll-note" aria-hidden="true">Scroll to enter the room</p>
+      </section>
 
-      <footer class="site-footer">
-        <span>LocalLeaf</span>
-        <nav aria-label="Footer navigation">
-          <a href="https://github.com/sethwhenton/localleaf">GitHub</a>
-          <a href="#qa">Q&amp;A</a>
-          <a href="#top">Back to top</a>
-        </nav>
-        <p>&copy; 2026 LocalLeaf</p>
-      </footer>
-    </div>
+      <section class="manifesto" data-header-tone="dark" id="product">
+        <img
+          class="manifesto-image"
+          src="./assets/editor-human-chat-light.png"
+          alt="LocalLeaf editor with LaTeX source, compiled PDF, and collaborator chat"
+          width="1600"
+          height="900"
+          loading="eager"
+        />
+        <div class="manifesto-shade"></div>
+        <div class="manifesto-copy reveal">
+          <h2>Writing together should feel close.<br />Your files should stay close, too.</h2>
+        </div>
+        <div class="manifesto-facts">
+          <p class="reveal">Guests need only a browser.</p>
+          <p class="reveal">The host decides who enters.</p>
+        </div>
+      </section>
+
+      <section class="case-section" id="preview" data-header-tone="light" aria-labelledby="case-title">
+        <div class="case-intro reveal">
+          <p class="section-index">Inside the room</p>
+          <h2 id="case-title">One project. One host.<br />One shared place to write.</h2>
+        </div>
+
+        <div class="case-rail-wrap">
+          <div class="case-rail" data-case-rail tabindex="0" aria-label="LocalLeaf workflow cards">
+            <article class="case-card case-lime" data-case-card>
+              <div class="case-card-copy">
+                <div class="case-card-top">
+                  <span>01 / 03</span>
+                  <img src="./assets/localleaf-logo-mark.svg" alt="" width="42" height="42" />
+                </div>
+                <h3>Open the room from your own machine.</h3>
+                <p>Choose a LaTeX folder or ZIP. The working project stays with the host who opened it.</p>
+                <dl>
+                  <div><dt>Project</dt><dd>Host computer</dd></div>
+                  <div><dt>Start</dt><dd>Folder or ZIP</dd></div>
+                </dl>
+              </div>
+              <figure class="case-media">
+                <img src="./assets/home-dashboard-light.png" alt="LocalLeaf Host home dashboard" width="1440" height="900" loading="lazy" />
+                <figcaption>LocalLeaf Host / Home</figcaption>
+              </figure>
+            </article>
+
+            <article class="case-card case-paper" data-case-card>
+              <div class="case-card-copy">
+                <div class="case-card-top">
+                  <span>02 / 03</span>
+                  <img src="./assets/localleaf-logo-mark.svg" alt="" width="42" height="42" />
+                </div>
+                <h3>Send one verified link. Approve every person.</h3>
+                <p>The host keeps the door. Guests request access, then enter the project from a normal browser.</p>
+                <dl>
+                  <div><dt>Invite</dt><dd>One link</dd></div>
+                  <div><dt>Access</dt><dd>Host approved</dd></div>
+                </dl>
+              </div>
+              <figure class="case-media">
+                <img src="./assets/session-management-light.png" alt="LocalLeaf session management with a verified invite link" width="1600" height="900" loading="lazy" />
+                <figcaption>LocalLeaf Host / Session</figcaption>
+              </figure>
+            </article>
+
+            <article class="case-card case-orange" data-case-card>
+              <div class="case-card-copy">
+                <div class="case-card-top">
+                  <span>03 / 03</span>
+                  <img src="./assets/localleaf-logo-mark.svg" alt="" width="42" height="42" />
+                </div>
+                <h3>Write, chat, compile, and preview in one screen.</h3>
+                <p>The host runs the compiler. Everyone sees the source, the latest PDF, and the people in the room.</p>
+                <dl>
+                  <div><dt>Compile</dt><dd>On the host</dd></div>
+                  <div><dt>Guests</dt><dd>Browser ready</dd></div>
+                </dl>
+              </div>
+              <figure class="case-media">
+                <img src="./assets/editor-compile-logs-light.png" alt="LocalLeaf editor with source, compiled PDF, and logs" width="1600" height="900" loading="lazy" />
+                <figcaption>LocalLeaf / Editor</figcaption>
+              </figure>
+            </article>
+          </div>
+
+          <div class="case-controls">
+            <p><span data-case-current>1</span> / 3</p>
+            <div>
+              <button type="button" data-case-prev>Previous</button>
+              <button type="button" data-case-next>Next</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stack-stage" id="how" data-stack-stage data-header-tone="dark" aria-labelledby="stack-title">
+        <div class="stack-pin">
+          <img class="chrome-backdrop" src="./assets/generated/chrome-objects-dark.png" alt="" width="1440" height="1024" loading="lazy" />
+          <h2 id="stack-title">One host.<br />One shared writing room.</h2>
+
+          <article class="stack-card stack-card-lime" data-stack-card="0">
+            <div class="stack-copy">
+              <div class="stack-card-heading"><h3>Write together</h3><span>01</span></div>
+              <p class="stack-line">Source, PDF, and people—one screen.</p>
+              <p class="stack-body">Edit and chat together while the host keeps the project and compiler running.</p>
+              <a href="#product">See the product</a>
+            </div>
+            <figure>
+              <img src="./assets/editor-human-chat-light.png" alt="LocalLeaf collaborative editor and chat" width="1600" height="900" loading="lazy" />
+            </figure>
+          </article>
+
+          <article class="stack-card stack-card-paper" data-stack-card="1">
+            <div class="stack-copy">
+              <div class="stack-card-heading"><h3>Compile locally</h3><span>02</span></div>
+              <p class="stack-line">The PDF is built where the source lives.</p>
+              <p class="stack-body">The host compiles the project and publishes the latest valid preview to approved guests.</p>
+              <a href="#download">Get LocalLeaf</a>
+            </div>
+            <figure>
+              <img src="./assets/editor-compile-logs-light.png" alt="LocalLeaf compiled PDF and compile logs" width="1600" height="900" loading="lazy" />
+            </figure>
+          </article>
+
+          <article class="stack-card stack-card-orange" id="ai" data-stack-card="2">
+            <div class="stack-copy">
+              <div class="stack-card-heading"><h3>AI that asks first</h3><span>03</span></div>
+              <p class="stack-line">A second pair of eyes. Your call on every edit.</p>
+              <p class="stack-body">Use a local model or your own provider. Review the proposed diff before it changes a file.</p>
+              <a href="#download">Open the room</a>
+            </div>
+            <figure>
+              <img src="./assets/editor-ai-helper-light.png" alt="LocalLeaf AI Helper requesting approval for an edit" width="1600" height="900" loading="lazy" />
+            </figure>
+          </article>
+        </div>
+      </section>
+
+      <section class="principles" id="qa" data-header-tone="light" aria-labelledby="principle-title">
+        <div class="principle-meta">
+          <p><span data-principle-current>1</span> / 3</p>
+          <p>What the host keeps</p>
+        </div>
+
+        <div class="principle-viewport">
+          <blockquote id="principle-title" data-principle-text>
+            One verified link. One person at the door. One host in control.
+          </blockquote>
+          <div class="principle-source">
+            <img src="./assets/localleaf-logo-mark.svg" alt="" width="52" height="52" />
+            <p><strong>LocalLeaf principle</strong><span>Host-owned collaboration</span></p>
+          </div>
+        </div>
+
+        <div class="principle-controls">
+          <button type="button" data-principle-prev>Previous</button>
+          <button type="button" data-principle-next>Next</button>
+        </div>
+      </section>
+
+      <section class="story-film" data-header-tone="dark">
+        <img
+          src="./assets/generated/research-collaboration-cinematic.png"
+          alt="Four university researchers working together around a laptop and a printed draft"
+          width="1680"
+          height="945"
+          loading="lazy"
+        />
+        <div class="story-shade"></div>
+        <h2 class="reveal">Does your draft<br />need another cloud?</h2>
+        <div class="story-copy reveal">
+          <p>
+            LocalLeaf turns a laptop into the writing room. Open the project, let the people in, finish the work, then close the room.
+          </p>
+          <div>
+            <a class="button button-paper" href="https://github.com/sethwhenton/localleaf">Read the project</a>
+            <a class="button button-lime" href="#download">Download LocalLeaf</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="download-stage" id="download" data-header-tone="dark" aria-labelledby="download-title">
+        <div class="download-heading reveal">
+          <h2 id="download-title">Ready to open the room?</h2>
+          <p>Choose the host app for this computer.</p>
+        </div>
+
+        <div class="download-cards">
+          <a
+            class="download-card download-card-lime" data-tilt
+            href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-Setup.exe"
+            download
+          >
+            <span>Windows 10 / 11</span>
+            <img src="./assets/localleaf-logo-mark.svg" alt="" width="92" height="92" />
+            <h3>Download for Windows</h3>
+            <p>LocalLeaf Host Setup</p>
+          </a>
+          <a
+            class="download-card download-card-charcoal" data-tilt
+            href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg"
+            download
+          >
+            <span>macOS</span>
+            <img src="./assets/localleaf-logo-mark.svg" alt="" width="92" height="92" />
+            <h3>Download for Apple silicon</h3>
+            <p>Intel build is available below</p>
+          </a>
+        </div>
+        <a
+          class="intel-link"
+          href="https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg"
+          download
+        >Mac Intel download</a>
+        <p class="release-note">LocalLeaf v0.1.24 · macOS builds are unsigned</p>
+      </section>
+    </main>
+
+    <footer class="site-footer" data-header-tone="light">
+      <div class="footer-wordmark" aria-hidden="true">
+        <img src="./assets/generated/localleaf-chrome-wordmark.png" alt="" width="2048" height="1024" loading="lazy" />
+      </div>
+      <div class="footer-grid">
+        <div class="footer-sitemap">
+          <h2>Sitemap</h2>
+          <nav aria-label="Footer navigation">
+            <a href="#top">Home</a>
+          <a href="#how">How it works</a>
+            <a href="#product">Product</a>
+            <a href="#ai">AI</a>
+            <a href="#download">Download</a>
+            <a href="https://github.com/sethwhenton/localleaf">GitHub</a>
+          </nav>
+        </div>
+
+        <div class="footer-note">
+          <img src="./assets/localleaf-logo-mark.svg" alt="" width="68" height="68" />
+          <h2>Free. Local. Yours.</h2>
+          <p>A host-powered LaTeX writing room for projects that should stay close to home.</p>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <p>© 2026 LocalLeaf</p>
+        <p>Original LocalLeaf artwork · Instrument Serif licensed under SIL OFL 1.1</p>
+      </div>
+    </footer>
 
     <script src="./assets/lenis.min.js"></script>
-    <script src="./script.js?v=ai-mobile-slides"></script>
+    <script src="./script.js?v=hilden-localleaf-v1"></script>
   </body>
 </html>

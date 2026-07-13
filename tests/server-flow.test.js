@@ -1270,7 +1270,7 @@ test("keeps project compilation host-only for approved guests", async () => {
     });
     const approved = await request(baseUrl, "/api/join/approve", {
       method: "POST",
-      body: { requestId: joined.payload.requestId, role: "editor" }
+      body: { requestId: joined.payload.requestId, role: "maintainer" }
     });
     assert.equal(approved.ok, true);
     const status = await publicTunnelRequest(
@@ -1325,7 +1325,7 @@ test("delivers host compile completion to an approved guest over WebSocket witho
     });
     await request(baseUrl, "/api/join/approve", {
       method: "POST",
-      body: { requestId: joined.payload.requestId, role: "editor" }
+      body: { requestId: joined.payload.requestId, role: "maintainer" }
     });
     const status = await publicTunnelRequest(
       baseUrl,
@@ -1384,7 +1384,7 @@ test("delivers project state changes to an approved guest over WebSocket without
     });
     await request(baseUrl, "/api/join/approve", {
       method: "POST",
-      body: { requestId: joined.payload.requestId, role: "editor" }
+      body: { requestId: joined.payload.requestId, role: "maintainer" }
     });
     const status = await publicTunnelRequest(
       baseUrl,
@@ -2442,7 +2442,7 @@ test("a slow participant SyncTeX lookup does not block another lookup, HTTP stat
     });
     await request(baseUrl, "/api/join/approve", {
       method: "POST",
-      body: { requestId: join.requestId, role: "editor" }
+      body: { requestId: join.requestId, role: "maintainer" }
     });
     const joinStatus = await request(baseUrl, `/api/join-status?id=${encodeURIComponent(join.requestId)}`);
     app.state.compile = {
@@ -2894,7 +2894,7 @@ test("supports the host, join, edit, compile, chat, import, stop flow", async ()
 
     const approved = await request(baseUrl, "/api/join/approve", {
       method: "POST",
-      body: { requestId: join.requestId, role: "editor" }
+      body: { requestId: join.requestId, role: "maintainer" }
     });
     assert.equal(approved.ok, true);
 

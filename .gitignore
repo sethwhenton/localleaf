@@ -11,3 +11,6 @@ bin/llama-cpp/
 *.synctex.gz
 dist/
 out/
+output/
+temp/
+.playwright-cli/

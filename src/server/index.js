@@ -32,7 +32,7 @@ const { collectProjectEditorSuggestions } = require("./editor-suggestions");
 const { createAiModelManager } = require("./ai-models");
 const { createAiChangeStore } = require("./ai-changes");
 const { createAiSessionStore, createMemoryAiSessionStore, projectKeyForRoot } = require("./ai-sessions");
-const { buildContextUsage } = require("./ai-context");
+const { buildContextUsage, estimateTokens } = require("./ai-context");
 const { aiResponsePromptGuidance, boundedPlainText, formatAgentReply } = require("./ai-response-style");
 const { createSynctexWorkerClient } = require("./synctex-worker-client");
 const {
@@ -56,7 +56,8 @@ const PUBLIC_DIR = path.join(ROOT, "public");
 const SAMPLE_PROJECT = path.join(ROOT, "samples", "thesis");
 const DEFAULT_PROJECT_NAME = "LocalLeaf Project";
 const DEFAULT_PORT = Number(process.env.PORT || 4317);
-const MAX_USERS = 5;
+const MAX_GUESTS = 5;
+const GUEST_ROLES = new Set(["viewer", "maintainer"]);
 const MAX_PENDING_JOIN_REQUESTS = 20;
 const MAX_RETAINED_JOIN_REQUESTS = 100;
 const TUNNEL_VERIFY_ATTEMPTS = 12;
@@ -116,6 +117,35 @@ const LOCAL_AGENT_PROMPT_LIMITS = {
   conversationItemBudget: 600,
   maxTokens: 1000
 };
+
+function localAgentPromptLimits(contextWindowTokens) {
+  const contextTokens = Number(contextWindowTokens) || 16384;
+  if (contextTokens <= 4096) {
+    return {
+      currentFileBudget: 800,
+      projectContextBudget: 1300,
+      projectContextPerFileBudget: 700,
+      selectedTextBudget: 300,
+      compileLogBudget: 300,
+      conversationTurns: 1,
+      conversationItemBudget: 160,
+      maxTokens: 512
+    };
+  }
+  if (contextTokens <= 8192) {
+    return {
+      currentFileBudget: 4000,
+      projectContextBudget: 6000,
+      projectContextPerFileBudget: 2000,
+      selectedTextBudget: 900,
+      compileLogBudget: 900,
+      conversationTurns: 3,
+      conversationItemBudget: 280,
+      maxTokens: 700
+    };
+  }
+  return LOCAL_AGENT_PROMPT_LIMITS;
+}
 const publicDnsResolver = new dns.Resolver();
 publicDnsResolver.setServers(PUBLIC_DNS_SERVERS);
 let latestReleaseCache = null;
@@ -233,10 +263,19 @@ function canReadProject(state, request, url) {
   return isHostRequest(state, request, url) || Boolean(getTokenUser(state, request, url));
 }
 
-function canEditProject(state, request, url) {
-  if (isHostRequest(state, request, url)) return true;
-  const user = getTokenUser(state, request, url);
-  return Boolean(user && user.role === "editor");
+function sessionGuestLimit(state) {
+  const configured = Number(state.session.maxGuests);
+  return Number.isInteger(configured) && configured >= 0 ? configured : MAX_GUESTS;
+}
+
+function sessionGuestCount(state) {
+  return state.session.users.filter((user) => user.role !== "host").length;
+}
+
+function normalizedGuestRole(value, fallback = null) {
+  const role = String(value ?? "").trim().toLowerCase();
+  if (!role) return fallback;
+  return GUEST_ROLES.has(role) ? role : null;
 }
 
 function apiErrorPayload(error) {
@@ -273,13 +312,41 @@ function requestIdentity(state, request, url) {
     userName: user?.name || "",
     role: user?.role || "",
     canRead: Boolean(user),
-    canEdit: Boolean(user && user.role === "editor")
+    canEdit: Boolean(user && user.role === "maintainer")
   };
 }
 
-function canUseAi(state, request, url) {
-  const identity = requestIdentity(state, request, url);
-  return identity.isHost || identity.canEdit;
+function identityHasCapability(identity, capability) {
+  if (capability === "read") return Boolean(identity.canRead);
+  if (capability === "ai") return Boolean(identity.isHost || identity.canEdit);
+  return Boolean(identity.canEdit);
+}
+
+async function readAuthorizedRequestPayload(state, request, response, url, options = {}) {
+  const capability = options.capability || "edit";
+  const message = options.message || "Maintainer access is required before changing this project.";
+  let identity = requestIdentity(state, request, url);
+  if (!identityHasCapability(identity, capability)) {
+    deny(response, message);
+    return null;
+  }
+  const context = typeof options.capture === "function" ? options.capture(identity) : null;
+  const reader = options.reader || readBody;
+  const body = await reader(request);
+  identity = requestIdentity(state, request, url);
+  if (!identityHasCapability(identity, capability)) {
+    deny(response, message);
+    return null;
+  }
+  return { body, identity, context };
+}
+
+function captureAiSessionMutationContext(state, identity) {
+  const sessionStore = aiSessionStoreForIdentity(state, identity);
+  return {
+    sessionStore,
+    originProjectKey: sessionStore.projectKeyForRoot(state.project.root)
+  };
 }
 
 function requesterFromIdentity(identity = {}) {
@@ -1141,7 +1208,9 @@ function createInitialState(options = {}) {
       code: null,
       inviteUrl: null,
       publicUrl: null,
-      maxUsers: MAX_USERS,
+      maxGuests: MAX_GUESTS,
+      // Compatibility alias for older renderers. The value now means guest slots, not total participants.
+      maxUsers: MAX_GUESTS,
       users: [
         {
           id: "host",
@@ -1224,6 +1293,7 @@ function createInitialState(options = {}) {
     secretStore: options.aiSecretStore,
     fetchImpl: options.aiFetch || options.fetchImpl,
     downloadImpl: options.aiDownloadImpl,
+    totalMemoryBytes: options.aiTotalMemoryBytes,
     onChange: () => broadcastState(state)
   });
   state.ai.sessions = options.aiSessionStore || createAiSessionStore({ root: options.aiSessionRoot });
@@ -1437,7 +1507,7 @@ function publicState(state, options = {}) {
     userName: options.user?.name || (isHost ? getHostName() : ""),
     role: options.user?.role || (isHost ? "host" : ""),
     canRead: Boolean(options.canRead || isHost),
-    canEdit: Boolean(options.canEdit || isHost || options.user?.role === "editor")
+    canEdit: Boolean(options.canEdit || isHost || options.user?.role === "maintainer")
   };
   const canRead = isHost || Boolean(options.canRead);
 
@@ -1446,7 +1516,8 @@ function publicState(state, options = {}) {
       project: { name: "LocalLeaf project" },
       session: {
         status: state.session.status,
-        maxUsers: state.session.maxUsers
+        maxGuests: sessionGuestLimit(state),
+        maxUsers: sessionGuestLimit(state)
       },
       compiler: {
         available: Boolean(state.compiler.available),
@@ -1495,7 +1566,8 @@ function publicState(state, options = {}) {
     session: {
       id: state.session.id,
       status: state.session.status,
-      maxUsers: state.session.maxUsers,
+      maxGuests: sessionGuestLimit(state),
+      maxUsers: sessionGuestLimit(state),
       users,
       joinRequests,
       ...(isHost ? {
@@ -1568,6 +1640,11 @@ function tokenUserByToken(state, token) {
   return userId ? state.session.users.find((user) => user.id === userId) : null;
 }
 
+function clientCanEditProject(state, client) {
+  if (client.isHost) return true;
+  return tokenUserByToken(state, client.token)?.role === "maintainer";
+}
+
 function websocketIdentity(state, request, url) {
   const isHost = isHostRequest(state, request, url);
   const token = String(url.searchParams.get("token") || "");
@@ -1596,7 +1673,7 @@ function websocketIdentity(state, request, url) {
       name: tokenUser.name,
       role: tokenUser.role,
       canRead: true,
-      canEdit: tokenUser.role === "editor"
+      canEdit: tokenUser.role === "maintainer"
     };
   }
   return {
@@ -1784,6 +1861,13 @@ function handleCollabMessage(state, client, payload) {
     return;
   }
 
+  if (!clientCanReadProject(state, client)) {
+    client.canEdit = false;
+    client.token = "";
+    client.socket.close(4003, "Access revoked");
+    return;
+  }
+
   if (type === "open_file") {
     const filePath = String(payload.filePath || "").trim();
     try {
@@ -1798,8 +1882,9 @@ function handleCollabMessage(state, client, payload) {
   }
 
   if (type === "edit") {
-    if (!client.canEdit) {
-      sendWs(client, { type: "error", message: "Editor access is required before changing files." });
+    if (!clientCanEditProject(state, client)) {
+      client.canEdit = false;
+      sendWs(client, { type: "error", message: "Maintainer access is required before changing files." });
       return;
     }
     const filePath = String(payload.filePath || "").trim();
@@ -1835,8 +1920,9 @@ function handleCollabMessage(state, client, payload) {
 
   if (type === "save") {
     const requestId = String(payload.requestId || "").slice(0, 128);
-    if (!client.canEdit) {
-      sendWs(client, { type: "error", requestId, message: "Editor access is required before saving files." });
+    if (!clientCanEditProject(state, client)) {
+      client.canEdit = false;
+      sendWs(client, { type: "error", requestId, message: "Maintainer access is required before saving files." });
       return;
     }
     const filePath = String(payload.filePath || "").trim();
@@ -1903,7 +1989,7 @@ function broadcastState(state) {
         publicState(state, {
           isHost: client.isHost,
           canRead: clientCanReadProject(state, client),
-          canEdit: client.isHost || user?.role === "editor",
+          canEdit: client.isHost || user?.role === "maintainer",
           user
         })
       );
@@ -1920,7 +2006,7 @@ function broadcastState(state) {
       state: publicState(state, {
         isHost: client.isHost,
         canRead: client.isHost || Boolean(client.token && state.session.activeTokens.has(client.token)),
-        canEdit: client.isHost || user?.role === "editor",
+        canEdit: client.isHost || user?.role === "maintainer",
         user
       })
     });
@@ -2622,13 +2708,104 @@ function agentCompileLogs(state) {
 
 function compactAgentFileContext(text, budget = 42000) {
   const source = String(text || "");
-  const limit = Math.max(2000, Number(budget) || 42000);
+  const limit = Math.max(400, Number(budget) || 42000);
   if (source.length <= limit) return source;
-  const headLength = Math.max(1200, Math.round(limit * 0.68));
-  const tailLength = Math.max(600, limit - headLength - 1200);
+  const omission = "\n\n% ... LocalLeaf omitted the middle of this large file for model context ...\n\n";
+  const available = Math.max(2, limit - omission.length);
+  const headLength = Math.max(1, Math.round(available * 0.68));
+  const tailLength = Math.max(1, available - headLength);
   const head = source.slice(0, headLength);
   const tail = source.slice(-tailLength);
-  return `${head}\n\n% ... LocalLeaf omitted the middle of this large file for model context ...\n\n${tail}`;
+  return `${head}${omission}${tail}`;
+}
+
+function utf8Prefix(text, maxBytes) {
+  const source = String(text || "");
+  if (Buffer.byteLength(source, "utf8") <= maxBytes) return source;
+  let low = 0;
+  let high = source.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    let end = middle;
+    if (end > 0 && /[\uD800-\uDBFF]/u.test(source[end - 1])) end -= 1;
+    if (Buffer.byteLength(source.slice(0, end), "utf8") <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  let end = low;
+  if (end > 0 && /[\uD800-\uDBFF]/u.test(source[end - 1])) end -= 1;
+  while (end > 0 && Buffer.byteLength(source.slice(0, end), "utf8") > maxBytes) end -= 1;
+  return source.slice(0, end);
+}
+
+function utf8Suffix(text, maxBytes) {
+  const source = String(text || "");
+  if (Buffer.byteLength(source, "utf8") <= maxBytes) return source;
+  let low = 0;
+  let high = source.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    let start = middle;
+    if (start < source.length && /[\uDC00-\uDFFF]/u.test(source[start])) start += 1;
+    if (Buffer.byteLength(source.slice(start), "utf8") <= maxBytes) high = middle;
+    else low = middle + 1;
+  }
+  let start = low;
+  if (start < source.length && /[\uDC00-\uDFFF]/u.test(source[start])) start += 1;
+  while (start < source.length && Buffer.byteLength(source.slice(start), "utf8") > maxBytes) start += 1;
+  return source.slice(start);
+}
+
+function compactPromptContent(text, maxBytes) {
+  const source = String(text || "");
+  const limit = Math.max(400, Math.floor(Number(maxBytes) || 400));
+  if (Buffer.byteLength(source, "utf8") <= limit) return source;
+  const omission = "\n\n[LocalLeaf shortened earlier context to fit this local model.]\n\n";
+  const available = Math.max(2, limit - Buffer.byteLength(omission, "utf8"));
+  const headBudget = Math.max(1, Math.floor(available * 0.68));
+  const tailBudget = Math.max(1, available - headBudget);
+  return `${utf8Prefix(source, headBudget)}${omission}${utf8Suffix(source, tailBudget)}`;
+}
+
+function fitLocalModelMessages(messages, options = {}) {
+  const contextWindowTokens = Number(options.contextWindowTokens);
+  const maxOutputTokens = Math.max(1, Math.round(Number(options.maxOutputTokens) || 1));
+  if (!Number.isFinite(contextWindowTokens) || contextWindowTokens < 1024) {
+    return { messages, truncated: false };
+  }
+  const maxInputTokens = Math.max(512, Math.floor(contextWindowTokens - maxOutputTokens - 320));
+  const fitted = (Array.isArray(messages) ? messages : []).map((message) => ({ ...message }));
+  let truncated = false;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const serialized = JSON.stringify({
+      model: String(options.modelId || "local-model"),
+      messages: fitted,
+      temperature: Number(options.temperature ?? 0.1),
+      max_tokens: maxOutputTokens,
+      stream: false
+    });
+    const inputTokens = estimateTokens(serialized);
+    if (inputTokens <= maxInputTokens) {
+      return { messages: fitted, truncated, estimatedInputTokens: inputTokens };
+    }
+    const candidate = fitted
+      .map((message, index) => ({
+        index,
+        bytes: Buffer.byteLength(String(message?.content || ""), "utf8")
+      }))
+      .sort((left, right) => right.bytes - left.bytes)[0];
+    if (!candidate || candidate.bytes <= 400) break;
+    const excessBytes = Math.max(192, Math.ceil((inputTokens - maxInputTokens) * 3.3));
+    const nextBudget = Math.max(400, candidate.bytes - excessBytes);
+    fitted[candidate.index].content = compactPromptContent(fitted[candidate.index].content, nextBudget);
+    truncated = true;
+  }
+
+  return {
+    messages: fitted,
+    truncated,
+    estimatedInputTokens: estimateTokens(JSON.stringify({ messages: fitted }))
+  };
 }
 
 function lineStartOffsets(text) {
@@ -3292,7 +3469,7 @@ async function createProviderAgentResponse(state, body, options = {}) {
   const requestedProviderId = String(body.aiProviderId || body.providerId || "").trim();
   const requestedModelId = String(body.aiModelId || body.modelId || "").trim();
   const askModel = options.askModel || state.ai.models.askActiveProvider;
-  const modelMessages = [
+  let modelMessages = [
     {
       role: "system",
       content: "You are a precise LaTeX editor. Return exactly one valid JSON object matching the requested schema. Do not wrap it in a Markdown fence or add commentary outside the object."
@@ -3306,6 +3483,15 @@ async function createProviderAgentResponse(state, body, options = {}) {
       || (["local", "localleaf-local"].includes(requestedProviderId) && choice.local);
     return providerMatches && (!requestedModelId || choice.modelId === requestedModelId);
   }) || modelState.activeModel;
+  const localContextFit = runtime === "local-llama-cpp"
+    ? fitLocalModelMessages(modelMessages, {
+      contextWindowTokens: selectedModel?.contextWindowTokens,
+      maxOutputTokens: limits.maxTokens,
+      modelId: requestedModelId || selectedModel?.modelId,
+      temperature: 0.1
+    })
+    : { messages: modelMessages, truncated: false };
+  modelMessages = localContextFit.messages;
   const truncationReasons = [];
   const historyTruncated = conversationSource.length > includedConversation.length
     || includedConversation.some((item) => item.message.length > limits.conversationItemBudget);
@@ -3315,6 +3501,7 @@ async function createProviderAgentResponse(state, body, options = {}) {
   if (projectContextTruncated) truncationReasons.push("project_context_limit");
   if (selectedTextSource.length > selectedText.length) truncationReasons.push("selection_limit");
   if (compileLogSource.length > compileLogs.length) truncationReasons.push("tool_limit");
+  if (localContextFit.truncated) truncationReasons.push("context_window");
   const serializedModelRequest = JSON.stringify({
     model: requestedModelId || selectedModel?.modelId || "",
     messages: modelMessages,
@@ -3433,11 +3620,17 @@ async function createAgentMessageResponse(state, body, options = {}) {
   }
   const fileManagementRequest = requestedAgentCapabilities(message).fileManagement;
   if ((!providerRequested || providerChoice === "local" || providerChoice === "localleaf-local") && state.ai.models.hasActiveLocalModel()) {
+    const requestedLocalModelId = String(body.aiModelId || body.modelId || "").trim();
     try {
+      await state.ai.models.prepareLocalModel({ modelId: requestedLocalModelId || undefined });
+      const localModelState = state.ai.models.publicState();
+      const selectedLocalModel = (localModelState.modelChoices || []).find((choice) => {
+        return choice.local && (!requestedLocalModelId || choice.modelId === requestedLocalModelId);
+      }) || (localModelState.activeModel?.local ? localModelState.activeModel : null);
       return applyPermissionsToAgentResult(await createProviderAgentResponse(state, body, {
         ...options,
         runtime: "local-llama-cpp",
-        promptLimits: LOCAL_AGENT_PROMPT_LIMITS,
+        promptLimits: localAgentPromptLimits(selectedLocalModel?.contextWindowTokens),
         askModel: (messages, requestOptions) => state.ai.models.askLocalModel(messages, {
           ...requestOptions,
           modelId: body.aiModelId || body.modelId || requestOptions?.modelId
@@ -5359,9 +5552,10 @@ function schedulePublicTunnelStop(state, sessionId) {
   }, SESSION_END_TUNNEL_GRACE_MS);
 }
 
-function cancelGuestAiRuns(state) {
+function cancelGuestAiRunsForUser(state, userId) {
+  const identityPrefix = `guest:${String(userId || "")}:`;
   for (const [key, control] of [...state.ai.runControllers.entries()]) {
-    if (!key.startsWith("guest:")) continue;
+    if (!key.startsWith(identityPrefix)) continue;
     control.cancelled = true;
     control.controller.abort();
     try {
@@ -5371,6 +5565,100 @@ function cancelGuestAiRuns(state) {
     }
     state.ai.runControllers.delete(key);
   }
+}
+
+function cancelGuestAiRuns(state) {
+  for (const user of state.session.users) {
+    if (user.role === "host") continue;
+    cancelGuestAiRunsForUser(state, user.id);
+  }
+}
+
+function publicSessionUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    role: user.role,
+    color: user.color,
+    online: user.online
+  };
+}
+
+function setGuestRole(state, user, role) {
+  const previousRole = user.role;
+  user.role = role;
+  for (const requestRecord of state.session.joinRequests) {
+    if (requestRecord.userId === user.id) requestRecord.role = role;
+  }
+  let connectedClient = null;
+  for (const client of state.collabClients.values()) {
+    if (client.userId !== user.id) continue;
+    client.role = role;
+    client.canEdit = role === "maintainer";
+    connectedClient ||= client;
+    sendWs(client, {
+      type: "role_changed",
+      userId: user.id,
+      role,
+      canEdit: client.canEdit
+    });
+  }
+  if (previousRole === "maintainer" && role === "viewer") {
+    cancelGuestAiRunsForUser(state, user.id);
+    state.ai.guestSessions.delete(user.id);
+  }
+  if (connectedClient) broadcastPresence(state, connectedClient);
+  broadcastState(state);
+  return publicSessionUser(user);
+}
+
+function removeGuestAccess(state, user, reason = "The host removed you from this session.") {
+  const removedUser = publicSessionUser(user);
+  const revokedTokens = new Set();
+  for (const [token, userId] of state.session.activeTokens.entries()) {
+    if (userId !== user.id) continue;
+    revokedTokens.add(token);
+    state.session.activeTokens.delete(token);
+  }
+
+  cancelGuestAiRunsForUser(state, user.id);
+  state.ai.guestSessions.delete(user.id);
+
+  for (const [id, client] of [...state.collabClients.entries()]) {
+    if (client.userId !== user.id) continue;
+    client.canEdit = false;
+    client.token = "";
+    sendWs(client, { type: "access_revoked", userId: user.id, reason });
+    state.collabClients.delete(id);
+    client.socket.close(4003, "Access revoked");
+  }
+  for (const [id, client] of [...state.clients.entries()]) {
+    if (!revokedTokens.has(client.token)) continue;
+    try {
+      sendSse(client.response, "access-revoked", { userId: user.id, reason });
+      client.response.end();
+    } catch {
+      // Revocation still succeeds if an already-closing EventSource cannot receive the final event.
+    }
+    deleteSseClient(state, id, client);
+  }
+
+  state.session.users = state.session.users.filter((item) => item.id !== user.id);
+  for (const requestRecord of state.session.joinRequests) {
+    if (requestRecord.userId !== user.id) continue;
+    requestRecord.status = "removed";
+    delete requestRecord.token;
+  }
+  broadcastCollab(state, {
+    type: "presence_update",
+    userId: user.id,
+    name: user.name,
+    role: user.role,
+    filePath: "",
+    presence: collabPresence(state)
+  });
+  broadcastState(state);
+  return removedUser;
 }
 
 function applyEndedSessionState(state) {
@@ -5699,7 +5987,7 @@ function createLocalLeafServer(options = {}) {
       jsonResponse(response, 200, publicState(state, {
         isHost,
         canRead: isHost || Boolean(user),
-        canEdit: isHost || user?.role === "editor",
+        canEdit: isHost || user?.role === "maintainer",
         user
       }));
       return;
@@ -5708,7 +5996,7 @@ function createLocalLeafServer(options = {}) {
     if (request.method === "GET" && url.pathname === "/api/ai/sessions") {
       const identity = requestIdentity(state, request, url);
       if (!identity.isHost && !identity.canEdit) {
-        deny(response, "Editor approval is required before using LocalLeaf AI sessions.");
+        deny(response, "Maintainer access is required before using LocalLeaf AI sessions.");
         return;
       }
       jsonResponse(response, 200, aiSessionStoreForIdentity(state, identity).publicState(state.project));
@@ -5716,14 +6004,13 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/ai/sessions/create") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.isHost && !identity.canEdit) {
-        deny(response, "Editor approval is required before creating LocalLeaf AI sessions.");
-        return;
-      }
-      const sessionStore = aiSessionStoreForIdentity(state, identity);
-      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before creating LocalLeaf AI sessions.",
+        capture: (identity) => captureAiSessionMutationContext(state, identity)
+      });
+      if (!authorized) return;
+      const { body, context: { sessionStore, originProjectKey } } = authorized;
       try {
         validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
         jsonResponse(response, 200, sessionStore.createSession(state.project, body));
@@ -5734,14 +6021,13 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/ai/sessions/activate") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.isHost && !identity.canEdit) {
-        deny(response, "Editor approval is required before activating LocalLeaf AI sessions.");
-        return;
-      }
-      const sessionStore = aiSessionStoreForIdentity(state, identity);
-      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before activating LocalLeaf AI sessions.",
+        capture: (identity) => captureAiSessionMutationContext(state, identity)
+      });
+      if (!authorized) return;
+      const { body, context: { sessionStore, originProjectKey } } = authorized;
       try {
         validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
         jsonResponse(response, 200, sessionStore.activateSession(state.project, String(body.sessionId || body.id || "")));
@@ -5752,14 +6038,13 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/ai/sessions/update") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.isHost && !identity.canEdit) {
-        deny(response, "Editor approval is required before updating LocalLeaf AI sessions.");
-        return;
-      }
-      const sessionStore = aiSessionStoreForIdentity(state, identity);
-      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before updating LocalLeaf AI sessions.",
+        capture: (identity) => captureAiSessionMutationContext(state, identity)
+      });
+      if (!authorized) return;
+      const { body, context: { sessionStore, originProjectKey } } = authorized;
       try {
         validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
         jsonResponse(response, 200, sessionStore.updateSession(state.project, String(body.sessionId || body.id || ""), body));
@@ -5770,14 +6055,13 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/ai/sessions/rename") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.isHost && !identity.canEdit) {
-        deny(response, "Editor approval is required before renaming LocalLeaf AI sessions.");
-        return;
-      }
-      const sessionStore = aiSessionStoreForIdentity(state, identity);
-      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before renaming LocalLeaf AI sessions.",
+        capture: (identity) => captureAiSessionMutationContext(state, identity)
+      });
+      if (!authorized) return;
+      const { body, context: { sessionStore, originProjectKey } } = authorized;
       try {
         validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
         jsonResponse(response, 200, sessionStore.renameSession(
@@ -5792,14 +6076,13 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/ai/sessions/delete") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.isHost && !identity.canEdit) {
-        deny(response, "Editor approval is required before deleting LocalLeaf AI sessions.");
-        return;
-      }
-      const sessionStore = aiSessionStoreForIdentity(state, identity);
-      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before deleting LocalLeaf AI sessions.",
+        capture: (identity) => captureAiSessionMutationContext(state, identity)
+      });
+      if (!authorized) return;
+      const { body, context: { sessionStore, originProjectKey } } = authorized;
       try {
         validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
         jsonResponse(response, 200, sessionStore.deleteSession(
@@ -5814,14 +6097,13 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/ai/sessions/fork") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.isHost && !identity.canEdit) {
-        deny(response, "Editor approval is required before forking LocalLeaf AI sessions.");
-        return;
-      }
-      const sessionStore = aiSessionStoreForIdentity(state, identity);
-      const originProjectKey = sessionStore.projectKeyForRoot(state.project.root);
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before forking LocalLeaf AI sessions.",
+        capture: (identity) => captureAiSessionMutationContext(state, identity)
+      });
+      if (!authorized) return;
+      const { body, context: { sessionStore, originProjectKey } } = authorized;
       try {
         validateAiSessionMutationProject(state, sessionStore, body, originProjectKey);
         jsonResponse(response, 200, sessionStore.forkSession(
@@ -6122,12 +6404,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/message") {
-      const identity = requestIdentity(state, request, url);
-      if (!canUseAi(state, request, url)) {
-        deny(response, "Editor approval is required before asking LocalLeaf AI to inspect project text.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before asking LocalLeaf AI to inspect project text."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       try {
         const result = await runAgentForSession(state, identity, body);
         broadcastState(state);
@@ -6140,12 +6422,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/steer") {
-      const identity = requestIdentity(state, request, url);
-      if (!canUseAi(state, request, url)) {
-        deny(response, "Editor approval is required before steering LocalLeaf AI runs.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before steering LocalLeaf AI runs."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       try {
         const result = await runAgentForSession(state, identity, {
           ...body,
@@ -6166,12 +6448,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/run/cancel") {
-      const identity = requestIdentity(state, request, url);
-      if (!canUseAi(state, request, url)) {
-        deny(response, "Editor approval is required before cancelling LocalLeaf AI runs.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before cancelling LocalLeaf AI runs."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       const runId = String(body.runId || "").trim().slice(0, 80);
       const sessionStore = aiSessionStoreForIdentity(state, identity);
       const control = state.ai.runControllers.get(aiRunControllerKey(identity, runId));
@@ -6200,12 +6482,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/run") {
-      const identity = requestIdentity(state, request, url);
-      if (!canUseAi(state, request, url)) {
-        deny(response, "Editor approval is required before running LocalLeaf AI.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "ai",
+        message: "Maintainer access is required before running LocalLeaf AI."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       beginNdjsonResponse(response);
       let streamRunId = String(body.runId || randomId(8));
       let streamSessionId = String(body.sessionId || "");
@@ -6301,12 +6583,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && (url.pathname === "/api/agent/proposal/apply" || url.pathname === "/api/agent/approval/approve")) {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.canEdit) {
-        deny(response, "Editor approval is required before applying LocalLeaf AI proposals.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before applying LocalLeaf AI proposals."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       const proposal = state.ai.proposals.get(String(body.proposalId || body.id || ""));
       if (!proposal) {
         jsonResponse(response, 404, { error: "AI proposal was not found." });
@@ -6368,12 +6650,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/proposal/revert") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.canEdit) {
-        deny(response, "Editor approval is required before reverting LocalLeaf AI proposals.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before reverting LocalLeaf AI proposals."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       const proposal = state.ai.proposals.get(String(body.proposalId || body.id || ""));
       if (!proposal) {
         jsonResponse(response, 404, { error: "AI proposal was not found." });
@@ -6416,12 +6698,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/run/revert") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.canEdit) {
-        deny(response, "Editor approval is required before undoing LocalLeaf AI runs.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before undoing LocalLeaf AI runs."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       const runId = String(body.runId || "").trim();
       const anchorId = String(body.proposalId || body.anchorProposalId || "").trim();
       const allRunProposals = Array.from(state.ai.proposals.values()).filter((proposal) => proposal.runId === runId);
@@ -6480,12 +6762,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/approval/reject") {
-      const identity = requestIdentity(state, request, url);
-      if (!identity.canEdit) {
-        deny(response, "Editor approval is required before rejecting LocalLeaf AI proposals.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before rejecting LocalLeaf AI proposals."
+      });
+      if (!authorized) return;
+      const { body, identity } = authorized;
       const proposal = state.ai.proposals.get(String(body.proposalId || body.id || ""));
       if (!proposal) {
         jsonResponse(response, 404, { error: "AI proposal was not found." });
@@ -6523,11 +6805,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/search/replace") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before replacing project text.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before replacing project text."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       try {
         const result = replaceProjectText(state, body);
         broadcastState(state);
@@ -6771,11 +7054,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/project/main-file") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before changing project settings.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before changing project settings."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const fullPath = resolveProjectPath(state.project.root, body.path);
       if (!fs.existsSync(fullPath) || path.extname(fullPath).toLowerCase() !== ".tex") {
         jsonResponse(response, 400, { error: "Main file must be an existing .tex file." });
@@ -6788,11 +7072,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/file") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before changing project files.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before changing project files."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const filePath = body.path || state.project.mainFile;
       const fullPath = resolveProjectPath(state.project.root, filePath);
       if (!isTextFile(fullPath)) {
@@ -6830,11 +7115,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/file/create") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before creating files.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before creating files."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const filePath = String(body.path || "").trim();
       const fullPath = resolveProjectPath(state.project.root, filePath);
       if (!isTextFile(fullPath)) {
@@ -6854,10 +7140,13 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/file/upload") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before uploading files.");
-        return;
-      }
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before uploading files.",
+        reader: readRawBody
+      });
+      if (!authorized) return;
+      const fileBuffer = authorized.body;
       const filePath = normalizeRelativePath(String(request.headers["x-file-path"] || request.headers["x-file-name"] || "").trim());
       const fullPath = resolveProjectPath(state.project.root, filePath);
       if (!isTextFile(fullPath) && !isImageFile(fullPath)) {
@@ -6868,7 +7157,6 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 409, { error: "A file already exists at that path." });
         return;
       }
-      const fileBuffer = await readRawBody(request);
       if (!fileBuffer.length) {
         jsonResponse(response, 400, { error: "Uploaded file was empty." });
         return;
@@ -6882,11 +7170,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/folder/create") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before creating folders.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before creating folders."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const folderPath = String(body.path || "").trim();
       const fullPath = resolveProjectPath(state.project.root, folderPath);
       if (fs.existsSync(fullPath)) {
@@ -6901,11 +7190,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/file/rename") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before renaming project items.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before renaming project items."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const from = String(body.from || "").trim();
       const to = String(body.to || "").trim();
       const fromPath = resolveProjectPath(state.project.root, from);
@@ -6947,11 +7237,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/file/copy") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before copying project items.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before copying project items."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const from = String(body.from || "").trim();
       const to = String(body.to || "").trim();
       const fromPath = resolveProjectPath(state.project.root, from);
@@ -6986,11 +7277,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/file/delete") {
-      if (!canEditProject(state, request, url)) {
-        deny(response, "Editor approval is required before deleting files.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "edit",
+        message: "Maintainer access is required before deleting files."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const filePath = String(body.path || "").trim();
       const fullPath = resolveProjectPath(state.project.root, filePath);
       if (!fs.existsSync(fullPath)) {
@@ -7154,6 +7446,51 @@ function createLocalLeafServer(options = {}) {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/session/guest/role") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response);
+        return;
+      }
+      if (state.session.status !== "live") {
+        jsonResponse(response, 409, { error: "Guest roles can only be changed during a live session." });
+        return;
+      }
+      const body = await readBody(request);
+      const userId = String(body.userId || "").trim();
+      const role = normalizedGuestRole(body.role);
+      if (!userId || !role) {
+        jsonResponse(response, 400, { error: "Choose either viewer or maintainer for this guest." });
+        return;
+      }
+      const user = state.session.users.find((item) => item.id === userId && item.role !== "host");
+      if (!user) {
+        jsonResponse(response, 404, { error: "Guest was not found in this live session." });
+        return;
+      }
+      jsonResponse(response, 200, { ok: true, user: setGuestRole(state, user, role) });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/session/guest/remove") {
+      if (!isHostRequest(state, request, url)) {
+        deny(response);
+        return;
+      }
+      if (state.session.status !== "live") {
+        jsonResponse(response, 409, { error: "Guests can only be removed from a live session." });
+        return;
+      }
+      const body = await readBody(request);
+      const userId = String(body.userId || "").trim();
+      const user = state.session.users.find((item) => item.id === userId && item.role !== "host");
+      if (!user) {
+        jsonResponse(response, 404, { error: "Guest was not found in this live session." });
+        return;
+      }
+      jsonResponse(response, 200, { ok: true, user: removeGuestAccess(state, user) });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/join") {
       const body = await readBody(request);
       const name = String(body.name || "").trim().slice(0, 40);
@@ -7169,7 +7506,7 @@ function createLocalLeafServer(options = {}) {
         return;
       }
 
-      if (state.session.users.length >= state.session.maxUsers) {
+      if (sessionGuestCount(state) >= sessionGuestLimit(state)) {
         jsonResponse(response, 429, { error: "This session is full." });
         return;
       }
@@ -7181,7 +7518,7 @@ function createLocalLeafServer(options = {}) {
       const requestRecord = {
         id: randomId(5),
         name,
-        role: "editor",
+        role: "viewer",
         status: "pending",
         createdAt: Date.now()
       };
@@ -7225,7 +7562,12 @@ function createLocalLeafServer(options = {}) {
         jsonResponse(response, 409, { error: "This join request was already handled." });
         return;
       }
-      if (state.session.users.length >= state.session.maxUsers) {
+      const role = normalizedGuestRole(body.role, "viewer");
+      if (!role) {
+        jsonResponse(response, 400, { error: "Choose either viewer or maintainer for this guest." });
+        return;
+      }
+      if (sessionGuestCount(state) >= sessionGuestLimit(state)) {
         jsonResponse(response, 429, { error: "This session is full." });
         return;
       }
@@ -7234,12 +7576,13 @@ function createLocalLeafServer(options = {}) {
       const user = {
         id: randomId(5),
         name: requestRecord.name,
-        role: body.role === "viewer" ? "viewer" : "editor",
+        role,
         color: "#d9976f",
         online: false,
         token
       };
       requestRecord.status = "approved";
+      requestRecord.role = user.role;
       requestRecord.token = token;
       requestRecord.userId = user.id;
       state.session.activeTokens.set(token, user.id);
@@ -7247,13 +7590,7 @@ function createLocalLeafServer(options = {}) {
       broadcastState(state);
       jsonResponse(response, 200, {
         ok: true,
-        user: {
-          id: user.id,
-          name: user.name,
-          role: user.role,
-          color: user.color,
-          online: user.online
-        }
+        user: publicSessionUser(user)
       });
       return;
     }
@@ -7289,21 +7626,23 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/pdf/source-position") {
-      if (!canReadProject(state, request, url)) {
-        deny(response, "Join approval is required before mapping PDF source positions.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "read",
+        message: "Join approval is required before mapping PDF source positions."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       jsonResponse(response, 200, await resolvePdfSourcePosition(state, body));
       return;
     }
 
     if (request.method === "POST" && url.pathname === "/api/pdf/output-position") {
-      if (!canReadProject(state, request, url)) {
-        deny(response, "Join approval is required before mapping source positions to the PDF.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "read",
+        message: "Join approval is required before mapping source positions to the PDF."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       jsonResponse(response, 200, await resolvePdfOutputPosition(state, body));
       return;
     }
@@ -7372,11 +7711,12 @@ function createLocalLeafServer(options = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/chat") {
-      if (!canReadProject(state, request, url)) {
-        deny(response, "Join approval is required before sending chat messages.");
-        return;
-      }
-      const body = await readBody(request);
+      const authorized = await readAuthorizedRequestPayload(state, request, response, url, {
+        capability: "read",
+        message: "Join approval is required before sending chat messages."
+      });
+      if (!authorized) return;
+      const { body } = authorized;
       const message = String(body.message || "").trim().slice(0, 500);
       if (!message) {
         jsonResponse(response, 400, { error: "Message is required." });
@@ -7440,7 +7780,7 @@ function createLocalLeafServer(options = {}) {
           publicState(state, {
             isHost,
             canRead: isHost || Boolean(token && state.session.status === "live" && state.session.activeTokens.has(token)),
-            canEdit: isHost || user?.role === "editor",
+            canEdit: isHost || user?.role === "maintainer",
             user
           })
         );

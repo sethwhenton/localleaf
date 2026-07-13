@@ -231,7 +231,7 @@ The application is desktop-only. Do not create a mobile navigation system or com
 
 ### Project creation
 
-- Project Overview is a centered desktop work surface, not a top-aligned web page. It remains contained inside the application viewport and owns any exceptional overflow locally.
+- Project Overview is a top-aligned desktop work surface within the standard dashboard content padding. It remains horizontally bounded, and the dashboard content area owns any exceptional overflow.
 - New Project opens one focused dialog with a 18px title, project name, editable destination path, native Browse action, and clear Cancel/Create actions. The destination copy must explain that LocalLeaf creates the named child folder inside it.
 - Creation keeps one orange primary action and neutral secondary controls. Pending and field-level errors stay inside the dialog without shifting its structure; destination errors focus and identify the destination field.
 - Retried submissions are idempotent. A delayed response must not produce `Project 2`, and a successful project creation must not be presented as a failure merely because editor hydration needs a retry.

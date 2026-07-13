@@ -1,317 +1,356 @@
-document.documentElement.classList.add("js-enabled");
+document.documentElement.classList.add("js");
+
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const finePointer = window.matchMedia("(pointer: fine)");
+const desktopLayout = window.matchMedia("(min-width: 761px)");
+const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+const smoothstep = (start, end, value) => {
+  const amount = clamp((value - start) / Math.max(0.0001, end - start));
+  return amount * amount * (3 - 2 * amount);
+};
 
 const header = document.querySelector("[data-header]");
-const themeToggle = document.querySelector("[data-theme-toggle]");
-const previewSection = document.querySelector("[data-preview-section]");
-const previewScreens = [...document.querySelectorAll("[data-preview-screen]")];
-const previewStep = document.querySelector("[data-preview-step]");
-const previewTitle = document.querySelector("[data-preview-title]");
-const previewCopy = document.querySelector("[data-preview-copy]");
-const previewWindowTitle = document.querySelector("[data-preview-window-title]");
-const aiSection = document.querySelector("[data-ai-section]");
-const aiImage = document.querySelector("[data-theme-image]");
-const themeImages = [...document.querySelectorAll("img[data-light][data-dark]")];
-const aiLayout = document.querySelector(".ai-layout");
-const aiImageFrame = document.querySelector(".ai-image-frame");
-const aiTitle = document.querySelector("[data-ai-title]");
-const aiCopy = document.querySelector("[data-ai-copy]");
-const aiPoints = document.querySelector("[data-ai-points]");
-const aiCaption = document.querySelector("[data-ai-caption]");
-const previewDots = [...document.querySelectorAll("[data-preview-dot]")];
-const aiDots = [...document.querySelectorAll("[data-ai-dot]")];
-const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const progressBar = document.querySelector("[data-progress]");
+const toneSections = [...document.querySelectorAll("[data-header-tone]")];
+const hero = document.querySelector(".hero");
+const wordmark = document.querySelector(".balloon-wordmark");
+const heroCopy = document.querySelector("[data-hero-copy]");
+const parallaxPrints = [...document.querySelectorAll("[data-parallax]")];
+const manifesto = document.querySelector(".manifesto");
+const manifestoImage = document.querySelector(".manifesto-image");
+const storyFilm = document.querySelector(".story-film");
+const storyImage = document.querySelector(".story-film > img");
+const stackStage = document.querySelector("[data-stack-stage]");
+const stackCards = [...document.querySelectorAll("[data-stack-card]")];
 
-const previewStates = [
-  {
-    step: "1 / 3",
-    title: "Host the room",
-    windowTitle: "Session Management",
-    copy: "Copy a temporary link, approve collaborators, and keep the project running from the host computer.",
-  },
-  {
-    step: "2 / 3",
-    title: "Write with people",
-    windowTitle: "Browser Editor",
-    copy: "Edit LaTeX, preview the PDF, and keep human chat beside the work instead of in another app.",
-  },
-  {
-    step: "3 / 3",
-    title: "Compile locally",
-    windowTitle: "Compiled Output",
-    copy: "Build the PDF on the host computer and inspect warnings without sending project files to a cloud workspace.",
-  },
-];
+let scrollFrame = 0;
 
-const aiSlides = [
-  {
-    title: "Let AI assist you by asking for help, then approve the edit.",
-    copy:
-      "The AI Helper sits inside the same right rail as Chat and Changes. It can explain LaTeX issues, draft replacements, and ask before it touches your files.",
-    caption: "AI requests edit access before LocalLeaf applies a file change.",
-    points: ["Approval cards before writes", "Diffs tracked in Changes", "Safe text edits by default"],
-    light: "./assets/editor-ai-helper-light.png",
-    dark: "./assets/editor-ai-helper-dark.png",
-    alt: "LocalLeaf app layout with the AI Helper right rail open",
-  },
-  {
-    title: "Use local models or bring your own key.",
-    copy:
-      "Download supported GGUF models for local help, or connect an OpenAI-compatible provider. The built-in harness routes requests and keeps edit approvals in LocalLeaf.",
-    caption: "The model picker is a focused popup for local models, provider keys, and the Cursor-style edit harness.",
-    points: ["Local GGUF model downloads", "OpenAI-compatible provider keys", "Cursor-style harness with approvals"],
-    light: "./assets/model-picker-popup-light.png",
-    dark: "./assets/model-picker-popup-dark.png",
-    alt: "LocalLeaf model picker popup with local models and provider routing",
-  },
-  {
-    title: "Connect the models you trust.",
-    copy:
-      "LocalLeaf supports connected providers, local runtimes, and a Cursor-style harness while keeping approvals visible in the app.",
-    caption: "Provider settings keep hosted models, local models, and custom OpenAI-compatible endpoints in one place.",
-    points: ["OpenCode Go and OpenAI-compatible providers", "Local Ollama or LM Studio routes", "Custom endpoints and Cursor provider presets"],
-    light: "./assets/ai-providers-settings-light.png",
-    dark: "./assets/ai-providers-settings-dark.png",
-    alt: "LocalLeaf AI provider settings with connected and popular provider rows",
-  },
-];
-
-let activePreviewIndex = 0;
-let activeAiIndex = 0;
-let lastScrollY = window.scrollY;
-let ticking = false;
-let lenisFrame = 0;
-
-const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
-
-function currentTheme() {
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-}
-
-function imageForSlide(slide) {
-  return currentTheme() === "dark" ? slide.dark : slide.light;
-}
-
-function updateThemeToggle() {
-  if (!themeToggle) return;
-  const dark = currentTheme() === "dark";
-  themeToggle.setAttribute("aria-pressed", String(dark));
-  themeToggle.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
-}
-
-function setTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  try {
-    localStorage.setItem("localleaf.landingTheme", theme);
-  } catch {}
-  updateThemeToggle();
-  updateThemeImages();
-  setAiSlide(activeAiIndex, { forceImage: true });
-}
-
-function updateThemeImages() {
-  const key = currentTheme() === "dark" ? "dark" : "light";
-  themeImages.forEach((image) => {
-    const src = image.dataset[key];
-    if (src && image.getAttribute("src") !== src) {
-      image.setAttribute("src", src);
-    }
-  });
-}
-
-function setPreview(index) {
-  if (!previewScreens.length) return;
-  activePreviewIndex = clamp(index, 0, previewStates.length - 1);
-  const state = previewStates[activePreviewIndex];
-
-  previewScreens.forEach((screen, screenIndex) => {
-    screen.classList.toggle("is-active", screenIndex === activePreviewIndex);
-  });
-
-  if (previewStep) previewStep.textContent = state.step;
-  if (previewTitle) previewTitle.textContent = state.title;
-  if (previewCopy) previewCopy.textContent = state.copy;
-  if (previewWindowTitle) previewWindowTitle.textContent = state.windowTitle;
-  previewDots.forEach((dot, dotIndex) => dot.classList.toggle("active", dotIndex === activePreviewIndex));
-}
-
-function setAiSlide(index, options = {}) {
-  if (!aiImage) return;
-  activeAiIndex = clamp(index, 0, aiSlides.length - 1);
-  const slide = aiSlides[activeAiIndex];
-  const nextSrc = imageForSlide(slide);
-
-  if (aiImage.getAttribute("src") !== nextSrc || options.forceImage) {
-    aiImageFrame?.classList.add("is-swapping");
-    aiImage.setAttribute("src", nextSrc);
-    aiImage.setAttribute("alt", slide.alt);
-    window.setTimeout(() => aiImageFrame?.classList.remove("is-swapping"), 180);
-  }
-
-  if (aiTitle) aiTitle.textContent = slide.title;
-  if (aiCopy) aiCopy.textContent = slide.copy;
-  if (aiCaption) aiCaption.textContent = slide.caption;
-  if (aiPoints) {
-    aiPoints.innerHTML = slide.points.map((point) => `<span>${point}</span>`).join("");
-  }
-  aiDots.forEach((dot, dotIndex) => dot.classList.toggle("active", dotIndex === activeAiIndex));
-
-  if (options.animate !== false) replayAiSlideAnimation();
-}
-
-function replayAiSlideAnimation() {
-  if (!aiLayout || prefersReducedMotion.matches) return;
-  aiLayout.classList.remove("is-slide-entering");
-  void aiLayout.offsetWidth;
-  aiLayout.classList.add("is-slide-entering");
-  window.setTimeout(() => aiLayout.classList.remove("is-slide-entering"), 720);
-}
-
-function updateHeader() {
+function updateHeaderTone() {
   if (!header) return;
-  const currentY = window.scrollY;
-  const goingDown = currentY > lastScrollY + 2;
-  const goingUp = currentY < lastScrollY - 2;
-  const pageEnd = document.documentElement.scrollHeight - window.innerHeight;
-  const atEnd = currentY >= pageEnd - 18;
+  const sampleY = Math.min(78, window.innerHeight * 0.12);
+  const active = toneSections.find((section) => {
+    const rect = section.getBoundingClientRect();
+    return rect.top <= sampleY && rect.bottom > sampleY;
+  });
+  header.classList.toggle("is-dark", active?.dataset.headerTone === "dark");
+}
 
-  header.classList.toggle("is-scrolled", currentY > 12);
+function updateStackCards() {
+  if (!stackStage || !stackCards.length || !desktopLayout.matches || reducedMotion.matches) return;
 
-  if (atEnd || goingUp) {
-    header.classList.remove("is-hidden");
-  } else if (goingDown || currentY <= 12) {
-    header.classList.add("is-hidden");
+  const rect = stackStage.getBoundingClientRect();
+  const distance = Math.max(1, rect.height - window.innerHeight);
+  const progress = clamp(-rect.top / distance);
+  const viewport = window.innerHeight;
+  const timings = [
+    { enterStart: -1, enterEnd: 0, exitStart: 0.3, exitEnd: 0.53, baseRotation: -0.8 },
+    { enterStart: 0.17, enterEnd: 0.34, exitStart: 0.6, exitEnd: 0.82, baseRotation: 0.9 },
+    { enterStart: 0.5, enterEnd: 0.7, exitStart: 2, exitEnd: 3, baseRotation: -0.55 },
+  ];
+
+  stackCards.forEach((card, index) => {
+    const timing = timings[index];
+    const entered = index === 0 ? 1 : smoothstep(timing.enterStart, timing.enterEnd, progress);
+    const exited = smoothstep(timing.exitStart, timing.exitEnd, progress);
+    const y = (1 - entered) * viewport * 0.92 - exited * viewport * 0.86;
+    const scale = 0.84 + entered * 0.16 - exited * 0.045;
+    const rotation = timing.baseRotation + exited * (index % 2 === 0 ? -2.3 : 2.1);
+    const opacity = clamp(entered * 1.4) * (1 - exited * 0.32);
+
+    card.style.setProperty("--card-y", `${y.toFixed(2)}px`);
+    card.style.setProperty("--card-scale", scale.toFixed(4));
+    card.style.setProperty("--card-rotate", `${rotation.toFixed(3)}deg`);
+    card.style.setProperty("--card-opacity", opacity.toFixed(3));
+  });
+}
+
+function updateParallax() {
+  if (reducedMotion.matches || !desktopLayout.matches) return;
+
+  if (hero) {
+    const rect = hero.getBoundingClientRect();
+    const amount = clamp(-rect.top / Math.max(1, rect.height), 0, 1.2);
+    wordmark?.style.setProperty("--parallax-y", `${(-amount * 105).toFixed(2)}px`);
+    heroCopy?.style.setProperty("--hero-y", `${(-amount * 34).toFixed(2)}px`);
+    parallaxPrints.forEach((print) => {
+      const speed = Number(print.dataset.parallax || 0);
+      print.style.setProperty("--parallax-y", `${(amount * speed * 360).toFixed(2)}px`);
+    });
   }
 
-  lastScrollY = currentY;
+  if (manifesto && manifestoImage) {
+    const rect = manifesto.getBoundingClientRect();
+    const position = clamp((window.innerHeight - rect.top) / (window.innerHeight + rect.height));
+    manifestoImage.style.setProperty("--media-y", `${((position - 0.5) * 58).toFixed(2)}px`);
+  }
+
+  if (storyFilm && storyImage) {
+    const rect = storyFilm.getBoundingClientRect();
+    const position = clamp((window.innerHeight - rect.top) / (window.innerHeight + rect.height));
+    storyImage.style.setProperty("--media-y", `${((position - 0.5) * 52).toFixed(2)}px`);
+  }
 }
 
-function updatePreviewFromScroll() {
-  if (!previewSection) return;
-  const rect = previewSection.getBoundingClientRect();
-  const distance = Math.max(1, rect.height - window.innerHeight);
-  const progress = clamp(-rect.top / distance);
-  const index = Math.min(previewStates.length - 1, Math.floor(progress * previewStates.length + 0.12));
-  if (index !== activePreviewIndex) setPreview(index);
+function updateScrollEffects() {
+  scrollFrame = 0;
+  const distance = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+  progressBar?.style.setProperty("transform", `scaleX(${clamp(window.scrollY / distance)})`);
+  updateHeaderTone();
+  updateParallax();
+  updateStackCards();
 }
 
-function updateAiFromScroll() {
-  if (!aiSection) return;
-  const rect = aiSection.getBoundingClientRect();
-  const distance = Math.max(1, rect.height - window.innerHeight);
-  const progress = clamp(-rect.top / distance);
-  const index = Math.min(aiSlides.length - 1, Math.floor(progress * aiSlides.length + 0.12));
-  if (index !== activeAiIndex) setAiSlide(index);
-}
-
-function updateOnScroll() {
-  if (ticking) return;
-  ticking = true;
-  window.requestAnimationFrame(() => {
-    updateHeader();
-    updatePreviewFromScroll();
-    updateAiFromScroll();
-    revealVisibleItems();
-    ticking = false;
-  });
+function requestScrollUpdate() {
+  if (scrollFrame) return;
+  scrollFrame = window.requestAnimationFrame(updateScrollEffects);
 }
 
 function initReveals() {
-  const revealItems = [...document.querySelectorAll(".reveal")];
-  if (prefersReducedMotion.matches || !("IntersectionObserver" in window)) {
-    revealItems.forEach((item) => item.classList.add("revealed"));
-    return null;
+  const items = [...document.querySelectorAll(".reveal")];
+  if (!items.length) return;
+
+  if (reducedMotion.matches || !("IntersectionObserver" in window)) {
+    items.forEach((item) => item.classList.add("is-visible"));
+    return;
   }
 
   const observer = new IntersectionObserver(
     (entries) => {
       entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add("revealed");
-          observer.unobserve(entry.target);
-        }
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("is-visible");
+        observer.unobserve(entry.target);
       });
     },
-    {
-      root: null,
-      rootMargin: "0px 0px -8% 0px",
-      threshold: 0.08,
-    }
+    { rootMargin: "0px 0px -8% 0px", threshold: 0.08 }
   );
 
-  revealItems.forEach((item) => observer.observe(item));
-  return observer;
+  items.forEach((item) => observer.observe(item));
 }
 
-function revealVisibleItems() {
-  if (prefersReducedMotion.matches) return;
-  document.querySelectorAll(".reveal:not(.revealed)").forEach((item) => {
-    const rect = item.getBoundingClientRect();
-    if (rect.top < window.innerHeight * 0.92 && rect.bottom > window.innerHeight * 0.04) {
-      item.classList.add("revealed");
+function initMenu() {
+  const menu = document.querySelector("[data-mobile-menu]");
+  const openButton = document.querySelector("[data-menu-button]");
+  const closeButton = document.querySelector("[data-menu-close]");
+  if (!menu || !openButton || !closeButton) return;
+
+  let previousFocus = null;
+  const setOpen = (open, restoreFocus = true) => {
+    menu.classList.toggle("is-open", open);
+    menu.setAttribute("aria-hidden", String(!open));
+    openButton.setAttribute("aria-expanded", String(open));
+    document.body.classList.toggle("menu-open", open);
+    if (open) {
+      previousFocus = document.activeElement;
+      closeButton.focus();
+    } else if (restoreFocus && previousFocus instanceof HTMLElement) {
+      previousFocus.focus();
     }
+  };
+
+  openButton.addEventListener("click", () => setOpen(true));
+  closeButton.addEventListener("click", () => setOpen(false));
+  menu.querySelectorAll("a").forEach((link) => link.addEventListener("click", () => setOpen(false, false)));
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && menu.classList.contains("is-open")) setOpen(false);
+  });
+}
+
+function initCaseRail() {
+  const rail = document.querySelector("[data-case-rail]");
+  const cards = [...document.querySelectorAll("[data-case-card]")];
+  const previous = document.querySelector("[data-case-prev]");
+  const next = document.querySelector("[data-case-next]");
+  const current = document.querySelector("[data-case-current]");
+  if (!rail || !cards.length || !previous || !next || !current) return;
+
+  let index = 0;
+  let pointerId = null;
+  let startX = 0;
+  let startScroll = 0;
+  let moved = false;
+  let railFrame = 0;
+
+  const setIndex = (value, shouldScroll = true) => {
+    index = (value + cards.length) % cards.length;
+    current.textContent = String(index + 1);
+    cards.forEach((card, cardIndex) => card.toggleAttribute("aria-current", cardIndex === index));
+    if (shouldScroll) cards[index].scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", inline: "start", block: "nearest" });
+  };
+
+  const syncIndex = () => {
+    railFrame = 0;
+    const railLeft = rail.getBoundingClientRect().left;
+    let closestIndex = 0;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    cards.forEach((card, cardIndex) => {
+      const distance = Math.abs(card.getBoundingClientRect().left - railLeft);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = cardIndex;
+      }
+    });
+    if (closestIndex !== index) setIndex(closestIndex, false);
+  };
+
+  previous.addEventListener("click", () => setIndex(index - 1));
+  next.addEventListener("click", () => setIndex(index + 1));
+  rail.addEventListener("scroll", () => {
+    if (!railFrame) railFrame = window.requestAnimationFrame(syncIndex);
+  }, { passive: true });
+
+  rail.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setIndex(index + 1);
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setIndex(index - 1);
+    }
+  });
+
+  rail.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.target.closest("a, button")) return;
+    pointerId = event.pointerId;
+    startX = event.clientX;
+    startScroll = rail.scrollLeft;
+    moved = false;
+    rail.classList.add("is-dragging");
+    rail.setPointerCapture(pointerId);
+  });
+
+  rail.addEventListener("pointermove", (event) => {
+    if (pointerId !== event.pointerId) return;
+    const delta = event.clientX - startX;
+    if (Math.abs(delta) > 5) moved = true;
+    rail.scrollLeft = startScroll - delta;
+  });
+
+  const stopDragging = (event) => {
+    if (pointerId !== event.pointerId) return;
+    rail.classList.remove("is-dragging");
+    if (rail.hasPointerCapture(pointerId)) rail.releasePointerCapture(pointerId);
+    pointerId = null;
+    if (moved) window.requestAnimationFrame(syncIndex);
+  };
+
+  rail.addEventListener("pointerup", stopDragging);
+  rail.addEventListener("pointercancel", stopDragging);
+  setIndex(0, false);
+}
+
+function initPrinciples() {
+  const text = document.querySelector("[data-principle-text]");
+  const current = document.querySelector("[data-principle-current]");
+  const previous = document.querySelector("[data-principle-prev]");
+  const next = document.querySelector("[data-principle-next]");
+  const context = document.querySelector(".principle-source span");
+  if (!text || !current || !previous || !next || !context) return;
+
+  const principles = [
+    {
+      text: "One verified link. One person at the door. One host in control.",
+      context: "Host-owned collaboration",
+    },
+    {
+      text: "The room disappears when the host closes it. The project does not.",
+      context: "Temporary public access",
+    },
+    {
+      text: "AI can suggest the change. Only you decide whether it lands.",
+      context: "Review before writes",
+    },
+  ];
+  let index = 0;
+  let timer = 0;
+
+  const render = (nextIndex) => {
+    index = (nextIndex + principles.length) % principles.length;
+    const apply = () => {
+      text.textContent = principles[index].text;
+      context.textContent = principles[index].context;
+      current.textContent = String(index + 1);
+      text.classList.remove("is-changing");
+    };
+
+    window.clearTimeout(timer);
+    if (reducedMotion.matches) {
+      apply();
+      return;
+    }
+    text.classList.add("is-changing");
+    timer = window.setTimeout(apply, 170);
+  };
+
+  previous.addEventListener("click", () => render(index - 1));
+  next.addEventListener("click", () => render(index + 1));
+}
+
+function initTilt() {
+  if (reducedMotion.matches || !finePointer.matches) return;
+  document.querySelectorAll("[data-tilt]").forEach((card) => {
+    const baseRotation = card.classList.contains("download-card-lime") ? -3 : 2;
+    card.addEventListener("pointermove", (event) => {
+      const rect = card.getBoundingClientRect();
+      const x = (event.clientX - rect.left) / rect.width - 0.5;
+      const y = (event.clientY - rect.top) / rect.height - 0.5;
+      card.style.transform = `rotateZ(${baseRotation}deg) rotateX(${(-y * 7).toFixed(2)}deg) rotateY(${(x * 8).toFixed(2)}deg)`;
+    });
+    card.addEventListener("pointerleave", () => {
+      card.style.transform = `rotateZ(${baseRotation}deg) rotateX(0deg) rotateY(0deg)`;
+    });
   });
 }
 
 function initSmoothScroll() {
-  if (prefersReducedMotion.matches || typeof window.Lenis !== "function") return null;
+  if (reducedMotion.matches || typeof window.Lenis !== "function") return null;
 
-  const isTouch = window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
   const lenis = new window.Lenis({
-    duration: isTouch ? 0.85 : 1.18,
-    lerp: isTouch ? 0.16 : 0.09,
+    duration: 1.12,
+    lerp: 0.1,
     smoothWheel: true,
     smoothTouch: false,
     wheelMultiplier: 0.92,
-    touchMultiplier: 1.35,
+    touchMultiplier: 1.25,
     normalizeWheel: true,
-    anchors: {
-      offset: -86,
-      duration: 1.05,
-    },
+    anchors: { offset: -70, duration: 1 },
   });
 
-  const raf = (time) => {
+  let frame = 0;
+  let activeUntil = 0;
+  const animate = (time) => {
+    frame = 0;
     lenis.raf(time);
-    lenisFrame = window.requestAnimationFrame(raf);
+    requestScrollUpdate();
+    if (time < activeUntil || lenis.isScrolling === "smooth") frame = window.requestAnimationFrame(animate);
+  };
+  const start = () => {
+    activeUntil = performance.now() + 1800;
+    if (!frame) frame = window.requestAnimationFrame(animate);
   };
 
-  lenisFrame = window.requestAnimationFrame(raf);
-  lenis.on("scroll", updateOnScroll);
-  window.localLeafLenis = lenis;
+  lenis.on("virtual-scroll", start);
+  lenis.on("scroll", requestScrollUpdate);
+  document.addEventListener("click", (event) => {
+    if (event.target.closest('a[href^="#"]')) start();
+  });
+  window.addEventListener("wheel", start, { passive: true });
   return lenis;
 }
 
-themeToggle?.addEventListener("click", () => {
-  setTheme(currentTheme() === "dark" ? "light" : "dark");
-});
+initReveals();
+initMenu();
+initCaseRail();
+initPrinciples();
+initTilt();
+const lenis = initSmoothScroll();
 
-const smoothScroller = initSmoothScroll();
-const revealObserver = initReveals();
-
-window.addEventListener("scroll", updateOnScroll, { passive: true });
+window.addEventListener("scroll", requestScrollUpdate, { passive: true });
 window.addEventListener("resize", () => {
-  smoothScroller?.resize?.();
-  updateOnScroll();
-  revealVisibleItems();
+  lenis?.resize?.();
+  requestScrollUpdate();
 });
-window.addEventListener("load", () => {
-  smoothScroller?.resize?.();
-  updateOnScroll();
-  revealVisibleItems();
-}, { once: true });
+window.addEventListener("load", requestScrollUpdate, { once: true });
+reducedMotion.addEventListener?.("change", requestScrollUpdate);
 
-prefersReducedMotion.addEventListener?.("change", () => {
-  if (prefersReducedMotion.matches) {
-    smoothScroller?.destroy?.();
-    if (lenisFrame) window.cancelAnimationFrame(lenisFrame);
-    revealObserver?.disconnect?.();
-    document.querySelectorAll(".reveal").forEach((item) => item.classList.add("revealed"));
-  }
-});
-
-updateThemeToggle();
-updateThemeImages();
-setPreview(0);
-setAiSlide(0, { forceImage: true, animate: false });
-updateOnScroll();
-revealVisibleItems();
+requestScrollUpdate();

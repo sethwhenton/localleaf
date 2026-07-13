@@ -228,6 +228,58 @@ async function testHostStartupAndHelp(baseUrl) {
   pass("host-authenticated app startup");
 
   await rendererValue(`(() => {
+    if (local.hostRailCollapsed) {
+      local.hostRailCollapsed = false;
+      localStorage.setItem("localleaf.hostRailCollapsed", "0");
+      render();
+    }
+    return true;
+  })()`);
+  await waitForRenderer(`!document.querySelector(".host-nav-rail")?.classList.contains("host-nav-rail-collapsed")`, "the expanded navigation baseline");
+  await rendererValue(`document.querySelector("#railCollapse")?.click()`);
+  await waitForRenderer(
+    `document.querySelector("#app")?.classList.contains("app-shell-rail-collapsing") && document.querySelector(".host-nav-rail")?.classList.contains("host-nav-rail-collapsed")`,
+    "the left navigation collapse motion"
+  );
+  const railCollapseMotion = await rendererValue(`(() => ({
+    rail: getComputedStyle(document.querySelector(".host-nav-rail")).animationName,
+    content: getComputedStyle(document.querySelector(".window-content")).animationName,
+    collapsed: document.querySelector(".host-nav-rail")?.classList.contains("host-nav-rail-collapsed") || false,
+    labelHidden: getComputedStyle(document.querySelector("#railHome .host-rail-label")).display === "none"
+  }))()`);
+  ensure(
+    railCollapseMotion.collapsed
+      && railCollapseMotion.labelHidden
+      && railCollapseMotion.rail.includes("localleaf-rail-collapse-in")
+      && railCollapseMotion.content.includes("localleaf-content-shift-left"),
+    `The left navigation did not collapse with compositor motion: ${JSON.stringify(railCollapseMotion)}`
+  );
+  await rendererValue(`document.querySelector("#railCollapse")?.click()`);
+  await waitForRenderer(
+    `document.querySelector("#app")?.classList.contains("app-shell-rail-expanding") && !document.querySelector(".host-nav-rail")?.classList.contains("host-nav-rail-collapsed")`,
+    "the left navigation expand motion"
+  );
+  const railExpandMotion = await rendererValue(`(() => ({
+    rail: getComputedStyle(document.querySelector(".host-nav-rail")).animationName,
+    content: getComputedStyle(document.querySelector(".window-content")).animationName,
+    label: getComputedStyle(document.querySelector("#railHome .host-rail-label")).animationName,
+    expandedLabel: document.querySelector("#railCollapse .host-rail-label")?.textContent?.trim() || ""
+  }))()`);
+  ensure(
+    railExpandMotion.rail.includes("localleaf-rail-expand-in")
+      && railExpandMotion.content.includes("localleaf-content-shift-right")
+      && railExpandMotion.label.includes("localleaf-rail-label-in")
+      && railExpandMotion.expandedLabel === "Collapse",
+    `The left navigation did not open smoothly: ${JSON.stringify(railExpandMotion)}`
+  );
+  await delay(360);
+  ensure(
+    await rendererValue(`!document.querySelector("#app")?.classList.contains("app-shell-rail-expanding")`),
+    "The left navigation entrance class did not clean itself up."
+  );
+  pass("left navigation opens and collapses with restrained compositor motion");
+
+  await rendererValue(`(() => {
     const button = document.querySelector("#newProject");
     button?.focus();
     button?.click();
@@ -310,6 +362,7 @@ async function testHostStartupAndHelp(baseUrl) {
     `(() => Boolean(document.querySelector('#settingsPanel-providers:not([hidden]) .provider-test-result.green')))()`,
     "the connected-provider status badge"
   );
+  await delay(220);
   const providerStatusStyle = await rendererValue(`(() => {
     const badge = document.querySelector('#settingsPanel-providers:not([hidden]) .provider-test-result.green');
     const row = badge?.closest('.provider-row');
@@ -355,10 +408,10 @@ async function testHostStartupAndHelp(baseUrl) {
       && providerStatusStyle.text === "Connection ready."
       && providerStatusStyle.fontSize === "11px"
       && providerStatusStyle.lineHeight === "16px"
-      && providerStatusStyle.height === 20
+      && Math.abs(providerStatusStyle.height - 20) <= 0.5
       && providerStatusStyle.metadataFontSize === "11px"
       && providerStatusStyle.metadataLineHeight === "16px"
-      && providerStatusStyle.metadataHeight === 20,
+      && Math.abs(providerStatusStyle.metadataHeight - 20) <= 0.5,
     `The connected-provider status badge drifted from its compact 11px metadata scale: ${JSON.stringify(providerStatusStyle)}`
   );
   ensure(
@@ -374,6 +427,374 @@ async function testHostStartupAndHelp(baseUrl) {
     `The connected-provider status badge or Settings dialog overflowed the supported 1024x640 viewport: ${JSON.stringify(providerStatusStyle)}`
   );
   pass("provider connection status stays compact and contained at 1024x640");
+
+  await rendererValue(`(() => {
+    document.querySelector('#settingsTab-models')?.click();
+    const disclosure = document.querySelector('#settingsPanel-models:not([hidden]) [data-toggle-provider-model-group]');
+    if (disclosure?.getAttribute('aria-expanded') === 'false') disclosure.click();
+    return true;
+  })()`);
+  await waitForRenderer(
+    `(() => {
+      const disclosure = document.querySelector('#settingsPanel-models:not([hidden]) [data-toggle-provider-model-group]');
+      const panel = disclosure?.getAttribute('aria-controls')
+        ? document.getElementById(disclosure.getAttribute('aria-controls'))
+        : null;
+      return Boolean(disclosure && panel && !panel.hidden && disclosure.getAttribute('aria-expanded') === 'true');
+    })()`,
+    "the expanded provider model group"
+  );
+  const modelGroupCollapseStart = await rendererValue(`(() => {
+    const modal = document.querySelector('.settings-preferences-modal');
+    const options = modal?.querySelector('.settings-options');
+    const disclosure = modal?.querySelector('#settingsPanel-models:not([hidden]) [data-toggle-provider-model-group]');
+    const panel = disclosure?.getAttribute('aria-controls')
+      ? document.getElementById(disclosure.getAttribute('aria-controls'))
+      : null;
+    if (!modal || !options || !disclosure || !panel) return null;
+    const maxScrollTop = Math.max(0, options.scrollHeight - options.clientHeight);
+    options.scrollTop = Math.min(24, maxScrollTop);
+    window.__localLeafSettingsModalIdentity = modal;
+    window.__localLeafModelDisclosureIdentity = disclosure;
+    window.__localLeafModelGroupScrollTop = options.scrollTop;
+    disclosure.focus({ preventScroll: true });
+    disclosure.click();
+    return {
+      modalSame: document.querySelector('.settings-preferences-modal') === modal,
+      disclosureSame: document.querySelector('[data-toggle-provider-model-group]') === disclosure,
+      focused: document.activeElement === disclosure,
+      expanded: disclosure.getAttribute('aria-expanded'),
+      hiding: panel.classList.contains('is-hiding'),
+      transitionProperty: getComputedStyle(panel).transitionProperty,
+      startHeight: panel.getBoundingClientRect().height,
+      panelHidden: panel.hidden
+    };
+  })()`);
+  ensure(
+    modelGroupCollapseStart
+      && modelGroupCollapseStart.modalSame
+      && modelGroupCollapseStart.disclosureSame
+      && modelGroupCollapseStart.focused
+      && modelGroupCollapseStart.expanded === "false"
+      && modelGroupCollapseStart.hiding
+      && modelGroupCollapseStart.transitionProperty.includes("max-height")
+      && modelGroupCollapseStart.startHeight > 0
+      && !modelGroupCollapseStart.panelHidden,
+    `The provider model group did not begin its in-place collapse cleanly: ${JSON.stringify(modelGroupCollapseStart)}`
+  );
+  await waitForRenderer(
+    `(() => {
+      const disclosure = window.__localLeafModelDisclosureIdentity;
+      const panel = disclosure?.getAttribute('aria-controls')
+        ? document.getElementById(disclosure.getAttribute('aria-controls'))
+        : null;
+      return Boolean(panel?.hidden);
+    })()`,
+    "the provider model group collapse"
+  );
+  const modelGroupCollapsed = await rendererValue(`(() => {
+    const modal = document.querySelector('.settings-preferences-modal');
+    const options = modal?.querySelector('.settings-options');
+    const disclosure = window.__localLeafModelDisclosureIdentity;
+    const providerId = disclosure?.dataset.toggleProviderModelGroup || '';
+    const panel = disclosure?.getAttribute('aria-controls')
+      ? document.getElementById(disclosure.getAttribute('aria-controls'))
+      : null;
+    const stored = JSON.parse(localStorage.getItem('localleaf.aiModelGroups.v1') || '{}');
+    const expectedScrollTop = Math.min(
+      window.__localLeafModelGroupScrollTop || 0,
+      Math.max(0, (options?.scrollHeight || 0) - (options?.clientHeight || 0))
+    );
+    return {
+      modalSame: modal === window.__localLeafSettingsModalIdentity,
+      disclosureSame: document.querySelector('[data-toggle-provider-model-group]') === disclosure,
+      focused: document.activeElement === disclosure,
+      expanded: disclosure?.getAttribute('aria-expanded') || '',
+      hidden: Boolean(panel?.hidden),
+      inert: panel?.hasAttribute('inert') || false,
+      scrollDelta: Math.abs((options?.scrollTop || 0) - expectedScrollTop),
+      stored: stored[providerId],
+      hasChevron: Boolean(disclosure?.querySelector('.tool-icon-chevronDown'))
+    };
+  })()`);
+  ensure(
+    modelGroupCollapsed
+      && modelGroupCollapsed.modalSame
+      && modelGroupCollapsed.disclosureSame
+      && modelGroupCollapsed.focused
+      && modelGroupCollapsed.expanded === "false"
+      && modelGroupCollapsed.hidden
+      && modelGroupCollapsed.inert
+      && modelGroupCollapsed.scrollDelta <= 1
+      && modelGroupCollapsed.stored === false
+      && modelGroupCollapsed.hasChevron,
+    `The collapsed provider model group lost identity, focus, scroll, persistence, or disclosure semantics: ${JSON.stringify(modelGroupCollapsed)}`
+  );
+
+  const modelGroupExpandStart = await rendererValue(`(() => {
+    const disclosure = window.__localLeafModelDisclosureIdentity;
+    const panel = disclosure?.getAttribute('aria-controls')
+      ? document.getElementById(disclosure.getAttribute('aria-controls'))
+      : null;
+    disclosure?.click();
+    return {
+      expanded: disclosure?.getAttribute('aria-expanded') || '',
+      hidden: Boolean(panel?.hidden),
+      revealing: panel?.classList.contains('is-revealing') || false,
+      transitionProperty: panel ? getComputedStyle(panel).transitionProperty : '',
+      maxHeight: panel ? getComputedStyle(panel).maxHeight : '',
+      focused: document.activeElement === disclosure,
+      modalSame: document.querySelector('.settings-preferences-modal') === window.__localLeafSettingsModalIdentity
+    };
+  })()`);
+  ensure(
+    modelGroupExpandStart
+      && modelGroupExpandStart.expanded === "true"
+      && !modelGroupExpandStart.hidden
+      && modelGroupExpandStart.revealing
+      && modelGroupExpandStart.transitionProperty.includes("max-height")
+      && modelGroupExpandStart.maxHeight !== "none"
+      && modelGroupExpandStart.focused
+      && modelGroupExpandStart.modalSame,
+    `The provider model group did not begin its in-place reveal cleanly: ${JSON.stringify(modelGroupExpandStart)}`
+  );
+  await waitForRenderer(
+    `(() => {
+      const disclosure = window.__localLeafModelDisclosureIdentity;
+      const panel = disclosure?.getAttribute('aria-controls')
+        ? document.getElementById(disclosure.getAttribute('aria-controls'))
+        : null;
+      const providerId = disclosure?.dataset.toggleProviderModelGroup || '';
+      const stored = JSON.parse(localStorage.getItem('localleaf.aiModelGroups.v1') || '{}');
+      return Boolean(
+        panel
+        && !panel.hidden
+        && !panel.classList.contains('is-revealing')
+        && disclosure?.getAttribute('aria-expanded') === 'true'
+        && stored[providerId] === true
+      );
+    })()`,
+    "the provider model group reveal"
+  );
+
+  await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  const modelGroupReducedMotion = await rendererValue(`(() => {
+    const disclosure = window.__localLeafModelDisclosureIdentity;
+    const panel = disclosure?.getAttribute('aria-controls')
+      ? document.getElementById(disclosure.getAttribute('aria-controls'))
+      : null;
+    disclosure?.click();
+    const collapsed = {
+      hidden: Boolean(panel?.hidden),
+      hiding: panel?.classList.contains('is-hiding') || false,
+      focused: document.activeElement === disclosure
+    };
+    disclosure?.click();
+    return {
+      ...collapsed,
+      reopened: Boolean(panel && !panel.hidden && disclosure?.getAttribute('aria-expanded') === 'true'),
+      revealing: panel?.classList.contains('is-revealing') || false
+    };
+  })()`);
+  await setEmulatedMediaFeatures([]);
+  ensure(
+    modelGroupReducedMotion
+      && modelGroupReducedMotion.hidden
+      && !modelGroupReducedMotion.hiding
+      && modelGroupReducedMotion.focused
+      && modelGroupReducedMotion.reopened
+      && !modelGroupReducedMotion.revealing,
+    `The provider model disclosure did not become immediate under reduced motion: ${JSON.stringify(modelGroupReducedMotion)}`
+  );
+  pass("Settings model groups expand in place with preserved focus, scroll, persistence, and reduced-motion behavior");
+
+  await rendererValue(`(() => {
+    const button = document.querySelector("#configureCustomModel");
+    button?.focus();
+    button?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`Boolean(document.querySelector(".provider-modal"))`, "the custom provider dialog");
+  await delay(220);
+  const providerDialog = await rendererValue(`(() => {
+    const dialog = document.querySelector(".provider-modal");
+    const body = dialog?.querySelector(".provider-form-body");
+    const save = dialog?.querySelector('.provider-form-actions button[type="submit"]');
+    const test = dialog?.querySelector("#testProviderForm");
+    const remove = dialog?.querySelector("[data-remove-provider-row]");
+    const close = dialog?.querySelector("[data-close-provider]");
+    const modelRow = dialog?.querySelector('[data-provider-row="model"]');
+    const scrolling = document.scrollingElement;
+    const rect = dialog?.getBoundingClientRect();
+    return {
+      role: dialog?.getAttribute("role") || "",
+      modal: dialog?.getAttribute("aria-modal") || "",
+      labelledBy: dialog?.getAttribute("aria-labelledby") || "",
+      describedBy: dialog?.getAttribute("aria-describedby") || "",
+      focusedName: document.activeElement?.getAttribute("name") || "",
+      advancedCopy: dialog?.querySelector(".provider-form-advanced p")?.textContent || "",
+      visibleContextInputs: dialog?.querySelectorAll('input[type="number"], input[name="model-context-window"]')?.length || 0,
+      modelTextInputs: modelRow?.querySelectorAll('input:not([type="hidden"])')?.length || 0,
+      removeIcon: Boolean(remove?.querySelector(".tool-icon-delete")),
+      removeLabel: remove?.getAttribute("aria-label") || "",
+      removeSize: remove ? Number.parseFloat(getComputedStyle(remove).height) : 0,
+      closeIcon: Boolean(close?.querySelector(".tool-icon-close")),
+      closeLabel: close?.getAttribute("aria-label") || "",
+      saveText: save?.textContent?.trim() || "",
+      saveBackground: save ? getComputedStyle(save).backgroundColor : "",
+      saveColor: save ? getComputedStyle(save).color : "",
+      testBackground: test ? getComputedStyle(test).backgroundColor : "",
+      bodyOverflow: body ? getComputedStyle(body).overflowY : "",
+      modelColumns: modelRow ? getComputedStyle(modelRow).gridTemplateColumns.split(" ").length : 0,
+      contained: Boolean(rect) && rect.left >= -1 && rect.top >= -1 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
+      outerOverflowX: scrolling.scrollWidth > scrolling.clientWidth + 1,
+      outerOverflowY: scrolling.scrollHeight > scrolling.clientHeight + 1
+    };
+  })()`);
+  ensure(
+    providerDialog.role === "dialog"
+      && providerDialog.modal === "true"
+      && providerDialog.labelledBy === "providerDialogTitle"
+      && providerDialog.describedBy === "providerDialogDescription"
+      && providerDialog.focusedName === "displayName"
+      && providerDialog.advancedCopy.includes("Context window is managed by the provider")
+      && providerDialog.visibleContextInputs === 0
+      && providerDialog.modelTextInputs === 2
+      && providerDialog.modelColumns === 3
+      && providerDialog.removeIcon
+      && providerDialog.removeLabel.startsWith("Remove model")
+      && providerDialog.removeSize >= 40
+      && providerDialog.closeIcon
+      && providerDialog.closeLabel === "Close provider dialog",
+    `The custom provider dialog lost its compact fields or accessible controls: ${JSON.stringify(providerDialog)}`
+  );
+  ensure(
+    providerDialog.saveText === "Save provider"
+      && providerDialog.saveBackground === "rgb(201, 81, 0)"
+      && providerDialog.saveColor === "rgb(255, 255, 255)"
+      && providerDialog.testBackground !== providerDialog.saveBackground
+      && ["auto", "scroll"].includes(providerDialog.bodyOverflow)
+      && providerDialog.contained
+      && !providerDialog.outerOverflowX
+      && !providerDialog.outerOverflowY,
+    `The custom provider dialog drifted from its action or viewport contract: ${JSON.stringify(providerDialog)}`
+  );
+  const providerAdvancedClosed = await rendererValue(`(() => {
+    const details = document.querySelector(".provider-form-advanced");
+    const body = details?.querySelector(".provider-form-advanced-body");
+    const chevron = details?.querySelector(".provider-advanced-chevron .tool-icon");
+    const bodyStyle = body && getComputedStyle(body);
+    const chevronStyle = chevron && getComputedStyle(chevron);
+    return {
+      nativeDetails: details?.tagName === "DETAILS",
+      open: Boolean(details?.open),
+      maxHeight: bodyStyle?.maxHeight || "",
+      opacity: bodyStyle?.opacity || "",
+      visibility: bodyStyle?.visibility || "",
+      bodyDuration: bodyStyle?.transitionDuration || "",
+      chevronWidth: chevronStyle?.width || "",
+      chevronDuration: chevronStyle?.transitionDuration || ""
+    };
+  })()`);
+  ensure(
+    providerAdvancedClosed?.nativeDetails
+      && !providerAdvancedClosed.open
+      && providerAdvancedClosed.maxHeight === "0px"
+      && providerAdvancedClosed.opacity === "0"
+      && providerAdvancedClosed.visibility === "hidden"
+      && providerAdvancedClosed.bodyDuration.includes("0.45s")
+      && providerAdvancedClosed.chevronWidth === "18px"
+      && providerAdvancedClosed.chevronDuration.includes("0.35s"),
+    `The Advanced context disclosure lost its native, compact motion contract: ${JSON.stringify(providerAdvancedClosed)}`
+  );
+  await rendererValue(`document.querySelector(".provider-form-advanced summary")?.click()`);
+  await waitForRenderer(
+    `(() => {
+      const details = document.querySelector(".provider-form-advanced");
+      const body = details?.querySelector(".provider-form-advanced-body");
+      return Boolean(details?.open && body && Number.parseFloat(getComputedStyle(body).opacity) >= 0.99);
+    })()`,
+    "the Advanced context disclosure reveal"
+  );
+  const providerAdvancedOpen = await rendererValue(`(() => {
+    const details = document.querySelector(".provider-form-advanced");
+    const body = details?.querySelector(".provider-form-advanced-body");
+    const chevron = details?.querySelector(".provider-advanced-chevron .tool-icon");
+    return {
+      maxHeight: body ? getComputedStyle(body).maxHeight : "",
+      visibility: body ? getComputedStyle(body).visibility : "",
+      chevronTransform: chevron ? getComputedStyle(chevron).transform : ""
+    };
+  })()`);
+  ensure(
+    providerAdvancedOpen?.maxHeight !== "0px"
+      && providerAdvancedOpen.visibility === "visible"
+      && providerAdvancedOpen.chevronTransform !== "none",
+    `The Advanced context disclosure did not reveal cleanly: ${JSON.stringify(providerAdvancedOpen)}`
+  );
+  await rendererValue(`document.querySelector(".provider-form-advanced summary")?.click()`);
+  await waitForRenderer(
+    `getComputedStyle(document.querySelector(".provider-form-advanced-body")).visibility === "hidden"`,
+    "the Advanced context disclosure close"
+  );
+  await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await rendererValue(`document.querySelector(".provider-form-advanced summary")?.click()`);
+  const providerAdvancedReduced = await rendererValue(`(() => ({
+    open: document.querySelector(".provider-form-advanced")?.open || false,
+    bodyDuration: getComputedStyle(document.querySelector(".provider-form-advanced-body")).transitionDuration,
+    chevronDuration: getComputedStyle(document.querySelector(".provider-advanced-chevron .tool-icon")).transitionDuration
+  }))()`);
+  ensure(
+    providerAdvancedReduced.open
+      && Number.parseFloat(providerAdvancedReduced.bodyDuration) <= 0.00002
+      && Number.parseFloat(providerAdvancedReduced.chevronDuration) <= 0.00002,
+    `Reduced motion did not make the Advanced context disclosure immediate: ${JSON.stringify(providerAdvancedReduced)}`
+  );
+  await setEmulatedMediaFeatures([]);
+  pass("Advanced context handling uses a native, reversible, reduced-motion-safe disclosure");
+  const providerLegacyModelCompatibility = await rendererValue(`(() => {
+    const rows = document.querySelector('[data-provider-rows="models"]');
+    if (!rows) return null;
+    rows.innerHTML = providerFormRows(
+      [{ id: "legacy-model", name: "Legacy label", contextWindowTokens: 16384 }],
+      "model",
+      "model",
+      "alias"
+    );
+    const payload = formProviderPayload();
+    return {
+      id: payload.models[0]?.id || "",
+      name: payload.models[0]?.name || "",
+      contextWindowTokens: payload.models[0]?.contextWindowTokens || 0,
+      visibleContextInputs: rows.querySelectorAll('input[type="number"], input[name="model-context-window"]').length
+    };
+  })()`);
+  ensure(
+    providerLegacyModelCompatibility?.id === "legacy-model"
+      && providerLegacyModelCompatibility?.name === "Legacy label"
+      && providerLegacyModelCompatibility?.contextWindowTokens === 16384
+      && providerLegacyModelCompatibility?.visibleContextInputs === 0,
+    `The provider dialog did not retain existing model compatibility metadata invisibly: ${JSON.stringify(providerLegacyModelCompatibility)}`
+  );
+  await verifyCurrentThemePair(
+    "Custom provider dialog",
+    [".provider-modal", ".provider-modal-head", ".provider-form-section", ".provider-form-advanced", ".provider-form-actions"],
+    [".provider-modal-head p", ".provider-section-heading > div > span", ".provider-form-body label", ".provider-form-advanced summary"]
+  );
+  await rendererValue(`(() => {
+    applyTheme("light");
+    document.querySelector(".provider-modal-backdrop")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    return true;
+  })()`);
+  await waitForRenderer(`!document.querySelector(".provider-modal")`, "custom provider dialog closing");
+  await delay(40);
+  const providerDialogFocusRestored = await rendererValue(`document.activeElement?.id || document.activeElement?.tagName || ""`);
+  ensure(
+    providerDialogFocusRestored === "configureCustomModel",
+    `The custom provider dialog did not restore focus to its opener: ${providerDialogFocusRestored}`
+  );
+  pass("custom provider dialog is compact, provider-managed, accessible, and theme-safe");
+
   await rendererValue(`(() => {
     document.querySelector('[data-close-settings]')?.click();
     return true;
@@ -417,26 +838,138 @@ async function testHostStartupAndHelp(baseUrl) {
 
   await waitForRenderer(
     `(() => {
-      if (document.querySelectorAll(".help-qa-list details").length === 4) return true;
+      if (document.querySelectorAll(".help-qa-list details").length === 9) return true;
       document.querySelector("#railHelp")?.click();
       return false;
     })()`,
     "the Help disclosures"
   );
 
+  const helpGuideResult = await rendererValue(`(() => {
+    const modal = document.querySelector(".info-modal-help");
+    const body = modal?.querySelector(".help-qa-list");
+    const details = Array.from(body?.querySelectorAll("details") || []);
+    const modalRect = modal?.getBoundingClientRect();
+    const bodyStyle = body ? getComputedStyle(body) : null;
+    return {
+      topics: details.map((item) => item.querySelector(".help-topic")?.textContent?.trim() || ""),
+      questions: details.map((item) => item.querySelector("summary strong")?.textContent?.trim() || ""),
+      answers: details.map((item) => item.querySelector(".help-answer p")?.textContent?.trim() || ""),
+      nativeSummaries: details.every((item) => item.querySelector("summary")?.tabIndex === 0),
+      openItems: details.filter((item) => item.open).length,
+      labelled: modal?.getAttribute("aria-labelledby") === "infoModalTitle"
+        && modal?.getAttribute("aria-describedby") === "infoModalSubtitle",
+      modalContained: Boolean(modalRect)
+        && modalRect.left >= 0
+        && modalRect.top >= 0
+        && modalRect.right <= innerWidth
+        && modalRect.bottom <= innerHeight,
+      bodyOverflowY: bodyStyle?.overflowY || "",
+      bodyOwnsScroll: Boolean(body) && body.scrollHeight > body.clientHeight,
+      outerOverflow: document.scrollingElement.scrollHeight > document.scrollingElement.clientHeight + 1
+    };
+  })()`);
+  ensure(
+    helpGuideResult.topics.join("|") === "Projects|Hosting|Access|Collaboration|Compilation|AI and privacy|AI changes|Invite links|Backups"
+      && helpGuideResult.questions.includes("Can two people edit the same file at once?")
+      && helpGuideResult.questions.includes("Does AI send my project away from this computer?")
+      && helpGuideResult.answers.join(" ").includes("last arrival wins")
+      && helpGuideResult.answers.join(" ").includes("last good copy")
+      && helpGuideResult.answers.join(" ").includes("Provider keys")
+      && helpGuideResult.answers.join(" ").includes("previous link")
+      && helpGuideResult.answers.join(" ").includes("Existing approvals remain"),
+    `The Help guide is missing practical project, session, compilation, or AI guidance: ${JSON.stringify(helpGuideResult)}`
+  );
+  ensure(
+    helpGuideResult.nativeSummaries
+      && helpGuideResult.openItems === 1
+      && helpGuideResult.labelled
+      && helpGuideResult.modalContained
+      && helpGuideResult.bodyOverflowY === "auto"
+      && helpGuideResult.bodyOwnsScroll
+      && !helpGuideResult.outerOverflow,
+    `The Help guide lost native disclosure semantics or viewport-owned scrolling: ${JSON.stringify(helpGuideResult)}`
+  );
+
   const mouseResult = await rendererValue(`(() => {
     const details = document.querySelectorAll(".help-qa-list details")[1];
     const summary = details?.querySelector("summary");
+    const answer = details?.querySelector(".help-answer");
+    const icon = details?.querySelector(".help-disclosure-icon");
     if (!summary) return null;
     const before = details.open;
+    const answerStyle = getComputedStyle(answer);
+    const iconStyle = getComputedStyle(icon);
+    const closed = {
+      maxHeight: answerStyle.maxHeight,
+      opacity: answerStyle.opacity,
+      visibility: answerStyle.visibility,
+      duration: answerStyle.transitionDuration,
+      iconWidth: iconStyle.width,
+      iconDuration: iconStyle.transitionDuration
+    };
     summary.click();
     return {
       before,
       after: details.open,
+      closed,
       expandedLabel: getComputedStyle(details.querySelector(".help-disclosure-label-expanded")).display !== "none"
     };
   })()`);
-  ensure(mouseResult && !mouseResult.before && mouseResult.after && mouseResult.expandedLabel, "A Help disclosure did not open with mouse activation or expose its expanded label.");
+  ensure(
+    mouseResult
+      && !mouseResult.before
+      && mouseResult.after
+      && mouseResult.expandedLabel
+      && mouseResult.closed.maxHeight === "0px"
+      && mouseResult.closed.opacity === "0"
+      && mouseResult.closed.visibility === "hidden"
+      && mouseResult.closed.duration.includes("0.45s")
+      && mouseResult.closed.iconWidth === "18px"
+      && mouseResult.closed.iconDuration.includes("0.35s"),
+    `A Help disclosure lost its compact closed or activation state: ${JSON.stringify(mouseResult)}`
+  );
+  await waitForRenderer(
+    `(() => Number.parseFloat(getComputedStyle(document.querySelectorAll(".help-answer")[1]).opacity) >= 0.99)()`,
+    "the Help answer reveal"
+  );
+  const helpOpenMotion = await rendererValue(`(() => ({
+    maxHeight: getComputedStyle(document.querySelectorAll(".help-answer")[1]).maxHeight,
+    visibility: getComputedStyle(document.querySelectorAll(".help-answer")[1]).visibility,
+    chevronTransform: getComputedStyle(document.querySelectorAll(".help-disclosure-icon")[1]).transform
+  }))()`);
+  ensure(
+    helpOpenMotion.maxHeight !== "0px"
+      && helpOpenMotion.visibility === "visible"
+      && helpOpenMotion.chevronTransform !== "none",
+    `The Help answer did not reveal with its chevron state: ${JSON.stringify(helpOpenMotion)}`
+  );
+  await rendererValue(`document.querySelectorAll(".help-qa-list details")[1]?.querySelector("summary")?.click()`);
+  await waitForRenderer(
+    `document.querySelectorAll(".help-qa-list details")[1]?.open === false`,
+    "the Help answer closing"
+  );
+  await waitForRenderer(
+    `(() => {
+      const answer = document.querySelectorAll(".help-answer")[1];
+      const icon = document.querySelectorAll(".help-disclosure-icon")[1];
+      return Number.parseFloat(getComputedStyle(answer).opacity) <= 0.01
+        && getComputedStyle(answer).visibility === "hidden"
+        && getComputedStyle(icon).transform === "none";
+    })()`,
+    "the Help answer closed motion settling"
+  );
+  const helpClosedMotion = await rendererValue(`(() => ({
+    opacity: getComputedStyle(document.querySelectorAll(".help-answer")[1]).opacity,
+    visibility: getComputedStyle(document.querySelectorAll(".help-answer")[1]).visibility,
+    chevronTransform: getComputedStyle(document.querySelectorAll(".help-disclosure-icon")[1]).transform
+  }))()`);
+  ensure(
+    helpClosedMotion.opacity === "0"
+      && helpClosedMotion.visibility === "hidden"
+      && helpClosedMotion.chevronTransform === "none",
+    `The Help answer did not reverse to its closed state: ${JSON.stringify(helpClosedMotion)}`
+  );
 
   smokeWindow.show();
   smokeWindow.focus();
@@ -450,7 +983,37 @@ async function testHostStartupAndHelp(baseUrl) {
   ensure(keyboardFocused, "The Help disclosure summary could not receive keyboard focus.");
   await dispatchTrustedSpaceKey();
   await waitForRenderer(`document.querySelectorAll(".help-qa-list details")[2]?.open === true`, "keyboard disclosure activation");
-  pass("Help disclosures respond to mouse and keyboard input");
+  await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  const helpReducedMotion = await rendererValue(`(() => ({
+    answer: getComputedStyle(document.querySelectorAll(".help-answer")[2]).transitionDuration,
+    icon: getComputedStyle(document.querySelectorAll(".help-disclosure-icon")[2]).transitionDuration
+  }))()`);
+  ensure(
+    Number.parseFloat(helpReducedMotion.answer) <= 0.00002
+      && Number.parseFloat(helpReducedMotion.icon) <= 0.00002,
+    `Reduced motion did not make Help disclosures immediate: ${JSON.stringify(helpReducedMotion)}`
+  );
+  await setEmulatedMediaFeatures([]);
+
+  smokeWindow.setContentSize(900, 640);
+  await waitForRenderer(`innerWidth === 900 && innerHeight === 640`, "the 900x640 Help viewport");
+  const compactHelp = await rendererValue(`(() => {
+    const modal = document.querySelector(".info-modal-help");
+    const body = modal?.querySelector(".help-qa-list");
+    const rect = modal?.getBoundingClientRect();
+    return {
+      contained: Boolean(rect) && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+      bodyOwnsScroll: Boolean(body) && body.scrollHeight > body.clientHeight,
+      outerOverflow: document.scrollingElement.scrollHeight > document.scrollingElement.clientHeight + 1
+    };
+  })()`);
+  ensure(
+    compactHelp.contained && compactHelp.bodyOwnsScroll && !compactHelp.outerOverflow,
+    `Help lost pane-owned containment at 900x640: ${JSON.stringify(compactHelp)}`
+  );
+  smokeWindow.setContentSize(1024, 640);
+  await waitForRenderer(`innerWidth === 1024 && innerHeight === 640`, "the restored Help viewport");
+  pass("Help disclosures respond to mouse and keyboard with reversible, reduced-motion-safe reveals");
 
   await rendererValue(`(() => {
     document.querySelector("[data-close-info]")?.click();
@@ -463,23 +1026,44 @@ async function testHostStartupAndHelp(baseUrl) {
   );
   const aboutResult = await rendererValue(`(() => {
     const body = document.querySelector(".info-modal-about .about-editorial");
+    const modal = document.querySelector(".info-modal-about");
     const website = body?.querySelector(".about-website-link");
+    const modalRect = modal?.getBoundingClientRect();
     return {
       product: body?.querySelector(".about-product-name")?.textContent?.trim() || "",
       principles: Array.from(body?.querySelectorAll(".about-values span") || []).map((item) => item.textContent.trim()),
       details: Array.from(body?.querySelectorAll(".about-detail dt") || []).map((item) => item.textContent.trim()),
+      workingModel: body?.querySelector(".about-working-model p")?.textContent?.trim() || "",
+      boundaryTitle: body?.querySelector(".about-boundaries h3")?.textContent?.trim() || "",
+      boundaries: body?.querySelector(".about-boundaries p")?.textContent?.trim() || "",
+      audience: body?.querySelector(".about-footer-row > span")?.textContent?.trim() || "",
       decorativeIcons: body?.querySelectorAll("svg, .ui-glyph, .brand-symbol").length || 0,
       websiteLabel: website?.textContent?.trim() || "",
       websiteUrl: website?.href || "",
       websiteBackground: website ? getComputedStyle(website).backgroundColor : "",
       websiteColor: website ? getComputedStyle(website).color : "",
-      closeLabel: document.querySelector(".info-modal-about [data-close-info]")?.getAttribute("aria-label") || ""
+      closeLabel: document.querySelector(".info-modal-about [data-close-info]")?.getAttribute("aria-label") || "",
+      labelled: modal?.getAttribute("aria-labelledby") === "infoModalTitle"
+        && modal?.getAttribute("aria-describedby") === "infoModalSubtitle",
+      modalContained: Boolean(modalRect)
+        && modalRect.left >= 0
+        && modalRect.top >= 0
+        && modalRect.right <= innerWidth
+        && modalRect.bottom <= innerHeight,
+      bodyOverflowY: body ? getComputedStyle(body).overflowY : "",
+      bodyOwnsScroll: Boolean(body) && body.scrollHeight > body.clientHeight,
+      outerOverflow: document.scrollingElement.scrollHeight > document.scrollingElement.clientHeight + 1
     };
   })()`);
   ensure(
     aboutResult.product === "LocalLeaf"
       && aboutResult.principles.join("|") === "Private by design|Host powered"
-      && aboutResult.details.join("|") === "Local files|Approved guests|Host compile|Project chat",
+      && aboutResult.details.join("|") === "Local files|Approved guests|Clear roles|Host compile|Optional AI|Project chat"
+      && aboutResult.workingModel.includes("normal project folder")
+      && aboutResult.boundaryTitle === "Current boundaries"
+      && aboutResult.boundaries.includes("host must stay online")
+      && aboutResult.boundaries.includes("last-arrival-wins")
+      && aboutResult.audience.includes("research groups"),
     "The About view is missing its product principles or core collaboration details."
   );
   ensure(aboutResult.decorativeIcons === 0, "The About content reintroduced decorative icons.");
@@ -489,7 +1073,34 @@ async function testHostStartupAndHelp(baseUrl) {
     "The About website action drifted from the accessible orange-and-white primary action contract."
   );
   ensure(aboutResult.closeLabel === "Close", "The About dialog close action lost its accessible name.");
-  pass("About view is icon-free, complete, and accessible");
+  ensure(
+    aboutResult.labelled
+      && aboutResult.modalContained
+      && aboutResult.bodyOverflowY === "auto"
+      && aboutResult.bodyOwnsScroll
+      && !aboutResult.outerOverflow,
+    `The About view lost its accessible dialog relationship or pane-owned scrolling: ${JSON.stringify(aboutResult)}`
+  );
+
+  smokeWindow.setContentSize(900, 640);
+  await waitForRenderer(`innerWidth === 900 && innerHeight === 640`, "the 900x640 About viewport");
+  const compactAbout = await rendererValue(`(() => {
+    const modal = document.querySelector(".info-modal-about");
+    const body = modal?.querySelector(".about-editorial");
+    const rect = modal?.getBoundingClientRect();
+    return {
+      contained: Boolean(rect) && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+      bodyOwnsScroll: Boolean(body) && body.scrollHeight > body.clientHeight,
+      outerOverflow: document.scrollingElement.scrollHeight > document.scrollingElement.clientHeight + 1
+    };
+  })()`);
+  ensure(
+    compactAbout.contained && compactAbout.bodyOwnsScroll && !compactAbout.outerOverflow,
+    `About lost pane-owned containment at 900x640: ${JSON.stringify(compactAbout)}`
+  );
+  smokeWindow.setContentSize(1024, 640);
+  await waitForRenderer(`innerWidth === 1024 && innerHeight === 640`, "the restored About viewport");
+  pass("About view is detailed, icon-free, accessible, and contained");
 
   await rendererValue(`(() => {
     document.querySelector("[data-close-info]")?.click();
@@ -624,7 +1235,14 @@ async function loadHostView(baseUrl, view, readySelector) {
 }
 
 async function captureDesktopParity(theme, surfaceSelectors, contrastSelectors) {
-  await rendererValue(`(() => { applyTheme(${JSON.stringify(theme)}); return true; })()`);
+  await rendererValue(`(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--motion-fast", "0ms");
+    applyTheme(${JSON.stringify(theme)});
+    void root.offsetWidth;
+    root.style.removeProperty("--motion-fast");
+    return true;
+  })()`);
   await waitForRenderer(
     `document.documentElement.classList.contains(${JSON.stringify(`theme-${theme}`)})`,
     `${theme} theme parity state`
@@ -786,6 +1404,15 @@ async function testDesktopThemeParity(baseUrl) {
 
     await rendererValue(`document.querySelector("#railSettings")?.click()`);
     await waitForRenderer(`Boolean(document.querySelector(".settings-preferences-modal"))`, "Settings parity dialog");
+    const settingsMotion = await rendererValue(`(() => ({
+      backdrop: getComputedStyle(document.querySelector(".settings-modal-backdrop")).animationName,
+      dialog: getComputedStyle(document.querySelector(".settings-preferences-modal")).animationName
+    }))()`);
+    ensure(
+      settingsMotion.backdrop.includes("localleaf-backdrop-in")
+        && settingsMotion.dialog.includes("localleaf-dialog-in"),
+      `Settings did not use the restrained dialog entrance at ${width}x${height}: ${JSON.stringify(settingsMotion)}`
+    );
     for (const tab of ["general", "providers", "models", "permissions"]) {
       await rendererValue(`document.querySelector(${JSON.stringify(`#settingsTab-${tab}`)})?.click()`);
       await waitForRenderer(`Boolean(document.querySelector(${JSON.stringify(`#settingsPanel-${tab}:not([hidden])`)}))`, `${tab} Settings parity panel`);
@@ -795,22 +1422,37 @@ async function testDesktopThemeParity(baseUrl) {
     await waitForRenderer(`!document.querySelector(".settings-preferences-modal")`, "Settings parity dialog closing");
     await rendererValue(`document.querySelector("#railHelp")?.click()`);
     await waitForRenderer(`Boolean(document.querySelector(".help-qa-list"))`, "Help parity dialog");
-    await verifyCurrentThemePair("Help", [".info-modal", ".info-modal .settings-modal-head", ".info-modal-body", ".help-qa-list details:first-child"], [".settings-modal-head p", ".help-qa-list summary .help-step", ".help-qa-list summary strong"]);
+    await verifyCurrentThemePair("Help", [".info-modal", ".info-modal .settings-modal-head", ".help-qa-list", ".help-qa-list details:first-child"], [".settings-modal-head p", ".help-qa-list summary .help-step", ".help-question-copy .help-topic", ".help-qa-list summary strong", ".help-qa-list details[open] .help-answer p"]);
     await rendererValue(`document.querySelector("[data-close-info]")?.click()`);
     await waitForRenderer(`!document.querySelector(".info-modal")`, "Help parity dialog closing");
     await rendererValue(`document.querySelector("#railAbout")?.click()`);
     await waitForRenderer(`Boolean(document.querySelector(".about-editorial"))`, "About parity dialog");
-    await verifyCurrentThemePair("About", [".info-modal", ".info-modal .settings-modal-head", ".about-editorial", ".about-detail-list"], [".settings-modal-head p", ".about-summary", ".about-detail dt", ".about-detail dd"]);
+    await verifyCurrentThemePair("About", [".info-modal", ".info-modal .settings-modal-head", ".about-editorial", ".about-working-model", ".about-detail-list", ".about-boundaries"], [".settings-modal-head p", ".about-summary", ".about-working-model h3", ".about-working-model p", ".about-detail dt", ".about-detail dd", ".about-boundaries h3", ".about-boundaries p", ".about-footer-row > span"]);
 
     await loadHostView(baseUrl, "project", ".project-app-page");
+    if (width === 1024) {
+      await rendererValue(`setView("home")`);
+      await waitForRenderer(`Boolean(document.querySelector(".home-app-page"))`, "Home route before motion check");
+      await rendererValue(`setView("project")`);
+      await waitForRenderer(`document.querySelector("#app")?.classList.contains("app-shell-view-enter")`, "Project route entrance motion");
+      const routeMotion = await rendererValue(`getComputedStyle(document.querySelector(".project-app-grid")).animationName`);
+      ensure(routeMotion.includes("localleaf-view-rise-in"), `Project route did not use the one-shot entrance motion: ${routeMotion}`);
+      await delay(420);
+      const routeMotionSettled = await rendererValue(`!document.querySelector("#app")?.classList.contains("app-shell-view-enter")`);
+      ensure(routeMotionSettled, "Project route entrance class did not clean itself up.");
+    }
     await verifyCurrentThemePair("Project", [".titlebar", ".host-nav-rail", ".window-content", ".project-primary-panel", ".project-details-panel", ".status-list"], [".project-app-head p", ".section-title", ".status-warn", ".project-detail-list span"]);
     const projectPlacement = await rendererValue(`(() => {
       const content = document.querySelector(".window-content")?.getBoundingClientRect();
       const page = document.querySelector(".project-app-page")?.getBoundingClientRect();
+      const contentStyle = document.querySelector(".window-content")
+        ? getComputedStyle(document.querySelector(".window-content"))
+        : null;
       const scrolling = document.scrollingElement;
       return content && page ? {
         horizontalOffset: Math.abs((page.left + (page.width / 2)) - (content.left + (content.width / 2))),
-        verticalOffset: Math.abs((page.top + (page.height / 2)) - (content.top + (content.height / 2))),
+        topInset: page.top - content.top,
+        contentPaddingTop: Number.parseFloat(contentStyle?.paddingTop || "0"),
         pageInsideContent: page.top >= content.top - 1 && page.bottom <= content.bottom + 1,
         outerOverflowX: scrolling.scrollWidth > scrolling.clientWidth + 1,
         outerOverflowY: scrolling.scrollHeight > scrolling.clientHeight + 1
@@ -819,21 +1461,317 @@ async function testDesktopThemeParity(baseUrl) {
     ensure(
       projectPlacement
         && projectPlacement.horizontalOffset <= 1
-        && projectPlacement.verticalOffset <= 1
+        && Math.abs(projectPlacement.topInset - projectPlacement.contentPaddingTop) <= 1
         && projectPlacement.pageInsideContent
         && !projectPlacement.outerOverflowX
         && !projectPlacement.outerOverflowY,
-      `Project Overview is not centered and contained at ${width}x${height}: ${JSON.stringify(projectPlacement)}`
+      `Project Overview is not top-aligned and contained at ${width}x${height}: ${JSON.stringify(projectPlacement)}`
     );
 
     await loadHostView(baseUrl, "session", ".session-share-page");
-    await verifyCurrentThemePair("Session", [".titlebar", ".host-nav-rail", ".window-content", ".session-invite-panel", ".session-side-card", ".session-empty-panel"], [".session-panel-title", ".session-empty-panel span", ".session-provider-hint", ".pill-warn"]);
+    await verifyCurrentThemePair("Session", [".titlebar", ".host-nav-rail", ".window-content", ".session-invite-panel", ".session-side-card", ".session-empty-panel"], [".session-panel-title", ".session-empty-panel span", ".session-provider-hint", ".session-state-pill"]);
+    const sessionSignal = await rendererValue(`(() => {
+      const bars = [...document.querySelectorAll(".session-state-pill .session-signal-bars > span")];
+      return {
+        count: bars.length,
+        phase: document.querySelector(".session-state-pill")?.className || "",
+        animation: bars[0] ? getComputedStyle(bars[0]).animationName : ""
+      };
+    })()`);
+    ensure(
+      sessionSignal.count === 4 && sessionSignal.phase.includes("phase-idle") && sessionSignal.animation === "none",
+      `Inactive hosted-session signal was not truthful and static at ${width}x${height}: ${JSON.stringify(sessionSignal)}`
+    );
+    const providerPicker = await rendererValue(`(() => {
+      const trigger = document.querySelector("#sessionTunnelProvider");
+      const menu = document.querySelector("#sessionTunnelProviderMenu");
+      if (!trigger || !menu || trigger.disabled) return null;
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      const active = document.activeElement;
+      const style = getComputedStyle(trigger);
+      const menuStyle = getComputedStyle(menu);
+      return {
+        nativeSelectPresent: Boolean(document.querySelector(".session-provider-control select")),
+        expanded: trigger.getAttribute("aria-expanded"),
+        menuHidden: menu.getAttribute("aria-hidden"),
+        activeRole: active?.getAttribute("role") || "",
+        optionCount: menu.querySelectorAll('[role="option"]').length,
+        triggerHeight: trigger.getBoundingClientRect().height,
+        triggerRadius: style.borderRadius,
+        menuRadius: menuStyle.borderRadius,
+        menuTransition: menuStyle.transitionProperty
+      };
+    })()`);
+    ensure(
+      providerPicker
+        && !providerPicker.nativeSelectPresent
+        && providerPicker.expanded === "true"
+        && providerPicker.menuHidden === "false"
+        && providerPicker.activeRole === "option"
+        && providerPicker.optionCount >= 2
+        && providerPicker.triggerHeight >= 40
+        && providerPicker.triggerRadius === "8px"
+        && providerPicker.menuRadius === "12px"
+        && providerPicker.menuTransition.includes("transform")
+        && providerPicker.menuTransition.includes("opacity"),
+      `Session provider picker lost its compact accessible menu treatment at ${width}x${height}: ${JSON.stringify(providerPicker)}`
+    );
+    await verifyCurrentThemePair("Session provider menu", [".session-provider-trigger", ".session-provider-menu", ".session-provider-option"], [".session-provider-trigger-copy strong", ".session-provider-option-copy strong"]);
+    const providerPickerClosed = await rendererValue(`(() => {
+      const option = document.activeElement;
+      option?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      const trigger = document.querySelector("#sessionTunnelProvider");
+      return trigger?.getAttribute("aria-expanded") === "false" && document.activeElement === trigger;
+    })()`);
+    ensure(providerPickerClosed, "Session provider menu did not return focus to its trigger on Escape.");
+    const providerPickerSelection = await rendererValue(`(() => {
+      const page = document.querySelector(".session-share-page");
+      const trigger = document.querySelector("#sessionTunnelProvider");
+      const menu = document.querySelector("#sessionTunnelProviderMenu");
+      const option = [...(menu?.querySelectorAll('[role="option"]') || [])]
+        .find((item) => item.getAttribute("aria-selected") !== "true");
+      if (!page || !trigger || !menu || !option) return null;
+      const expectedValue = option.querySelector("strong")?.textContent?.trim() || "";
+      trigger.click();
+      option.focus();
+      option.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      return {
+        pageSame: document.querySelector(".session-share-page") === page,
+        triggerSame: document.querySelector("#sessionTunnelProvider") === trigger,
+        expanded: trigger.getAttribute("aria-expanded"),
+        menuHidden: menu.getAttribute("aria-hidden"),
+        focused: document.activeElement === trigger,
+        selected: option.getAttribute("aria-selected"),
+        expectedValue,
+        triggerValue: document.querySelector("#sessionTunnelProviderValue")?.textContent?.trim() || ""
+      };
+    })()`);
+    ensure(
+      providerPickerSelection
+        && providerPickerSelection.pageSame
+        && providerPickerSelection.triggerSame
+        && providerPickerSelection.expanded === "false"
+        && providerPickerSelection.menuHidden === "true"
+        && providerPickerSelection.focused
+        && providerPickerSelection.selected === "true"
+        && providerPickerSelection.expectedValue === providerPickerSelection.triggerValue,
+      `Selecting a Session provider rebuilt the page or lost picker state at ${width}x${height}: ${JSON.stringify(providerPickerSelection)}`
+    );
 
     await loadHostView(baseUrl, "editor", ".editor-shell");
     await verifyCurrentThemePair("Editor", [".editor-shell", ".editor-topbar", ".editor-format-row", ".sidebar", ".code-panel", ".preview-panel", ".right-rail", ".log-dock"], [".editor-help", ".folder-count", ".user-row .avatar", ".chat-empty"]);
+    await verifyCurrentThemePair("Editor navigation and logs", [".file-list", ".sidebar-images-panel", ".outline", ".log-tabs", ".log-output"], [".folder-count", ".outline-title", ".log-chip.info"]);
+    const editorNavigationAndLogs = await rendererValue(`(() => {
+      const firstFile = document.querySelector(".file-button");
+      const imageToggle = document.querySelector(".image-section-toggle");
+      const outlineRow = document.querySelector(".outline-row");
+      const logs = document.querySelector(".logs");
+      const logLine = document.querySelector(".log-line");
+      const logSummary = document.querySelector(".log-summary");
+      return {
+        fileIcon: Boolean(firstFile?.querySelector(".tool-icon")),
+        imageChevron: Boolean(imageToggle?.querySelector(".tool-icon-chevronRight")),
+        outlineIcon: outlineRow ? Boolean(outlineRow.querySelector(".tool-icon")) : true,
+        fileHeight: firstFile?.getBoundingClientRect().height || 0,
+        outlineHeight: outlineRow?.getBoundingClientRect().height || 32,
+        summaryDisplay: logSummary ? getComputedStyle(logSummary).display : "",
+        logOverflow: logs ? getComputedStyle(logs).overflowY : "",
+        logRadius: logLine ? getComputedStyle(logLine).borderRadius : "0px",
+        logBackgroundImage: getComputedStyle(document.querySelector(".log-output")).backgroundImage
+      };
+    })()`);
+    ensure(
+      editorNavigationAndLogs.fileIcon
+        && editorNavigationAndLogs.imageChevron
+        && editorNavigationAndLogs.outlineIcon
+        && editorNavigationAndLogs.fileHeight >= 32
+        && editorNavigationAndLogs.outlineHeight >= 32
+        && editorNavigationAndLogs.summaryDisplay === "flex"
+        && ["auto", "scroll"].includes(editorNavigationAndLogs.logOverflow)
+        && editorNavigationAndLogs.logRadius === "0px"
+        && editorNavigationAndLogs.logBackgroundImage === "none",
+      `Editor navigation or diagnostics lost the minimalist treatment at ${width}x${height}: ${JSON.stringify(editorNavigationAndLogs)}`
+    );
+    const quickSearchCollapsed = await rendererValue(`(() => {
+      const launcher = document.querySelector("#editorSearchLauncher");
+      const surface = launcher?.querySelector(".editor-search-launcher-surface");
+      const toggle = document.querySelector("#editorSearchToggle");
+      const spacer = document.querySelector(".editor-search-reserved-space");
+      const launcherRect = launcher?.getBoundingClientRect();
+      const surfaceRect = surface?.getBoundingClientRect();
+      const toggleRect = toggle?.getBoundingClientRect();
+      const spacerRect = spacer?.getBoundingClientRect();
+      return {
+        launcherWidth: launcherRect?.width || 0,
+        surfaceWidth: surfaceRect?.width || 0,
+        toggleWidth: toggleRect?.width || 0,
+        toggleHeight: toggleRect?.height || 0,
+        spacerWidth: spacerRect?.width || 0,
+        expanded: toggle?.getAttribute("aria-expanded"),
+        transitionProperties: surface ? getComputedStyle(surface, "::before").transitionProperty : "",
+        outerOverflowX: document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1
+      };
+    })()`);
+    ensure(
+      quickSearchCollapsed.launcherWidth >= 55
+        && quickSearchCollapsed.launcherWidth <= 57
+        && quickSearchCollapsed.surfaceWidth >= 229
+        && quickSearchCollapsed.surfaceWidth <= 231
+        && quickSearchCollapsed.toggleWidth >= 55
+        && quickSearchCollapsed.toggleHeight >= 40
+        && quickSearchCollapsed.spacerWidth >= 173
+        && quickSearchCollapsed.expanded === "false"
+        && quickSearchCollapsed.transitionProperties.includes("transform")
+        && !quickSearchCollapsed.outerOverflowX,
+      `The compact editor search launcher lost its reserved, non-reflowing geometry at ${width}x${height}: ${JSON.stringify(quickSearchCollapsed)}`
+    );
+    await rendererValue(`document.querySelector(".editor-search-launcher-surface")?.dispatchEvent(new MouseEvent("click", { bubbles: true }))`);
+    await delay(430);
+    const quickSearchExpanded = await rendererValue(`(() => {
+      const launcher = document.querySelector("#editorSearchLauncher");
+      const surface = launcher?.querySelector(".editor-search-launcher-surface");
+      const input = document.querySelector("#editorQuickSearchInput");
+      const spacer = document.querySelector(".editor-search-reserved-space");
+      const previous = spacer?.previousElementSibling;
+      const surfaceRect = surface?.getBoundingClientRect();
+      const spacerRect = spacer?.getBoundingClientRect();
+      const previousRect = previous?.getBoundingClientRect();
+      const transform = surface ? getComputedStyle(surface, "::before").transform : "";
+      const transformValues = transform.match(/matrix\\(([^)]+)\\)/)?.[1]?.split(",").map(Number) || [];
+      return {
+        focused: document.activeElement === input,
+        inputOpacity: input ? getComputedStyle(input).opacity : "",
+        scaleX: transform === "none" ? 1 : transformValues[0],
+        staysInsideReservedLane: Boolean(surfaceRect && spacerRect && previousRect)
+          && surfaceRect.left >= spacerRect.left - 1
+          && surfaceRect.left >= previousRect.right - 1,
+        outerOverflowX: document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1
+      };
+    })()`);
+    ensure(
+      quickSearchExpanded.focused
+        && Number(quickSearchExpanded.inputOpacity) >= 0.99
+        && Number(quickSearchExpanded.scaleX) >= 0.99
+        && quickSearchExpanded.staysInsideReservedLane
+        && !quickSearchExpanded.outerOverflowX,
+      `The editor search launcher did not expand smoothly inside its reserved lane at ${width}x${height}: ${JSON.stringify(quickSearchExpanded)}`
+    );
+    const quickSearchEscape = await rendererValue(`(() => {
+      const input = document.querySelector("#editorQuickSearchInput");
+      input.value = "main";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      return {
+        blurred: document.activeElement !== input,
+        panelClosed: !document.querySelector(".editor-search-popover"),
+        expanded: document.querySelector("#editorSearchToggle")?.getAttribute("aria-expanded")
+      };
+    })()`);
+    ensure(
+      quickSearchEscape.blurred && quickSearchEscape.panelClosed && quickSearchEscape.expanded === "false",
+      `Escape did not collapse the editor search launcher at ${width}x${height}: ${JSON.stringify(quickSearchEscape)}`
+    );
+    await rendererValue(`(() => {
+      const input = document.querySelector("#editorQuickSearchInput");
+      input?.focus();
+      input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      return true;
+    })()`);
+    await waitForRenderer(
+      `Boolean(document.querySelector(".editor-search-popover")) && document.activeElement?.id === "editorSearchInput"`,
+      "Enter opening the editor search and replace surface"
+    );
+    const quickSearchEnter = await rendererValue(`(() => ({
+      expanded: document.querySelector("#editorSearchToggle")?.getAttribute("aria-expanded"),
+      quickQuery: document.querySelector("#editorQuickSearchInput")?.value || "",
+      panelQuery: document.querySelector("#editorSearchInput")?.value || ""
+    }))()`);
+    ensure(
+      quickSearchEnter.expanded === "true"
+        && quickSearchEnter.quickQuery === "main"
+        && quickSearchEnter.panelQuery === "main",
+      `Enter did not open search with the synchronized quick query at ${width}x${height}: ${JSON.stringify(quickSearchEnter)}`
+    );
+    const searchUiDark = await rendererValue(`(() => {
+      const popover = document.querySelector(".editor-search-popover");
+      const scope = document.querySelector(".editor-search-scope");
+      const activeScope = scope?.querySelector("button.active");
+      const rect = popover?.getBoundingClientRect();
+      return {
+        areas: popover ? getComputedStyle(popover).gridTemplateAreas : "",
+        background: popover ? getComputedStyle(popover).backgroundColor : "",
+        scopeBackground: scope ? getComputedStyle(scope).backgroundColor : "",
+        activeUnderline: activeScope ? getComputedStyle(activeScope, "::after").opacity : "",
+        actionBackground: getComputedStyle(document.querySelector("#replaceAll")).backgroundColor,
+        actionColor: getComputedStyle(document.querySelector("#replaceAll")).color,
+        quickQuerySynced: document.querySelector("#editorSearchInput")?.value === "main",
+        hasNavigationIcons: Boolean(document.querySelector("#searchPrevious .tool-icon-arrowUp") && document.querySelector("#searchNext .tool-icon-arrowDown") && document.querySelector("#closeSearchPanel .tool-icon-close")),
+        contained: Boolean(rect) && rect.left >= -1 && rect.top >= -1 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
+        outerOverflowX: document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1,
+        outerOverflowY: document.scrollingElement.scrollHeight > document.scrollingElement.clientHeight + 1
+      };
+    })()`);
+    ensure(
+      searchUiDark.areas.includes("scope")
+        && searchUiDark.background !== "rgb(255, 255, 255)"
+        && searchUiDark.scopeBackground === "rgba(0, 0, 0, 0)"
+        && searchUiDark.activeUnderline === "1"
+        && searchUiDark.actionBackground === "rgb(201, 81, 0)"
+        && searchUiDark.actionColor === "rgb(255, 255, 255)"
+        && searchUiDark.quickQuerySynced
+        && searchUiDark.hasNavigationIcons
+        && searchUiDark.contained
+        && !searchUiDark.outerOverflowX
+        && !searchUiDark.outerOverflowY,
+      `The editor search surface drifted from its minimal dark-theme contract at ${width}x${height}: ${JSON.stringify(searchUiDark)}`
+    );
+    await rendererValue(`(() => {
+      const root = document.documentElement;
+      root.style.setProperty("--motion-fast", "0ms");
+      applyTheme("light");
+      void root.offsetWidth;
+      root.style.removeProperty("--motion-fast");
+      return true;
+    })()`);
+    const searchUiLight = await rendererValue(`(() => ({
+      background: getComputedStyle(document.querySelector(".editor-search-popover")).backgroundColor,
+      actionBackground: getComputedStyle(document.querySelector("#replaceAll")).backgroundColor,
+      actionColor: getComputedStyle(document.querySelector("#replaceAll")).color
+    }))()`);
+    ensure(
+      searchUiLight.background === "rgb(255, 255, 255)"
+        && searchUiLight.actionBackground === "rgb(201, 81, 0)"
+        && searchUiLight.actionColor === "rgb(255, 255, 255)",
+      `The editor search surface drifted from its light-theme action contract at ${width}x${height}: ${JSON.stringify(searchUiLight)}`
+    );
+    await rendererValue(`document.querySelector("#closeSearchPanel")?.click()`);
+    await waitForRenderer(`!document.querySelector(".editor-search-popover")`, "the editor search surface closing");
+    const sidebarMotion = await rendererValue(`(() => {
+      setSidebarVisible(false);
+      setSidebarVisible(true);
+      const shell = document.querySelector(".editor-shell");
+      const sidebar = document.querySelector(".sidebar");
+      return {
+        opening: shell?.classList.contains("sidebar-opening"),
+        visible: sidebar ? getComputedStyle(sidebar).display !== "none" : false,
+        animation: sidebar ? getComputedStyle(sidebar).animationName : ""
+      };
+    })()`);
+    ensure(
+      sidebarMotion.opening && sidebarMotion.visible && sidebarMotion.animation.includes("localleaf-pane-left-in"),
+      `Editor sidebar did not reveal in place at ${width}x${height}: ${JSON.stringify(sidebarMotion)}`
+    );
+    await delay(320);
+    ensure(
+      await rendererValue(`!document.querySelector(".editor-shell")?.classList.contains("sidebar-opening")`),
+      "Editor sidebar entrance class did not clean itself up."
+    );
     await rendererValue(`document.querySelector("#editorMoreButton")?.click()`);
     await waitForRenderer(`Boolean(document.querySelector(".editor-more-menu"))`, "workspace-menu parity surface");
     await verifyCurrentThemePair("Workspace menu", [".editor-more-menu", ".editor-more-section"], [".editor-more-section-title", ".editor-menu-state", ".editor-more-update small"]);
+    const workspaceMenuMotion = await rendererValue(`getComputedStyle(document.querySelector(".editor-more-menu")).animationName`);
+    ensure(workspaceMenuMotion.includes("localleaf-popover-in"), `Workspace menu did not use the restrained popover entrance: ${workspaceMenuMotion}`);
   }
 
   await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
@@ -843,9 +1781,23 @@ async function testDesktopThemeParity(baseUrl) {
   );
   const reducedMotion = await rendererValue(`(() => ({
     active: matchMedia("(prefers-reduced-motion: reduce)").matches,
-    underlineDuration: getComputedStyle(document.querySelector(".file-button.active .file-label"), "::after").transitionDuration
+    underlineDuration: getComputedStyle(document.querySelector(".file-button.active .file-label"), "::after").transitionDuration,
+    quickSearchDuration: getComputedStyle(document.querySelector(".editor-search-launcher-surface"), "::before").transitionDuration,
+    menuAnimation: getComputedStyle(document.querySelector(".editor-more-menu")).animationName,
+    sidebarOpening: (() => {
+      setSidebarVisible(false);
+      setSidebarVisible(true);
+      return document.querySelector(".editor-shell")?.classList.contains("sidebar-opening");
+    })()
   }))()`);
-  ensure(reducedMotion.active && reducedMotion.underlineDuration === "0s", `Reduced motion did not remove the selected-row transition: ${JSON.stringify(reducedMotion)}`);
+  ensure(
+    reducedMotion.active
+      && reducedMotion.underlineDuration === "0s"
+      && reducedMotion.quickSearchDuration === "0s"
+      && reducedMotion.menuAnimation === "none"
+      && !reducedMotion.sidebarOpening,
+    `Reduced motion did not remove the interaction motion: ${JSON.stringify(reducedMotion)}`
+  );
 
   await setEmulatedMediaFeatures([{ name: "forced-colors", value: "active" }]);
   await waitForRenderer(
@@ -858,12 +1810,55 @@ async function testDesktopThemeParity(baseUrl) {
     return {
       active: matchMedia("(forced-colors: active)").matches,
       avatarBorder: getComputedStyle(document.querySelector(".user-row .avatar")).borderStyle,
+      quickSearchBorder: getComputedStyle(document.querySelector(".editor-search-launcher-surface"), "::before").borderStyle,
       selectedBackground,
       selectedBackgroundTransparent: selectedBackground === "transparent" || (channels.length > 3 && channels[3] === 0)
     };
   })()`);
-  ensure(forcedColors.active && forcedColors.avatarBorder === "solid" && forcedColors.selectedBackgroundTransparent, `Forced colors lost avatar structure or underline-only selection: ${JSON.stringify(forcedColors)}`);
+  ensure(
+    forcedColors.active
+      && forcedColors.avatarBorder === "solid"
+      && forcedColors.quickSearchBorder === "solid"
+      && forcedColors.selectedBackgroundTransparent,
+    `Forced colors lost avatar, search, or underline-only structure: ${JSON.stringify(forcedColors)}`
+  );
   await setEmulatedMediaFeatures([]);
+
+  smokeWindow.setContentSize(900, 640);
+  await waitForRenderer(`innerWidth === 900 && innerHeight === 640`, "the minimum desktop search viewport");
+  await rendererValue(`(() => {
+    const input = document.querySelector("#editorQuickSearchInput");
+    input?.focus();
+    input?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return true;
+  })()`);
+  await delay(430);
+  const minimumDesktopSearch = await rendererValue(`(() => {
+    const row = document.querySelector(".editor-format-row");
+    const surface = document.querySelector(".editor-search-launcher-surface");
+    const input = document.querySelector("#editorQuickSearchInput");
+    const rowRect = row?.getBoundingClientRect();
+    const surfaceRect = surface?.getBoundingClientRect();
+    return {
+      focused: document.activeElement === input,
+      opacity: input ? getComputedStyle(input).opacity : "",
+      contained: Boolean(rowRect && surfaceRect)
+        && surfaceRect.left >= rowRect.left - 1
+        && surfaceRect.right <= rowRect.right + 1
+        && surfaceRect.left >= -1
+        && surfaceRect.right <= innerWidth + 1,
+      outerOverflowX: document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1
+    };
+  })()`);
+  ensure(
+    minimumDesktopSearch.focused
+      && Number(minimumDesktopSearch.opacity) >= 0.99
+      && minimumDesktopSearch.contained
+      && !minimumDesktopSearch.outerOverflowX,
+    `The expanded editor search launcher escaped its 900px desktop viewport: ${JSON.stringify(minimumDesktopSearch)}`
+  );
+  await rendererValue(`document.querySelector("#editorQuickSearchInput")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  pass("editor quick search stays contained at the 900px minimum desktop width");
 
   smokeWindow.setContentSize(1024, 640);
   await rendererValue(`(() => { applyTheme("light"); return true; })()`);
@@ -897,8 +1892,12 @@ async function testChatPresentation() {
       aiMessages: local.aiMessages,
       aiActivityMessage: local.aiActivityMessage,
       rightRailTab: local.rightRailTab,
-      theme: local.theme
+      theme: local.theme,
+      sessionStatus: local.appState.session.status,
+      inviteUrl: local.appState.session.inviteUrl
     };
+    local.appState.session.status = "live";
+    local.appState.session.inviteUrl = "https://example.com/localleaf/join";
     local.appState.chat = [
       { author: local.userName, message: "Let's review the opening together.", createdAt: 1735689600000 },
       { author: "Mira", message: "I added a shorter first paragraph.", createdAt: 1735689660000 }
@@ -1020,6 +2019,135 @@ async function testChatPresentation() {
     );
   }
   pass("human Chat uses flat, readable, pane-contained messages in both themes");
+
+  const quickActionsClosed = await rendererValue(`(() => {
+    const trigger = document.querySelector("#chatSessionActionsButton");
+    const menu = document.querySelector("#chatSessionActionsMenu");
+    const composer = document.querySelector("#chatForm");
+    const emptyMarkup = chatEmptyMarkup();
+    return {
+      triggerPresent: Boolean(trigger),
+      triggerHeight: trigger?.getBoundingClientRect().height || 0,
+      expanded: trigger?.getAttribute("aria-expanded") || "",
+      controls: trigger?.getAttribute("aria-controls") || "",
+      hasPopup: trigger?.getAttribute("aria-haspopup") || "",
+      menuRole: menu?.getAttribute("role") || "",
+      menuHidden: menu?.getAttribute("aria-hidden") || "",
+      inert: Boolean(menu?.inert),
+      itemCount: menu?.querySelectorAll('[role="menuitem"]').length || 0,
+      labels: [...(menu?.querySelectorAll('[role="menuitem"]') || [])].map((item) => item.textContent.replace(/\\s+/g, " ").trim()),
+      composerHeight: composer?.getBoundingClientRect().height || 0,
+      structuredEmptyState: /chat-empty-title/.test(emptyMarkup) && /chat-empty-copy/.test(emptyMarkup)
+    };
+  })()`);
+  ensure(
+    quickActionsClosed.triggerPresent
+      && Math.abs(quickActionsClosed.triggerHeight - 40) <= 1
+      && quickActionsClosed.expanded === "false"
+      && quickActionsClosed.controls === "chatSessionActionsMenu"
+      && quickActionsClosed.hasPopup === "menu"
+      && quickActionsClosed.menuRole === "menu"
+      && quickActionsClosed.menuHidden === "true"
+      && quickActionsClosed.inert
+      && quickActionsClosed.itemCount === 2
+      && quickActionsClosed.labels.join("|") === "Share link|Manage guests"
+      && quickActionsClosed.composerHeight >= 56
+      && quickActionsClosed.structuredEmptyState,
+    `The Chat hierarchy or host quick-actions trigger is incomplete: ${JSON.stringify(quickActionsClosed)}`
+  );
+
+  await rendererValue(`document.querySelector("#chatSessionActionsButton")?.click()`);
+  await waitForRenderer(
+    `document.querySelector("#chatSessionActionsButton")?.getAttribute("aria-expanded") === "true" && document.activeElement?.matches?.('#chatSessionActionsMenu [role="menuitem"]') && Number.parseFloat(getComputedStyle(document.querySelector("#chatSessionActionsMenu")).opacity) >= 0.99`,
+    "the Chat host quick-actions fan-out"
+  );
+  const quickActionsOpen = await rendererValue(`(() => {
+    const trigger = document.querySelector("#chatSessionActionsButton");
+    const menu = document.querySelector("#chatSessionActionsMenu");
+    const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')];
+    const menuStyle = getComputedStyle(menu);
+    const itemStyle = getComputedStyle(items[0]);
+    const chevronStyle = getComputedStyle(trigger.querySelector(".chat-session-actions-chevron"));
+    return {
+      expanded: trigger.getAttribute("aria-expanded"),
+      menuHidden: menu.getAttribute("aria-hidden"),
+      inert: menu.inert,
+      focusedFirst: document.activeElement === items[0],
+      menuTransition: menuStyle.transitionProperty,
+      itemTransition: itemStyle.transitionProperty,
+      menuDuration: menuStyle.transitionDuration,
+      itemDuration: itemStyle.transitionDuration,
+      chevronTransform: chevronStyle.transform,
+      menuOpacity: menuStyle.opacity,
+      menuTransform: menuStyle.transform
+    };
+  })()`);
+  ensure(
+    quickActionsOpen.expanded === "true"
+      && quickActionsOpen.menuHidden === "false"
+      && !quickActionsOpen.inert
+      && quickActionsOpen.focusedFirst
+      && quickActionsOpen.menuTransition.includes("transform")
+      && quickActionsOpen.menuTransition.includes("opacity")
+      && !quickActionsOpen.menuTransition.includes("all")
+      && quickActionsOpen.itemTransition.includes("transform")
+      && quickActionsOpen.itemTransition.includes("opacity")
+      && !quickActionsOpen.itemTransition.includes("all")
+      && quickActionsOpen.chevronTransform !== "none"
+      && Number.parseFloat(quickActionsOpen.menuOpacity) >= 0.99,
+    `The Chat host quick-actions menu lost its accessible, interruptible disclosure motion: ${JSON.stringify(quickActionsOpen)}`
+  );
+
+  await rendererValue(`(() => {
+    const menu = document.querySelector("#chatSessionActionsMenu");
+    menu.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }));
+    return document.activeElement?.dataset.chatSessionAction || "";
+  })()`);
+  const quickActionsEndFocus = await rendererValue(`document.activeElement?.dataset.chatSessionAction || ""`);
+  ensure(quickActionsEndFocus === "manage", "End did not move focus to Manage guests in the Chat quick-actions menu.");
+  await rendererValue(`document.querySelector("#chatSessionActionsMenu")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))`);
+  await waitForRenderer(
+    `document.querySelector("#chatSessionActionsButton")?.getAttribute("aria-expanded") === "false" && document.activeElement?.id === "chatSessionActionsButton"`,
+    "Chat quick-actions Escape focus restoration"
+  );
+
+  await rendererValue(`document.querySelector("#chatSessionActionsButton")?.click()`);
+  await waitForRenderer(`document.querySelector("#chatSessionActionsButton")?.getAttribute("aria-expanded") === "true"`, "the reopened Chat quick-actions menu");
+  await rendererValue(`document.querySelector('.chat-list')?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }))`);
+  await waitForRenderer(
+    `document.querySelector("#chatSessionActionsButton")?.getAttribute("aria-expanded") === "false" && document.activeElement?.id === "chatSessionActionsButton"`,
+    "Chat quick-actions outside-click focus restoration"
+  );
+
+  await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await rendererValue(`document.querySelector("#chatSessionActionsButton")?.click()`);
+  await waitForRenderer(`document.querySelector("#chatSessionActionsButton")?.getAttribute("aria-expanded") === "true"`, "the reduced-motion Chat quick-actions menu");
+  const quickActionsReducedMotion = await rendererValue(`(() => ({
+    menu: getComputedStyle(document.querySelector("#chatSessionActionsMenu")).transitionDuration,
+    item: getComputedStyle(document.querySelector('#chatSessionActionsMenu [role="menuitem"]')).transitionDuration,
+    chevron: getComputedStyle(document.querySelector(".chat-session-actions-chevron")).transitionDuration
+  }))()`);
+  ensure(
+    Number.parseFloat(quickActionsReducedMotion.menu) <= 0.00002
+      && Number.parseFloat(quickActionsReducedMotion.item) <= 0.00002
+      && Number.parseFloat(quickActionsReducedMotion.chevron) <= 0.00002,
+    `Reduced motion did not disable the Chat quick-actions disclosure motion: ${JSON.stringify(quickActionsReducedMotion)}`
+  );
+  await rendererValue(`document.querySelector("#chatSessionActionsMenu")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))`);
+  await setEmulatedMediaFeatures([]);
+
+  await rendererValue(`(() => {
+    const saved = window.__localLeafRenderedSmokeChatState;
+    local.appState.session.status = saved.sessionStatus;
+    local.appState.session.inviteUrl = saved.inviteUrl;
+    document.querySelector("#chatSessionActionsButton")?.click();
+    document.querySelector('[data-chat-session-action="manage"]')?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`Boolean(document.querySelector(".session-share-page"))`, "Manage guests navigation from Chat");
+  await rendererValue(`(() => { setView("editor"); return true; })()`);
+  await waitForRenderer(`Boolean(document.querySelector(".editor-shell .chat-panel"))`, "the editor after Manage guests navigation");
+  pass("host Chat quick actions expose Share and Manage guests with keyboard-safe disclosure motion");
 
   async function captureAiChat(theme) {
     await rendererValue(`(() => { applyTheme(${JSON.stringify(theme)}); setRightRailTab("ai"); return true; })()`);
@@ -1198,6 +2326,8 @@ async function testChatPresentation() {
     local.appState.chat = saved.chat;
     local.aiMessages = saved.aiMessages;
     local.aiActivityMessage = saved.aiActivityMessage;
+    local.appState.session.status = saved.sessionStatus;
+    local.appState.session.inviteUrl = saved.inviteUrl;
     applyTheme(saved.theme);
     setRightRailTab(saved.rightRailTab);
     delete window.__localLeafRenderedSmokeChatState;
@@ -1255,6 +2385,529 @@ async function testEditorPdfFlow(baseUrl, fixture) {
     "The editor action or selected rail tab drifted from the orange-button/underline-only contract."
   );
   pass("editor primary action and selected tab follow the orange/neutral contract");
+
+  await rendererValue(`document.querySelector("#editorStyleButton")?.click()`);
+  await waitForRenderer(
+    `(() => {
+      const button = document.querySelector("#editorStyleButton");
+      const menu = document.querySelector(".editor-style-menu");
+      return button?.getAttribute("aria-expanded") === "true"
+        && menu?.getAttribute("aria-hidden") === "false"
+        && Number.parseFloat(getComputedStyle(menu).opacity) >= 0.99;
+    })()`,
+    "the editor text-style menu motion"
+  );
+  const editorStyleOpen = await rendererValue(`(() => {
+    const menu = document.querySelector(".editor-style-menu");
+    const chevron = document.querySelector(".style-chevron .tool-icon");
+    return {
+      mounted: Boolean(menu),
+      inert: Boolean(menu?.inert),
+      opacity: menu ? getComputedStyle(menu).opacity : "",
+      chevronWidth: chevron ? getComputedStyle(chevron).width : "",
+      chevronTransform: chevron ? getComputedStyle(chevron).transform : ""
+    };
+  })()`);
+  ensure(
+    editorStyleOpen.mounted
+      && !editorStyleOpen.inert
+      && Number.parseFloat(editorStyleOpen.opacity) >= 0.99
+      && editorStyleOpen.chevronWidth === "18px"
+      && editorStyleOpen.chevronTransform !== "none",
+    `The editor text-style dropdown lost its persistent menu or chevron state: ${JSON.stringify(editorStyleOpen)}`
+  );
+  await rendererValue(`document.querySelector("#editorStyleButton")?.click()`);
+  const editorStyleClosing = await rendererValue(`(() => {
+    const menu = document.querySelector(".editor-style-menu");
+    return {
+      mounted: Boolean(menu),
+      hidden: menu?.getAttribute("aria-hidden") || "",
+      inert: Boolean(menu?.inert)
+    };
+  })()`);
+  ensure(
+    editorStyleClosing.mounted && editorStyleClosing.hidden === "true" && editorStyleClosing.inert,
+    `The editor text-style menu was removed before its close transition: ${JSON.stringify(editorStyleClosing)}`
+  );
+  await waitForRenderer(
+    `getComputedStyle(document.querySelector(".editor-style-menu")).visibility === "hidden"`,
+    "the editor text-style menu close"
+  );
+  await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await rendererValue(`document.querySelector("#editorStyleButton")?.click()`);
+  const editorStyleReduced = await rendererValue(`(() => ({
+    menu: getComputedStyle(document.querySelector(".editor-style-menu")).transitionDuration,
+    chevron: getComputedStyle(document.querySelector(".style-chevron .tool-icon")).transitionDuration
+  }))()`);
+  ensure(
+    Number.parseFloat(editorStyleReduced.menu) <= 0.00002
+      && Number.parseFloat(editorStyleReduced.chevron) <= 0.00002,
+    `Reduced motion did not make the text-style dropdown immediate: ${JSON.stringify(editorStyleReduced)}`
+  );
+  await rendererValue(`document.querySelector("#editorStyleButton")?.click()`);
+  await setEmulatedMediaFeatures([]);
+  pass("editor text-style dropdown stays mounted and animates only transform and opacity");
+
+  const editorStyleKeyboard = await rendererValue(`(() => {
+    const trigger = document.querySelector("#editorStyleButton");
+    trigger?.focus();
+    trigger?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    const first = document.activeElement;
+    first?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    const options = [...document.querySelectorAll(".editor-style-menu [role='menuitem']")];
+    const lastFocused = document.activeElement === options.at(-1);
+    document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    return {
+      firstFocused: first === options[0],
+      lastFocused,
+      expanded: trigger?.getAttribute("aria-expanded") || "",
+      menuHidden: document.querySelector(".editor-style-menu")?.getAttribute("aria-hidden") || "",
+      focused: document.activeElement === trigger
+    };
+  })()`);
+  ensure(
+    editorStyleKeyboard.firstFocused
+      && editorStyleKeyboard.lastFocused
+      && editorStyleKeyboard.expanded === "false"
+      && editorStyleKeyboard.menuHidden === "true"
+      && editorStyleKeyboard.focused,
+    `The editor text-style menu lost Arrow/Home/End/Escape focus behavior: ${JSON.stringify(editorStyleKeyboard)}`
+  );
+  pass("editor text-style dropdown keeps keyboard focus within the ARIA menu and restores its trigger");
+
+  const beforeDraft = await hostRequest(baseUrl, "/api/state");
+  const beforeDraftPaths = new Set(beforeDraft.project.files.map((item) => item.path));
+  await rendererValue(`document.querySelector("#newFile")?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector(".tree-create-draft[data-create-kind='file']"))`, "the transactional new-file draft");
+  const newFileDraft = await rendererValue(`(() => {
+    const draft = document.querySelector(".tree-create-draft[data-create-kind='file']");
+    const input = draft?.querySelector(".tree-create-input");
+    const confirm = draft?.querySelector("[data-tree-create-confirm]");
+    const cancel = draft?.querySelector("[data-tree-create-cancel]");
+    return {
+      value: input?.value || "",
+      focused: document.activeElement === input,
+      confirmLabel: confirm?.getAttribute("aria-label") || "",
+      cancelLabel: cancel?.getAttribute("aria-label") || "",
+      fileActionText: document.querySelector("#newFile")?.textContent?.replace(/\\s+/g, " ").trim() || "",
+      folderActionText: document.querySelector("#newFolder")?.textContent?.replace(/\\s+/g, " ").trim() || ""
+    };
+  })()`);
+  const afterOpenDraft = await hostRequest(baseUrl, "/api/state");
+  ensure(
+    newFileDraft.value === "untitled.tex"
+      && newFileDraft.focused
+      && newFileDraft.confirmLabel === "Create file"
+      && newFileDraft.cancelLabel === "Cancel new file"
+      && /New file/i.test(newFileDraft.fileActionText)
+      && /New folder/i.test(newFileDraft.folderActionText),
+    `The new-file draft is not clear or keyboard-ready: ${JSON.stringify(newFileDraft)}`
+  );
+  ensure(
+    afterOpenDraft.project.files.length === beforeDraft.project.files.length
+      && afterOpenDraft.project.files.every((item) => beforeDraftPaths.has(item.path)),
+    "Opening New file wrote a placeholder to the project before confirmation."
+  );
+
+  await rendererValue(`(() => {
+    const input = document.querySelector(".tree-create-input");
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("[data-tree-create-confirm]")?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`Boolean(document.querySelector(".tree-create-error")?.textContent?.trim())`, "the inline new-file validation message");
+  const invalidDraftState = await hostRequest(baseUrl, "/api/state");
+  ensure(
+    invalidDraftState.project.files.length === beforeDraft.project.files.length,
+    "An invalid new-file draft created a ghost file."
+  );
+
+  await rendererValue(`(() => {
+    const input = document.querySelector(".tree-create-input");
+    input.value = "notes";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("[data-tree-create-confirm]")?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`Boolean(document.querySelector('[data-file="notes.tex"].active')) && !document.querySelector(".tree-create-draft")`, "the committed new file");
+  let createdState = await hostRequest(baseUrl, "/api/state");
+  ensure(createdState.project.files.some((item) => item.path === "notes.tex"), "New file did not append the documented .tex default.");
+
+  await rendererValue(`document.querySelector("#newFolder")?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector(".tree-create-draft[data-create-kind='folder']"))`, "the transactional new-folder draft");
+  await rendererValue(`(() => {
+    const input = document.querySelector(".tree-create-input");
+    input.value = "appendices";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("[data-tree-create-confirm]")?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`Boolean(document.querySelector('[data-folder="appendices"]')) && !document.querySelector(".tree-create-draft")`, "the committed new folder");
+  createdState = await hostRequest(baseUrl, "/api/state");
+  ensure(createdState.project.files.some((item) => item.path === "appendices" && item.type === "directory"), "New folder did not create the requested directory.");
+
+  await rendererValue(`document.querySelector('[data-file="notes.tex"]')?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector('[data-file="notes.tex"].active'))`, "the new file selection before rename");
+  await rendererValue(`document.querySelector("#renameFile")?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector('.tree-rename-input[data-rename-path="notes.tex"]'))`, "the full-name rename field");
+  const renameDraft = await rendererValue(`(() => {
+    const input = document.querySelector('.tree-rename-input[data-rename-path="notes.tex"]');
+    return {
+      value: input?.value || "",
+      hasDetachedExtension: Boolean(input?.closest(".tree-rename-wrap")?.querySelector(".tree-rename-extension")),
+      confirmLabel: input?.closest(".tree-rename-wrap")?.querySelector("[data-tree-rename-confirm]")?.getAttribute("aria-label") || "",
+      cancelLabel: input?.closest(".tree-rename-wrap")?.querySelector("[data-tree-rename-cancel]")?.getAttribute("aria-label") || ""
+    };
+  })()`);
+  ensure(
+    renameDraft.value === "notes.tex"
+      && !renameDraft.hasDetachedExtension
+      && renameDraft.confirmLabel === "Save new name"
+      && renameDraft.cancelLabel === "Cancel rename",
+    `Rename still hides the file extension or lacks explicit actions: ${JSON.stringify(renameDraft)}`
+  );
+  await rendererValue(`(() => {
+    const input = document.querySelector('.tree-rename-input[data-rename-path="notes.tex"]');
+    input.value = "analysis.tex";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.closest(".tree-rename-wrap")?.querySelector("[data-tree-rename-confirm]")?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`Boolean(document.querySelector('[data-file="analysis.tex"].active'))`, "the explicit rename commit");
+  const renamedState = await hostRequest(baseUrl, "/api/state");
+  ensure(
+    renamedState.project.files.some((item) => item.path === "analysis.tex")
+      && !renamedState.project.files.some((item) => item.path === "notes.tex"),
+    "The full-name rename did not update the project atomically."
+  );
+
+  await rendererValue(`document.querySelector("#newFile")?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector(".tree-create-draft"))`, "the cancellable creation draft");
+  await rendererValue(`document.querySelector("[data-tree-create-cancel]")?.click()`);
+  await waitForRenderer(`!document.querySelector(".tree-create-draft")`, "the cancelled creation draft");
+  const afterCancelState = await hostRequest(baseUrl, "/api/state");
+  ensure(afterCancelState.project.files.length === renamedState.project.files.length, "Cancelling New file left a placeholder behind.");
+
+  await rendererValue(`document.querySelector('[data-file="main.tex"]')?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector('[data-file="main.tex"].active'))`, "the restored main-file selection");
+  pass("file and folder creation stays transactional and full-name rename is explicit");
+
+  await rendererValue(`(() => {
+    window.__localLeafDeleteDialogNativeCalls = { confirm: 0, alert: 0 };
+    window.__localLeafDeleteDialogOriginalConfirm = window.confirm;
+    window.__localLeafDeleteDialogOriginalAlert = window.alert;
+    window.confirm = () => {
+      window.__localLeafDeleteDialogNativeCalls.confirm += 1;
+      return false;
+    };
+    window.alert = () => {
+      window.__localLeafDeleteDialogNativeCalls.alert += 1;
+    };
+    return true;
+  })()`);
+
+  await rendererValue(`document.querySelector('[data-folder="appendices"]')?.click()`);
+  await waitForRenderer(`local.selectedFolder === "appendices"`, "the folder selected for delete confirmation");
+  await rendererValue(`document.querySelector("#deleteFile")?.click()`);
+  await waitForRenderer(
+    `Boolean(document.querySelector(".file-delete-dialog")) && document.activeElement?.id === "cancelFileDelete"`,
+    "the folder delete confirmation and initial Cancel focus"
+  );
+  const folderDeleteDialog = await rendererValue(`(() => {
+    const dialog = document.querySelector(".file-delete-dialog");
+    const cancel = dialog?.querySelector("#cancelFileDelete");
+    const confirm = dialog?.querySelector("#confirmFileDelete");
+    const title = dialog?.querySelector("#fileDeleteTitle");
+    const actionStyle = confirm && getComputedStyle(confirm);
+    const cancelStyle = cancel && getComputedStyle(cancel);
+    const dialogStyle = dialog && getComputedStyle(dialog);
+    const titleStyle = title && getComputedStyle(title);
+    const initialFocus = document.activeElement === cancel;
+    cancel?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+    const wrapsBackward = document.activeElement === confirm;
+    confirm?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    const wrapsForward = document.activeElement === cancel;
+    return {
+      role: dialog?.getAttribute("role") || "",
+      ariaModal: dialog?.getAttribute("aria-modal") || "",
+      labelledBy: dialog?.getAttribute("aria-labelledby") || "",
+      describedBy: dialog?.getAttribute("aria-describedby") || "",
+      title: title?.textContent?.trim() || "",
+      type: dialog?.querySelector(".file-delete-target-type")?.textContent?.trim() || "",
+      name: dialog?.querySelector(".file-delete-target-name")?.textContent?.trim() || "",
+      confirmText: confirm?.textContent?.trim() || "",
+      initialFocus,
+      wrapsBackward,
+      wrapsForward,
+      iconFree: !dialog?.querySelector("svg, .ui-glyph, .tool-icon"),
+      dialogRadius: dialogStyle?.borderRadius || "",
+      dialogBackground: dialogStyle?.backgroundColor || "",
+      titleSize: titleStyle?.fontSize || "",
+      cancelHeight: cancel?.getBoundingClientRect().height || 0,
+      confirmHeight: confirm?.getBoundingClientRect().height || 0,
+      cancelBackground: cancelStyle?.backgroundColor || "",
+      actionBackground: actionStyle?.backgroundColor || "",
+      actionColor: actionStyle?.color || ""
+    };
+  })()`);
+  ensure(
+    folderDeleteDialog.role === "alertdialog"
+      && folderDeleteDialog.ariaModal === "true"
+      && folderDeleteDialog.labelledBy === "fileDeleteTitle"
+      && folderDeleteDialog.describedBy.includes("fileDeleteDescription")
+      && folderDeleteDialog.describedBy.includes("fileDeleteTarget")
+      && folderDeleteDialog.title === "Delete folder?"
+      && folderDeleteDialog.type === "Folder"
+      && folderDeleteDialog.name === "appendices"
+      && folderDeleteDialog.confirmText === "Delete folder"
+      && folderDeleteDialog.initialFocus
+      && folderDeleteDialog.wrapsBackward
+      && folderDeleteDialog.wrapsForward
+      && folderDeleteDialog.iconFree
+      && folderDeleteDialog.dialogRadius === "24px"
+      && folderDeleteDialog.dialogBackground === "rgb(255, 255, 255)"
+      && folderDeleteDialog.titleSize === "18px"
+      && Math.abs(folderDeleteDialog.cancelHeight - 40) <= 1
+      && Math.abs(folderDeleteDialog.confirmHeight - 40) <= 1
+      && folderDeleteDialog.cancelBackground === "rgb(255, 255, 255)"
+      && folderDeleteDialog.actionBackground === "rgb(180, 35, 24)"
+      && folderDeleteDialog.actionColor === "rgb(255, 255, 255)",
+    `The folder delete dialog lost its LocalLeaf structure, semantic red action, or focus contract: ${JSON.stringify(folderDeleteDialog)}`
+  );
+  await rendererValue(`document.querySelector(".file-delete-backdrop")?.click()`);
+  await waitForRenderer(
+    `!document.querySelector(".file-delete-backdrop") && document.activeElement?.id === "deleteFile"`,
+    "overlay cancellation and focus restoration"
+  );
+
+  await rendererValue(`document.querySelector('[data-file="analysis.tex"]')?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector('[data-file="analysis.tex"].active'))`, "the file selected for delete confirmation");
+  await rendererValue(`document.querySelector("#deleteFile")?.click()`);
+  await waitForRenderer(
+    `Boolean(document.querySelector(".file-delete-dialog")) && document.activeElement?.id === "cancelFileDelete"`,
+    "the file delete confirmation"
+  );
+  const deleteThemePair = await rendererValue(`(() => {
+    const capture = () => {
+      const dialog = document.querySelector(".file-delete-dialog");
+      const target = dialog?.querySelector(".file-delete-target");
+      const action = dialog?.querySelector("#confirmFileDelete");
+      return {
+        dialogBackground: dialog ? getComputedStyle(dialog).backgroundColor : "",
+        targetBackground: target ? getComputedStyle(target).backgroundColor : "",
+        actionBackground: action ? getComputedStyle(action).backgroundColor : "",
+        actionColor: action ? getComputedStyle(action).color : ""
+      };
+    };
+    const light = capture();
+    applyTheme("dark");
+    const dark = capture();
+    applyTheme("light");
+    return {
+      light,
+      dark,
+      title: document.querySelector("#fileDeleteTitle")?.textContent?.trim() || "",
+      type: document.querySelector(".file-delete-target-type")?.textContent?.trim() || "",
+      name: document.querySelector(".file-delete-target-name")?.textContent?.trim() || "",
+      action: document.querySelector("#confirmFileDelete")?.textContent?.trim() || ""
+    };
+  })()`);
+  ensure(
+    deleteThemePair.title === "Delete file?"
+      && deleteThemePair.type === "File"
+      && deleteThemePair.name === "analysis.tex"
+      && deleteThemePair.action === "Delete file"
+      && deleteThemePair.light.dialogBackground === "rgb(255, 255, 255)"
+      && deleteThemePair.light.targetBackground === "rgb(251, 251, 250)"
+      && deleteThemePair.dark.dialogBackground === "rgb(23, 24, 22)"
+      && deleteThemePair.dark.targetBackground === "rgb(28, 29, 26)"
+      && deleteThemePair.light.actionBackground === "rgb(180, 35, 24)"
+      && deleteThemePair.dark.actionBackground === "rgb(180, 35, 24)"
+      && deleteThemePair.light.actionColor === "rgb(255, 255, 255)"
+      && deleteThemePair.dark.actionColor === "rgb(255, 255, 255)",
+    `The delete dialog lost its light/dark neutral surface or red destructive action: ${JSON.stringify(deleteThemePair)}`
+  );
+  await rendererValue(`document.querySelector(".file-delete-backdrop")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))`);
+  await waitForRenderer(
+    `!document.querySelector(".file-delete-backdrop") && document.activeElement?.id === "deleteFile"`,
+    "Escape cancellation and focus restoration"
+  );
+
+  await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await rendererValue(`document.querySelector("#deleteFile")?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector(".file-delete-dialog"))`, "the reduced-motion delete dialog");
+  const deleteReducedMotion = await rendererValue(`(() => ({
+    active: matchMedia("(prefers-reduced-motion: reduce)").matches,
+    backdropAnimation: getComputedStyle(document.querySelector(".file-delete-backdrop")).animationName,
+    dialogAnimation: getComputedStyle(document.querySelector(".file-delete-dialog")).animationName,
+    actionTransition: getComputedStyle(document.querySelector("#confirmFileDelete")).transitionDuration
+  }))()`);
+  ensure(
+    deleteReducedMotion.active
+      && deleteReducedMotion.backdropAnimation === "none"
+      && deleteReducedMotion.dialogAnimation === "none"
+      && deleteReducedMotion.actionTransition === "0s",
+    `Reduced motion did not remove delete-dialog animation: ${JSON.stringify(deleteReducedMotion)}`
+  );
+  await rendererValue(`document.querySelector("#cancelFileDelete")?.click()`);
+  await waitForRenderer(`!document.querySelector(".file-delete-backdrop")`, "the reduced-motion delete dialog closing");
+  await setEmulatedMediaFeatures([]);
+
+  await setEmulatedMediaFeatures([{ name: "forced-colors", value: "active" }]);
+  await rendererValue(`document.querySelector("#deleteFile")?.click()`);
+  await waitForRenderer(`Boolean(document.querySelector(".file-delete-dialog"))`, "the forced-colors delete dialog");
+  const deleteForcedColors = await rendererValue(`(() => {
+    const dialog = document.querySelector(".file-delete-dialog");
+    const target = document.querySelector(".file-delete-target");
+    const action = document.querySelector("#confirmFileDelete");
+    const actionStyle = getComputedStyle(action);
+    return {
+      active: matchMedia("(forced-colors: active)").matches,
+      dialogBorder: getComputedStyle(dialog).borderStyle,
+      targetBorder: getComputedStyle(target).borderStyle,
+      actionBorder: actionStyle.borderStyle,
+      actionBackground: actionStyle.backgroundColor,
+      actionColor: actionStyle.color
+    };
+  })()`);
+  ensure(
+    deleteForcedColors.active
+      && deleteForcedColors.dialogBorder === "solid"
+      && deleteForcedColors.targetBorder === "solid"
+      && deleteForcedColors.actionBorder === "solid"
+      && deleteForcedColors.actionBackground !== "rgb(180, 35, 24)"
+      && deleteForcedColors.actionBackground !== deleteForcedColors.actionColor,
+    `Forced colors did not retain delete-dialog structure and action contrast: ${JSON.stringify(deleteForcedColors)}`
+  );
+  await rendererValue(`document.querySelector("#cancelFileDelete")?.click()`);
+  await waitForRenderer(`!document.querySelector(".file-delete-backdrop")`, "the forced-colors delete dialog closing");
+  await setEmulatedMediaFeatures([]);
+
+  await rendererValue(`(() => {
+    window.__localLeafDeleteDialogOriginalFetch = window.fetch;
+    window.fetch = (input, init) => {
+      if (String(input).includes("/api/file/delete")) {
+        return new Promise((resolve) => {
+          window.__localLeafDeleteDialogResolve = resolve;
+        });
+      }
+      return window.__localLeafDeleteDialogOriginalFetch(input, init);
+    };
+    document.querySelector("#deleteFile")?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`document.activeElement?.id === "cancelFileDelete"`, "the retryable delete dialog");
+  await rendererValue(`document.querySelector("#confirmFileDelete")?.click()`);
+  await waitForRenderer(`document.querySelector(".file-delete-backdrop")?.dataset.busy === "true"`, "the pending delete state");
+  const deletePendingState = await rendererValue(`(() => {
+    const modal = document.querySelector(".file-delete-backdrop");
+    const dialog = document.querySelector(".file-delete-dialog");
+    const cancel = document.querySelector("#cancelFileDelete");
+    const action = document.querySelector("#confirmFileDelete");
+    const status = document.querySelector("#fileDeleteStatus");
+    modal?.click();
+    modal?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    return {
+      remainsOpen: Boolean(document.querySelector(".file-delete-backdrop")),
+      busy: modal?.dataset.busy || "",
+      ariaBusy: dialog?.getAttribute("aria-busy") || "",
+      cancelDisabled: Boolean(cancel?.disabled),
+      actionDisabled: Boolean(action?.disabled),
+      actionText: action?.textContent?.trim() || "",
+      statusText: status?.textContent?.trim() || "",
+      statusHidden: Boolean(status?.hidden)
+    };
+  })()`);
+  ensure(
+    deletePendingState.remainsOpen
+      && deletePendingState.busy === "true"
+      && deletePendingState.ariaBusy === "true"
+      && deletePendingState.cancelDisabled
+      && deletePendingState.actionDisabled
+      && deletePendingState.actionText === "Deleting..."
+      && deletePendingState.statusText === "Deleting file..."
+      && !deletePendingState.statusHidden,
+    `The pending delete state is not stable or clearly labelled: ${JSON.stringify(deletePendingState)}`
+  );
+  await rendererValue(`(() => {
+    window.__localLeafDeleteDialogResolve?.(new Response(
+      JSON.stringify({ error: "Rendered delete denied." }),
+      { status: 409, headers: { "content-type": "application/json" } }
+    ));
+    return true;
+  })()`);
+  await waitForRenderer(
+    `document.querySelector("#fileDeleteStatus")?.textContent?.trim() === "Rendered delete denied."`,
+    "the in-dialog delete server error"
+  );
+  const deleteErrorState = await rendererValue(`(() => {
+    const modal = document.querySelector(".file-delete-backdrop");
+    const status = document.querySelector("#fileDeleteStatus");
+    const cancel = document.querySelector("#cancelFileDelete");
+    const action = document.querySelector("#confirmFileDelete");
+    return {
+      remainsOpen: Boolean(modal),
+      busy: modal?.dataset.busy || "",
+      role: status?.getAttribute("role") || "",
+      ariaLive: status?.getAttribute("aria-live") || "",
+      statusText: status?.textContent?.trim() || "",
+      cancelEnabled: !cancel?.disabled,
+      actionEnabled: !action?.disabled,
+      actionText: action?.textContent?.trim() || "",
+      actionFocused: document.activeElement === action,
+      nativeCalls: { ...window.__localLeafDeleteDialogNativeCalls }
+    };
+  })()`);
+  ensure(
+    deleteErrorState.remainsOpen
+      && deleteErrorState.busy === "false"
+      && deleteErrorState.role === "alert"
+      && deleteErrorState.ariaLive === "assertive"
+      && deleteErrorState.statusText === "Rendered delete denied."
+      && deleteErrorState.cancelEnabled
+      && deleteErrorState.actionEnabled
+      && deleteErrorState.actionText === "Delete file"
+      && deleteErrorState.actionFocused
+      && deleteErrorState.nativeCalls.confirm === 0
+      && deleteErrorState.nativeCalls.alert === 0,
+    `A delete server error escaped the dialog or invoked a native prompt: ${JSON.stringify(deleteErrorState)}`
+  );
+  await rendererValue(`(() => {
+    window.fetch = window.__localLeafDeleteDialogOriginalFetch;
+    delete window.__localLeafDeleteDialogOriginalFetch;
+    delete window.__localLeafDeleteDialogResolve;
+    document.querySelector("#cancelFileDelete")?.click();
+    return true;
+  })()`);
+  await waitForRenderer(
+    `!document.querySelector(".file-delete-backdrop") && document.activeElement?.id === "deleteFile"`,
+    "error-dialog cancellation and focus restoration"
+  );
+
+  await rendererValue(`document.querySelector("#deleteFile")?.click()`);
+  await waitForRenderer(`document.activeElement?.id === "cancelFileDelete"`, "the final file delete confirmation");
+  await rendererValue(`document.querySelector("#confirmFileDelete")?.click()`);
+  await waitForRenderer(
+    `!document.querySelector(".file-delete-backdrop") && !document.querySelector('[data-file="analysis.tex"]') && document.activeElement?.id === "deleteFile"`,
+    "the completed file deletion and delete-trigger focus restoration"
+  );
+  const deletedState = await hostRequest(baseUrl, "/api/state");
+  ensure(!deletedState.project.files.some((item) => item.path === "analysis.tex"), "The confirmed file deletion did not reach the host project.");
+  const deleteNativeCalls = await rendererValue(`(() => {
+    const calls = { ...window.__localLeafDeleteDialogNativeCalls };
+    window.confirm = window.__localLeafDeleteDialogOriginalConfirm;
+    window.alert = window.__localLeafDeleteDialogOriginalAlert;
+    delete window.__localLeafDeleteDialogNativeCalls;
+    delete window.__localLeafDeleteDialogOriginalConfirm;
+    delete window.__localLeafDeleteDialogOriginalAlert;
+    return calls;
+  })()`);
+  ensure(
+    deleteNativeCalls.confirm === 0 && deleteNativeCalls.alert === 0,
+    `File deletion invoked a native confirm/alert: ${JSON.stringify(deleteNativeCalls)}`
+  );
+  pass("file deletion uses a focus-managed LocalLeaf dialog across cancel, pending, error, and success states");
 
   await testChatPresentation();
 
@@ -1546,6 +3199,47 @@ async function testEditorPdfFlow(baseUrl, fixture) {
     `Boolean(document.querySelector('[data-review-ai-run="rendered-review-run"]'))`,
     "the rendered Changes Review action"
   );
+  const changesActions = await rendererValue(`(() => {
+    const run = document.querySelector('[data-ai-run="rendered-review-run"]');
+    const undo = run?.querySelector('.ai-run-undo-action');
+    const review = run?.querySelector('.ai-run-review-action');
+    const disclosure = run?.querySelector('.ai-run-disclosure');
+    const reviewUnderline = review ? getComputedStyle(review, "::after") : null;
+    return {
+      undoBorder: undo ? getComputedStyle(undo).borderTopWidth : "",
+      undoBackground: undo ? getComputedStyle(undo).backgroundColor : "",
+      reviewBorder: review ? getComputedStyle(review).borderTopWidth : "",
+      reviewBackground: review ? getComputedStyle(review).backgroundColor : "",
+      disclosureBorder: disclosure ? getComputedStyle(disclosure).borderTopWidth : "",
+      disclosureBackground: disclosure ? getComputedStyle(disclosure).backgroundColor : "",
+      underlineColor: reviewUnderline?.backgroundColor || "",
+      hasUndoIcon: Boolean(undo?.querySelector('.tool-icon-undo')),
+      hasReviewIcon: Boolean(review?.querySelector('.tool-icon-review')),
+      hasDisclosureIcon: Boolean(disclosure?.querySelector('.tool-icon-chevronDown')),
+      reviewLabel: review?.textContent?.trim() || "",
+      disclosureExpanded: disclosure?.getAttribute('aria-expanded') || ""
+    };
+  })()`);
+  ensure(
+    changesActions.undoBorder === "0px"
+      && changesActions.undoBackground === "rgba(0, 0, 0, 0)"
+      && changesActions.reviewBorder === "0px"
+      && changesActions.reviewBackground === "rgba(0, 0, 0, 0)"
+      && changesActions.disclosureBorder === "0px"
+      && changesActions.disclosureBackground === "rgba(0, 0, 0, 0)"
+      && changesActions.underlineColor === "rgb(201, 81, 0)"
+      && changesActions.hasUndoIcon
+      && changesActions.hasReviewIcon
+      && changesActions.hasDisclosureIcon
+      && changesActions.reviewLabel === "Review"
+      && changesActions.disclosureExpanded === "false",
+    `Changes retained boxed or inaccessible run actions: ${JSON.stringify(changesActions)}`
+  );
+  await moveTrustedPointerTo('[data-review-ai-run="rendered-review-run"]');
+  await waitForRenderer(
+    `getComputedStyle(document.querySelector('[data-review-ai-run="rendered-review-run"]'), "::after").opacity === "1"`,
+    "the Changes Review underline interaction"
+  );
   await rendererValue(`(() => {
     document.querySelector('[data-review-ai-run="rendered-review-run"]')?.click();
     return true;
@@ -1576,6 +3270,7 @@ async function testEditorPdfFlow(baseUrl, fixture) {
       expanded: run?.classList.contains('expanded') || false,
       disclosureExpanded: disclosure?.getAttribute('aria-expanded') || '',
       disclosureControlsVisible: Boolean(disclosure?.getAttribute('aria-controls') && document.getElementById(disclosure.getAttribute('aria-controls'))),
+      disclosureTransform: disclosure?.querySelector('.tool-icon-chevronDown') ? getComputedStyle(disclosure.querySelector('.tool-icon-chevronDown')).transform : '',
       selectedFile: local.selectedFile,
       editorFocused: Boolean(document.activeElement?.closest?.('.cm-editor')),
       markerPage: marker?.dataset.pageNumber || '',
@@ -1599,6 +3294,7 @@ async function testEditorPdfFlow(baseUrl, fixture) {
     reviewNavigation.expanded
       && reviewNavigation.disclosureExpanded === "true"
       && reviewNavigation.disclosureControlsVisible
+      && reviewNavigation.disclosureTransform !== "none"
       && reviewNavigation.selectedFile === "mapped.tex"
       && reviewNavigation.editorFocused
       && reviewNavigation.markerPage === "2"
@@ -1643,6 +3339,202 @@ async function testEditorPdfFlow(baseUrl, fixture) {
 
   const pageErrors = await rendererValue(`window.__localLeafRenderedSmokeErrors || []`);
   ensure(Array.isArray(pageErrors) && pageErrors.length === 0, `The renderer reported an uncaught error: ${pageErrors?.[0] || "unknown"}`);
+}
+
+async function testGuestManagementAndViewerAccess(baseUrl) {
+  const waitForServerState = async (predicate, label) => {
+    const deadline = Date.now() + CONDITION_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await delay(POLL_INTERVAL_MS);
+    }
+    throw new Error(`${label} did not become ready within ${CONDITION_TIMEOUT_MS}ms.`);
+  };
+  const postJson = async (route, body) => {
+    const response = await fetch(new URL(route, baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const payload = await response.json();
+    ensure(response.ok, `${route} failed with HTTP ${response.status}: ${payload.error || "unknown error"}`);
+    return payload;
+  };
+
+  if (hostServer.state.session.status === "live") {
+    await hostRequest(baseUrl, "/api/session/stop", { method: "POST", body: {} });
+  }
+  const started = await hostRequest(baseUrl, "/api/session/start", { method: "POST", body: {} });
+  const join = await postJson("/api/join", { name: "Viewer Smoke", code: started.session.code });
+
+  await smokeWindow.loadURL(`${baseUrl}/?view=session&host=${encodeURIComponent(hostToken)}`);
+  await installRendererErrorCapture();
+  await waitForRenderer(`document.querySelector('[data-session-guest-approve="${join.requestId}"]')`, "the pending guest row");
+  const manager = await rendererValue(`(() => {
+    const heading = document.querySelector("#sessionGuestsHeading");
+    const host = document.querySelector(".session-host-row");
+    const picker = document.querySelector('[data-session-role-picker][data-role-context="pending"]');
+    const trigger = picker?.querySelector(".session-role-trigger");
+    const menu = picker?.querySelector(".session-role-menu");
+    return {
+      hostSeparate: Boolean(host) && !host.closest("[data-session-guest-row]"),
+      count: heading?.parentElement?.textContent || "",
+      defaultRole: picker?.dataset.roleValue || "",
+      triggerHeight: trigger ? Math.round(trigger.getBoundingClientRect().height) : 0,
+      expanded: trigger?.getAttribute("aria-expanded"),
+      menuHidden: menu?.hasAttribute("inert") && menu?.getAttribute("aria-hidden") === "true"
+    };
+  })()`);
+  ensure(manager.hostSeparate, "The host was not presented separately from admitted guests.");
+  ensure(manager.count.includes("0 of 5"), "The guest capacity count included the host.");
+  ensure(manager.defaultRole === "viewer", "A pending guest did not default to Viewer.");
+  ensure(manager.triggerHeight === 40 && manager.expanded === "false" && manager.menuHidden, "The role picker did not expose the canonical closed 40px control.");
+  const roleKeyboard = await rendererValue(`(() => {
+    const picker = document.querySelector('[data-session-role-picker][data-role-context="pending"]');
+    const trigger = picker?.querySelector('.session-role-trigger');
+    trigger?.focus();
+    trigger?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    const optionFocused = document.activeElement?.matches?.('[data-session-role-option="viewer"]') || false;
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return { optionFocused, triggerRestored: document.activeElement === trigger, expanded: trigger?.getAttribute('aria-expanded') };
+  })()`);
+  ensure(roleKeyboard.optionFocused && roleKeyboard.triggerRestored && roleKeyboard.expanded === "false", "The role picker did not preserve keyboard focus through open and Escape.");
+
+  await rendererValue(`document.querySelector('[data-session-guest-approve="${join.requestId}"]')?.click()`);
+  await waitForServerState(
+    () => hostServer.state.session.joinRequests.find((item) => item.id === join.requestId)?.status === "approved",
+    "the Viewer approval"
+  );
+  const approvedRequest = hostServer.state.session.joinRequests.find((item) => item.id === join.requestId);
+  const guestId = approvedRequest.userId;
+  ensure(approvedRequest.role === "viewer", "The approval request did not submit the selected Viewer role.");
+  pass("Session guest count and Viewer-default approval are authoritative");
+
+  await waitForRenderer(`document.querySelector('[data-session-role-picker][data-role-context="guest"][data-role-id="${guestId}"]')`, "the connected guest role picker");
+  await rendererValue(`(() => {
+    const picker = document.querySelector('[data-session-role-picker][data-role-context="guest"][data-role-id="${guestId}"]');
+    picker?.querySelector(".session-role-trigger")?.click();
+    picker?.querySelector('[data-session-role-option="maintainer"]')?.click();
+    return true;
+  })()`);
+  await waitForServerState(
+    () => hostServer.state.session.users.find((item) => item.id === guestId)?.role === "maintainer",
+    "the live Maintainer role change"
+  );
+  await waitForRenderer(
+    `document.activeElement?.matches?.('[data-session-role-picker][data-role-context="guest"][data-role-id="${guestId}"] .session-role-trigger') || false`,
+    "role picker focus restoration"
+  );
+  await hostRequest(baseUrl, "/api/session/guest/role", { method: "POST", body: { userId: guestId, role: "viewer" } });
+  pass("Connected guest role picker updates access pessimistically");
+
+  await rendererValue(`(() => { setView("editor"); return true; })()`);
+  await waitForRenderer(`document.querySelector("#chatSessionActionsButton")`, "the host Chat quick actions");
+  await rendererValue(`(() => {
+    document.querySelector("#chatSessionActionsButton")?.click();
+    document.querySelector('[data-chat-session-action="manage"]')?.click();
+    return true;
+  })()`);
+  await waitForRenderer(`route().view === "session" && document.activeElement?.id === "sessionGuestsHeading"`, "the focused Session guest manager");
+  pass("Chat Manage guests focuses the authoritative guest manager");
+
+  const joinStatusResponse = await fetch(new URL(`/api/join-status?id=${encodeURIComponent(join.requestId)}`, baseUrl));
+  const joinStatus = await joinStatusResponse.json();
+  ensure(joinStatusResponse.ok && joinStatus.token, "The approved Viewer token was unavailable.");
+  await rendererValue(`(() => {
+    sessionStorage.removeItem("localleaf.hostToken");
+    sessionStorage.removeItem("localleaf.guestToken");
+    return true;
+  })()`);
+  await smokeWindow.loadURL(`${baseUrl}/?view=editor&token=${encodeURIComponent(joinStatus.token)}&name=${encodeURIComponent("Viewer Smoke")}`);
+  await installRendererErrorCapture();
+  await waitForRenderer(`route().view === "editor" && local.userId === ${JSON.stringify(guestId)} && document.querySelector(".cm-content")`, "the Viewer editor");
+  await rendererValue(`openEditorSearchPanel()`);
+  await waitForRenderer(`Boolean(document.querySelector("#replaceAll"))`, "the Viewer search panel");
+  const viewerAccess = await rendererValue(`(() => {
+    const before = local.editorContent;
+    markEditorChanged("viewer-mutation-must-not-apply");
+    return {
+      role: effectiveSessionRole(),
+      canEdit: canMutateProject(),
+      contentEditable: document.querySelector(".cm-content")?.getAttribute("contenteditable"),
+      saveDisabled: Boolean(document.querySelector("#saveButton")?.disabled),
+      fileToolsDisabled: ["#newFile", "#newFolder", "#uploadFile", "#renameFile", "#deleteFile"].every((selector) => document.querySelector(selector)?.disabled),
+      formatDisabled: [...document.querySelectorAll("[data-editor-command]")].every((button) => button.disabled),
+      replaceDisabled: Boolean(document.querySelector("#replaceAll")?.disabled),
+      aiDisabled: Boolean(document.querySelector("#aiPrompt")?.disabled && document.querySelector(".ai-send-button")?.disabled),
+      mutationBlocked: local.editorContent === before
+    };
+  })()`);
+  ensure(viewerAccess.role === "viewer" && !viewerAccess.canEdit, "The Viewer identity was not derived from the approved user.");
+  ensure(viewerAccess.contentEditable !== "true" && viewerAccess.saveDisabled, "The CodeMirror surface or Save control remained editable for a Viewer.");
+  ensure(viewerAccess.fileToolsDisabled && viewerAccess.formatDisabled && viewerAccess.replaceDisabled && viewerAccess.aiDisabled, "A project mutation control remained available to a Viewer.");
+  ensure(viewerAccess.mutationBlocked, "The Viewer mutation guard accepted a local editor change.");
+
+  await rendererValue(`document.querySelector('[data-file="mapped.tex"]')?.click()`);
+  await waitForRenderer(`local.selectedFile === "mapped.tex" && currentEditorText().includes("Mapped source line")`, "Viewer source navigation");
+  pass("Viewer can read and switch files while mutation controls stay locked");
+
+  await hostRequest(baseUrl, "/api/session/guest/role", { method: "POST", body: { userId: guestId, role: "maintainer" } });
+  await waitForRenderer(`effectiveSessionRole() === "maintainer" && !document.querySelector("#saveButton")?.disabled && document.querySelector(".cm-content")?.getAttribute("contenteditable") === "true"`, "the live Viewer-to-Maintainer upgrade");
+  await hostRequest(baseUrl, "/api/session/guest/role", { method: "POST", body: { userId: guestId, role: "viewer" } });
+  await waitForRenderer(`effectiveSessionRole() === "viewer" && document.querySelector("#saveButton")?.disabled && document.querySelector(".cm-content")?.getAttribute("contenteditable") !== "true"`, "the live Maintainer-to-Viewer downgrade");
+  pass("Live role upgrades and downgrades remount the editor without reconnecting");
+
+  await rendererValue(`(() => {
+    sessionStorage.removeItem("localleaf.guestToken");
+    sessionStorage.removeItem("localleaf.hostToken");
+    return true;
+  })()`);
+  await smokeWindow.loadURL(`${baseUrl}/?view=session&host=${encodeURIComponent(hostToken)}`);
+  await installRendererErrorCapture();
+  await waitForRenderer(`document.querySelector('[data-session-guest-remove="${guestId}"]')`, "the connected guest removal action");
+  await rendererValue(`document.querySelector('[data-session-guest-remove="${guestId}"]')?.click()`);
+  const removeDialog = await rendererValue(`(() => ({
+    role: document.querySelector(".guest-remove-dialog")?.getAttribute("role"),
+    cancelFocused: document.activeElement?.matches?.("[data-cancel-guest-remove]") || false
+  }))()`);
+  ensure(removeDialog.role === "alertdialog" && removeDialog.cancelFocused, "Guest removal did not use the LocalLeaf alert dialog with safe initial focus.");
+  await rendererValue(`document.querySelector("[data-confirm-guest-remove]")?.click()`);
+  await waitForServerState(
+    () => !hostServer.state.session.users.some((item) => item.id === guestId),
+    "the guest removal"
+  );
+  await waitForRenderer(`!document.querySelector('[data-session-guest-remove="${guestId}"]')`, "the removed guest row");
+  pass("Guest removal revokes access from a focused confirmation dialog");
+
+  const removedBeforePollJoin = await postJson("/api/join", {
+    name: "Removed Before Poll",
+    code: hostServer.state.session.code
+  });
+  const removedBeforePollApproval = await hostRequest(baseUrl, "/api/join/approve", {
+    method: "POST",
+    body: { requestId: removedBeforePollJoin.requestId }
+  });
+  await hostRequest(baseUrl, "/api/session/guest/remove", {
+    method: "POST",
+    body: { userId: removedBeforePollApproval.user.id }
+  });
+  await rendererValue(`(() => {
+    local.hostToken = "";
+    local.guestToken = "";
+    local.userId = "";
+    sessionStorage.removeItem("localleaf.hostToken");
+    sessionStorage.removeItem("localleaf.guestToken");
+    local.joinRequestId = ${JSON.stringify(removedBeforePollJoin.requestId)};
+    local.userName = "Removed Before Poll";
+    renderWaiting();
+    void pollJoinStatus();
+    return true;
+  })()`);
+  await waitForRenderer(
+    `route().view === "ended" && /removed your access/i.test(local.sessionEndedReason || "")`,
+    "the terminal removed-before-poll state"
+  );
+  pass("Removed approval cannot leave a guest polling forever");
+
+  const pageErrors = await rendererValue(`window.__localLeafRenderedSmokeErrors || []`);
+  ensure(Array.isArray(pageErrors) && pageErrors.length === 0, `The guest-management renderer reported an uncaught error: ${pageErrors?.[0] || "unknown"}`);
 }
 
 async function run() {
@@ -1803,6 +3695,7 @@ async function run() {
   await testHostStartupAndHelp(baseUrl);
   await testDesktopThemeParity(baseUrl);
   await testEditorPdfFlow(baseUrl, fixture);
+  await testGuestManagementAndViewerAccess(baseUrl);
   ensure(rendererConsoleErrors.length === 0, `The renderer console reported an error: ${rendererConsoleErrors[0] || "unknown"}`);
   pass("renderer console and process stayed healthy");
   process.stdout.write("[rendered-smoke] COMPLETE\n");

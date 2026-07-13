@@ -12,7 +12,10 @@ const PROVIDERS_FILE = "providers.json";
 const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-_]*$/;
 const DEFAULT_TEST_TIMEOUT_MS = 25000;
 const DEFAULT_GENERATION_TIMEOUT_MS = 120000;
+const MIN_LOCAL_CONTEXT_SIZE = 4096;
+const MAX_LOCAL_CONTEXT_SIZE = 32768;
 const DEFAULT_LOCAL_CONTEXT_SIZE = 16384;
+const GIBIBYTE = 1024 ** 3;
 const ROOT_DIR = path.resolve(__dirname, "../..");
 const LLAMA_SERVER_NAME = process.platform === "win32" ? "llama-server.exe" : "llama-server";
 
@@ -25,6 +28,7 @@ const MODEL_CATALOG = [
     filename: "Qwen2.5-0.5B-Instruct-IQ4_XS.gguf",
     downloadUrl: "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-IQ4_XS.gguf?download=true",
     expectedBytes: 349402688,
+    maximumContextWindowTokens: 32768,
     description: "Small local GGUF model for quick LaTeX edits on modest laptops."
   },
   {
@@ -35,6 +39,7 @@ const MODEL_CATALOG = [
     filename: "Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf",
     downloadUrl: "https://huggingface.co/bartowski/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf?download=true",
     expectedBytes: 397808288,
+    maximumContextWindowTokens: 32768,
     description: "Coder-tuned local GGUF model for LaTeX edits and structured code blocks."
   }
 ];
@@ -329,10 +334,56 @@ function partialModelPath(storageRoot, model) {
   return `${modelFilePath(storageRoot, model)}.part`;
 }
 
-function localContextSize() {
-  const requested = Number(process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE || DEFAULT_LOCAL_CONTEXT_SIZE);
-  if (!Number.isFinite(requested)) return DEFAULT_LOCAL_CONTEXT_SIZE;
-  return Math.max(4096, Math.min(32768, Math.round(requested)));
+function localResourceProfile(totalMemoryBytes) {
+  const memory = Number(totalMemoryBytes);
+  if (!Number.isFinite(memory) || memory <= 0) return "balanced";
+  if (memory < 6 * GIBIBYTE) return "constrained";
+  if (memory < 12 * GIBIBYTE) return "compact";
+  if (memory < 24 * GIBIBYTE) return "balanced";
+  return "expanded";
+}
+
+function automaticContextSize(profile) {
+  if (profile === "constrained") return 4096;
+  if (profile === "compact") return 8192;
+  if (profile === "expanded") return 32768;
+  return DEFAULT_LOCAL_CONTEXT_SIZE;
+}
+
+function localContextPlan(model, totalMemoryBytes) {
+  const modelMaximum = Math.max(
+    MIN_LOCAL_CONTEXT_SIZE,
+    Math.min(MAX_LOCAL_CONTEXT_SIZE, Math.round(Number(model?.maximumContextWindowTokens) || MAX_LOCAL_CONTEXT_SIZE))
+  );
+  const resourceProfile = localResourceProfile(totalMemoryBytes);
+  const rawOverride = String(process.env.LOCALLEAF_LOCAL_CONTEXT_SIZE || "").trim();
+  const requestedOverride = Number(rawOverride);
+  const hasValidOverride = rawOverride !== "" && Number.isFinite(requestedOverride);
+  const requestedTokens = hasValidOverride
+    ? requestedOverride
+    : automaticContextSize(resourceProfile);
+  const effectiveTokens = Math.max(
+    MIN_LOCAL_CONTEXT_SIZE,
+    Math.min(modelMaximum, Math.round(requestedTokens))
+  );
+  return {
+    mode: hasValidOverride ? "advanced_override" : "automatic",
+    source: hasValidOverride ? "environment" : "host_memory",
+    resourceProfile,
+    effectiveTokens,
+    modelMaximumTokens: modelMaximum
+  };
+}
+
+function hostedContextPlan(model) {
+  const configuredTokens = Number(model?.contextWindowTokens) || null;
+  return {
+    mode: configuredTokens ? "configured" : "provider_default",
+    source: configuredTokens ? "model_configuration" : "provider",
+    resourceProfile: null,
+    effectiveTokens: configuredTokens,
+    modelMaximumTokens: configuredTokens
+  };
 }
 
 function installedModelManifest(storageRoot, modelId) {
@@ -414,6 +465,19 @@ async function waitForLlamaServer(baseUrl, fetchImpl, timeoutMs = 60000) {
   throw new Error(lastError?.message || "Local model runtime did not become ready.");
 }
 
+async function reportedLlamaContextSize(baseUrl, fetchImpl, fallbackTokens) {
+  try {
+    const response = await fetchImpl(`${baseUrl}/props`, { method: "GET" });
+    if (!response.ok) return fallbackTokens;
+    const payload = await response.json();
+    const reported = Number(payload?.default_generation_settings?.n_ctx);
+    if (!Number.isInteger(reported) || reported < 1024 || reported > 10000000) return fallbackTokens;
+    return reported;
+  } catch {
+    return fallbackTokens;
+  }
+}
+
 function chatCompletionsUrl(baseUrl) {
   if (/\/chat\/completions$/u.test(baseUrl)) return baseUrl;
   return `${baseUrl}/chat/completions`;
@@ -445,6 +509,9 @@ function createAiModelManager(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const downloadImpl = options.downloadImpl || null;
   const onChange = options.onChange;
+  const totalMemoryBytes = Number.isFinite(Number(options.totalMemoryBytes))
+    ? Number(options.totalMemoryBytes)
+    : os.totalmem();
   const providers = new Map();
   if (typeof secretStore.setRoot === "function") secretStore.setRoot(storageRoot);
 
@@ -515,26 +582,48 @@ function createAiModelManager(options = {}) {
       .map((model) => model.id));
   }
 
+  function contextPlanForLocalModel(model) {
+    const planned = localContextPlan(model, totalMemoryBytes);
+    if (localRuntime?.modelId === model?.id
+      && localRuntime.requestedContextWindowTokens === planned.effectiveTokens
+      && Number.isInteger(localRuntime.contextWindowTokens)) {
+      return {
+        ...planned,
+        source: "runtime",
+        effectiveTokens: localRuntime.contextWindowTokens
+      };
+    }
+    return planned;
+  }
+
   function allModelChoices() {
     const installed = installedModelIds();
-    const local = MODEL_CATALOG.filter((model) => installed.has(model.id)).map((model) => ({
-      providerId: "localleaf-local",
-      providerName: "LocalLeaf Local",
-      modelId: model.id,
-      name: model.name,
-      contextWindowTokens: localContextSize(),
-      local: true
+    const local = MODEL_CATALOG.filter((model) => installed.has(model.id)).map((model) => {
+      const contextWindow = contextPlanForLocalModel(model);
+      return {
+        providerId: "localleaf-local",
+        providerName: "LocalLeaf Local",
+        modelId: model.id,
+        name: model.name,
+        contextWindowTokens: contextWindow.effectiveTokens,
+        contextWindow,
+        local: true
+      };
+    });
+    const remote = [...providers.values()].flatMap((provider) => (provider.models || []).map((model) => {
+      const contextWindow = hostedContextPlan(model);
+      return {
+        providerId: provider.id,
+        providerName: provider.name,
+        modelId: model.id,
+        name: model.name,
+        contextWindowTokens: contextWindow.effectiveTokens,
+        contextWindow,
+        local: false,
+        hasApiKey: provider.hasApiKey,
+        status: provider.status || "not_configured"
+      };
     }));
-    const remote = [...providers.values()].flatMap((provider) => (provider.models || []).map((model) => ({
-      providerId: provider.id,
-      providerName: provider.name,
-      modelId: model.id,
-      name: model.name,
-      contextWindowTokens: model.contextWindowTokens || null,
-      local: false,
-      hasApiKey: provider.hasApiKey,
-      status: provider.status || "not_configured"
-    })));
     return [...local, ...remote];
   }
 
@@ -546,24 +635,30 @@ function createAiModelManager(options = {}) {
     const provider = activeProvider();
     if (provider) {
       const model = (provider.models || []).find((item) => item.id === activeModelId) || provider.models?.[0] || null;
-      return model ? {
+      if (!model) return null;
+      const contextWindow = hostedContextPlan(model);
+      return {
         providerId: provider.id,
         providerName: provider.name,
         modelId: model.id,
         name: model.name,
-        contextWindowTokens: model.contextWindowTokens || null,
+        contextWindowTokens: contextWindow.effectiveTokens,
+        contextWindow,
         local: false
-      } : null;
+      };
     }
     const model = MODEL_CATALOG.find((item) => item.id === activeModelId);
-    return model ? {
+    if (!model) return null;
+    const contextWindow = contextPlanForLocalModel(model);
+    return {
       providerId: "localleaf-local",
       providerName: "LocalLeaf Local",
       modelId: model.id,
       name: model.name,
-      contextWindowTokens: localContextSize(),
+      contextWindowTokens: contextWindow.effectiveTokens,
+      contextWindow,
       local: true
-    } : null;
+    };
   }
 
   function publicState() {
@@ -596,9 +691,11 @@ function createAiModelManager(options = {}) {
       models: MODEL_CATALOG.map((model) => {
         const progress = downloads.get(model.id) || null;
         const isInstalled = installed.has(model.id);
+        const contextWindow = contextPlanForLocalModel(model);
         return {
           ...model,
-          contextWindowTokens: localContextSize(),
+          contextWindowTokens: contextWindow.effectiveTokens,
+          contextWindow,
           installed: isInstalled,
           status: progress?.status || (isInstalled ? "installed" : "not_downloaded"),
           progress: progress?.progress || (isInstalled ? 100 : 0),
@@ -1120,8 +1217,17 @@ function createAiModelManager(options = {}) {
     if (!model || !installedModelManifest(storageRoot, model.id)) {
       throw new Error("Download a LocalLeaf model before using local AI.");
     }
-    if (localRuntime?.modelId === model.id && localRuntime.baseUrl && localRuntime.process && !localRuntime.process.killed) {
-      return { model, baseUrl: localRuntime.baseUrl };
+    const requestedContextWindow = localContextPlan(model, totalMemoryBytes);
+    if (localRuntime?.modelId === model.id
+      && localRuntime.requestedContextWindowTokens === requestedContextWindow.effectiveTokens
+      && localRuntime.baseUrl
+      && localRuntime.process
+      && !localRuntime.process.killed) {
+      return {
+        model,
+        baseUrl: localRuntime.baseUrl,
+        contextWindow: contextPlanForLocalModel(model)
+      };
     }
     stopLocalRuntime();
     const serverPath = findBundledLlamaServer();
@@ -1135,7 +1241,8 @@ function createAiModelManager(options = {}) {
       "-m", modelPath,
       "--host", "127.0.0.1",
       "--port", String(port),
-      "-c", String(localContextSize()),
+      "-c", String(requestedContextWindow.effectiveTokens),
+      "--parallel", "1",
       "--jinja",
       "--no-webui",
       "--log-disable"
@@ -1144,17 +1251,28 @@ function createAiModelManager(options = {}) {
       windowsHide: true,
       stdio: ["ignore", "ignore", "ignore"]
     });
-    localRuntime = { modelId: model.id, baseUrl, process: child };
+    localRuntime = {
+      modelId: model.id,
+      baseUrl,
+      process: child,
+      requestedContextWindowTokens: requestedContextWindow.effectiveTokens,
+      contextWindowTokens: requestedContextWindow.effectiveTokens
+    };
     child.once("exit", () => {
       if (localRuntime?.process === child) localRuntime = null;
     });
     await waitForLlamaServer(baseUrl, fetchImpl);
-    return { model, baseUrl };
+    localRuntime.contextWindowTokens = await reportedLlamaContextSize(
+      baseUrl,
+      fetchImpl,
+      requestedContextWindow.effectiveTokens
+    );
+    return { model, baseUrl, contextWindow: contextPlanForLocalModel(model) };
   }
 
   async function askLocalModel(messages, options = {}) {
     const requestedModel = String(options.modelId || activeModelId || "").trim();
-    const { model, baseUrl } = await ensureLocalRuntime(requestedModel);
+    const { model, baseUrl, contextWindow } = await ensureLocalRuntime(requestedModel);
     const requestPayload = {
       model: model.filename || model.id,
       messages,
@@ -1191,8 +1309,18 @@ function createAiModelManager(options = {}) {
       content,
       usage: normalizeProviderUsage(payload),
       requestInputTokensEstimate: estimateTokens(serializedRequest),
-      contextWindowTokens: localContextSize(),
+      contextWindowTokens: contextWindow.effectiveTokens,
       windowSource: "local_runtime"
+    };
+  }
+
+  async function prepareLocalModel(options = {}) {
+    const requestedModel = String(options.modelId || activeModelId || "").trim();
+    const { model, contextWindow } = await ensureLocalRuntime(requestedModel);
+    return {
+      modelId: model.id,
+      contextWindowTokens: contextWindow.effectiveTokens,
+      contextWindow
     };
   }
 
@@ -1275,6 +1403,7 @@ function createAiModelManager(options = {}) {
     testProvider,
     validateProvider,
     hasActiveLocalModel,
+    prepareLocalModel,
     askLocalModel,
     askActiveProvider,
     cursorProviderConfig,
