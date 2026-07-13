@@ -195,14 +195,12 @@ async function setEmulatedMediaFeatures(features = []) {
   if (!debuggerApi.isAttached()) {
     debuggerApi.attach("1.3");
   }
-  try {
-    await debuggerApi.sendCommand("Emulation.setEmulatedMedia", {
-      media: "",
-      features
-    });
-  } finally {
-    if (!features.length && debuggerApi.isAttached()) debuggerApi.detach();
-  }
+  await debuggerApi.sendCommand("Emulation.setEmulatedMedia", {
+    media: "",
+    features: features.length
+      ? features
+      : [{ name: "prefers-reduced-motion", value: "no-preference" }]
+  });
 }
 
 async function testHostStartupAndHelp(baseUrl) {
@@ -3712,6 +3710,13 @@ async function finish(code, error = null) {
   finishing = true;
   clearTimeout(hardTimeout);
   if (error) process.stderr.write(`[rendered-smoke] FAIL ${redact(error)}\n`);
+  try {
+    if (smokeWindow && !smokeWindow.isDestroyed() && smokeWindow.webContents.debugger.isAttached()) {
+      smokeWindow.webContents.debugger.detach();
+    }
+  } catch {
+    // Continue renderer cleanup if Chromium has already released the debugger target.
+  }
   try {
     if (smokeWindow && !smokeWindow.isDestroyed()) smokeWindow.destroy();
   } catch {
