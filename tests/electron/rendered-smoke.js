@@ -227,6 +227,11 @@ async function testHostStartupAndHelp(baseUrl) {
   ensure(identity.capabilityStored && identity.capabilityHidden, "Host authentication did not initialize or hide its capability from the visible URL.");
   pass("host-authenticated app startup");
 
+  await setEmulatedMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
+  await waitForRenderer(
+    `!matchMedia("(prefers-reduced-motion: reduce)").matches`,
+    "the normal-motion navigation baseline"
+  );
   await rendererValue(`(() => {
     if (local.hostRailCollapsed) {
       local.hostRailCollapsed = false;
@@ -277,6 +282,7 @@ async function testHostStartupAndHelp(baseUrl) {
     await rendererValue(`!document.querySelector("#app")?.classList.contains("app-shell-rail-expanding")`),
     "The left navigation entrance class did not clean itself up."
   );
+  await setEmulatedMediaFeatures([]);
   pass("left navigation opens and collapses with restrained compositor motion");
 
   await rendererValue(`(() => {

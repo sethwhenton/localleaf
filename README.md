@@ -130,9 +130,9 @@ The built-in Cursor-style harness powers AI edit proposals inside LocalLeaf: mod
 | macOS Apple Silicon | [LocalLeaf-Host-mac-arm64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-arm64.dmg) |
 | macOS Intel | [LocalLeaf-Host-mac-x64.dmg](https://github.com/sethwhenton/localleaf/releases/latest/download/LocalLeaf-Host-mac-x64.dmg) |
 
-Current release: `0.1.24`
+Current release: `0.1.25`
 
-Version `0.1.24` adds explicit Viewer and Maintainer guest controls, stronger live-session authorization, detailed Help and About guidance, smoother desktop interactions, provider-aware AI context handling, and broader rendered and security regression coverage.
+Version `0.1.25` adds explicit Viewer and Maintainer guest controls, stronger live-session authorization, detailed Help and About guidance, smoother desktop interactions, provider-aware AI context handling, and broader rendered and security regression coverage.
 
 ## macOS First Launch
 
