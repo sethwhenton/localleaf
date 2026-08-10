@@ -398,18 +398,99 @@ a {
 }
 
 .hero {
+  position: relative;
+  isolation: isolate;
   min-height: 92svh;
   display: grid;
-  place-items: center;
+  place-items: center start;
+  overflow: clip;
   padding: 112px var(--page-x) 64px;
+  background: #f5f3ed;
+  color: #101010;
   text-align: center;
 }
 
+.hero-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background: #f5f3ed;
+  contain: paint;
+}
+
+.hero-backdrop img {
+  position: absolute;
+  left: -7%;
+  top: 5%;
+  width: 110%;
+  height: 110%;
+  max-width: none;
+  object-fit: cover;
+  object-position: center;
+  opacity: 1;
+  transform: none;
+  transform-origin: 54% 56%;
+}
+
+.js-enabled .hero-backdrop img {
+  opacity: 0;
+  transform: translate3d(2.4%, 1.4%, 0) scale(1.05);
+  will-change: transform, opacity;
+}
+
+.js-enabled .hero.is-ready .hero-backdrop img {
+  animation: heroMossArrive 1180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.js-enabled .hero.is-motion-settled .hero-backdrop img {
+  opacity: 1;
+  transform: none;
+  animation: none;
+  will-change: auto;
+}
+
 .hero-copy {
-  width: min(100%, 1120px);
+  position: relative;
+  z-index: 1;
+  width: min(72vw, 1120px);
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+
+.js-enabled .hero-copy {
+  opacity: 0;
+  transform: translate3d(0, 18px, 0);
+}
+
+.js-enabled .hero.is-ready .hero-copy {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  transition:
+    opacity 640ms ease-out 110ms,
+    transform 720ms cubic-bezier(0.22, 1, 0.36, 1) 110ms;
+}
+
+.js-enabled .hero.is-motion-settled .hero-copy {
+  opacity: 1;
+  transform: none;
+  transition: none;
+}
+
+.hero .brand-line,
+.hero h1,
+.hero .download-button.secondary {
+  color: #101010;
+}
+
+.hero .download-button.secondary {
+  border-color: #dfddd7;
+  background: #ffffff;
+}
+
+.hero .release-note {
+  color: #6f6f6b;
 }
 
 .hero-brand-lockup {
@@ -1850,6 +1931,18 @@ details p {
   }
 }
 
+@keyframes heroMossArrive {
+  from {
+    opacity: 0;
+    transform: translate3d(2.4%, 1.4%, 0) scale(1.05);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 @keyframes aiSlideEnter {
   from {
     opacity: 0;
@@ -2130,9 +2223,33 @@ details p {
   }
 
   .hero {
-    min-height: 88svh;
+    min-height: 100dvh;
+    align-items: start;
     padding-top: 92px;
-    padding-bottom: 56px;
+    padding-bottom: 108px;
+  }
+
+  .hero-backdrop img {
+    left: -22%;
+    top: -4%;
+    width: 144%;
+    height: 108%;
+    object-position: 72% bottom;
+    transform-origin: 70% 58%;
+  }
+
+  .hero-copy {
+    width: 100%;
+  }
+
+  .hero .release-note {
+    max-width: 330px;
+    margin-top: 16px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(245, 243, 237, 0.94);
+    font-size: 0.78rem;
+    line-height: 1.4;
   }
 
   .logo-build {
@@ -2514,5 +2631,20 @@ details p {
     opacity: 1 !important;
     transform: none !important;
     filter: none !important;
+  }
+
+  .hero-backdrop img,
+  .js-enabled .hero-backdrop img,
+  .js-enabled .hero.is-ready .hero-backdrop img,
+  .js-enabled .hero.is-motion-settled .hero-backdrop img,
+  .hero-copy,
+  .js-enabled .hero-copy,
+  .js-enabled .hero.is-ready .hero-copy,
+  .js-enabled .hero.is-motion-settled .hero-copy {
+    opacity: 1 !important;
+    transform: none !important;
+    animation: none !important;
+    transition: none !important;
+    will-change: auto !important;
   }
 }

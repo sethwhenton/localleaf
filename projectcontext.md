@@ -370,3 +370,17 @@ Integrated verification for this follow-up: direct `node --test --test-concurren
 - Release metadata, README copy, and the landing download note are aligned on `0.1.26`. Development-only skills, audit notes, concepts, and unreferenced logo experiments remain outside the product release scope.
 
 Release validation: `PMG_DISABLE_TELEMETRY=true pmg npm test` rebuilt the browser clients and passed 238/238 tests. The rendered Electron gate passed after adding Help close/reversal and 900x640 Help/About containment coverage. Its media helper keeps an explicit normal-motion baseline so Windows runner accessibility defaults cannot contradict the separate reduced-motion checks. The concurrent SyncTeX regression asserts the heartbeat response it owns instead of rejecting unrelated queued state broadcasts, removing a macOS scheduling race without weakening the lookup, HTTP, or WebSocket checks. Changed JavaScript syntax, JSON manifests, and repository-wide `git diff --check` pass. `PMG_DISABLE_TELEMETRY=true pmg npm run package:win` produced `LocalLeaf Host Setup 0.1.26.exe`; the packaged ASAR reports version `0.1.26`, contains the final FAQ/About copy, and remained responsive during the unpacked launch smoke. The local npm 11.8 dependency collector still reports the documented npm 11.16 floor warnings; the canonical tag workflows use Node 24.18.0/npm 11.16.0 and fresh lockfile installs.
+
+### 2026-08-10 production landing visual rollback
+
+- The production `landing-page/` frontend was restored to the last pre-redesign version from `v0.1.22` (`168da06`) after the large visual replacement introduced in `v0.1.24` proved undesirable.
+- The rollback is visual and interaction-scoped. Current release download URLs remain on the stable `releases/latest/download/...` routes, and the visible release label remains `v0.1.26`.
+- The isolated moss hero prototype under `output/localleaf-hero-option-2/` and unrelated application code were not changed.
+- Static verification passes: `node --check landing-page/script.js`, `git diff --check -- landing-page`, and all local HTML asset references resolve. Browser checks at 1536x1024 and 390x844 report zero console warnings/errors, zero broken images, and no mobile horizontal overflow.
+
+### 2026-08-10 moss hero integration
+
+- The restored production homepage keeps its original structure, copy, downloads, and downstream sections, while the first hero now uses the approved text-free moss image from the isolated Option 2 prototype as `landing-page/assets/hero-moss.webp`.
+- The background and hero copy enter once after the image decodes. Motion is limited to transform and opacity; `animationend` plus a bounded fallback settles the layer to `animation: none`, `transform: none`, and `will-change: auto`. Reduced motion renders the final frame immediately.
+- Desktop uses the source composition's quiet cream field for the hero copy. Mobile repositions the same source asset, stacks the existing download actions, and gives the release note a compact cream backing for stable contrast.
+- Browser QA passed at 1536x1024 and 390x844 with zero overflow, broken images, console errors, or warnings. Dark-theme foreground containment and runtime reduced-motion behavior also pass. Evidence and the blocking report are in `landing-page/design-qa.md`; the local preview is served from `http://127.0.0.1:8765/` during handoff.

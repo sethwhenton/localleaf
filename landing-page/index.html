@@ -67,8 +67,20 @@
       </header>
 
       <main>
-        <section class="hero" aria-labelledby="hero-title">
-          <div class="hero-copy reveal">
+        <section class="hero" aria-labelledby="hero-title" data-hero-motion>
+          <div class="hero-backdrop" aria-hidden="true">
+            <img
+              src="./assets/hero-moss.webp"
+              alt=""
+              width="1536"
+              height="1024"
+              decoding="async"
+              fetchpriority="high"
+              data-hero-image
+            />
+          </div>
+
+          <div class="hero-copy">
             <div class="hero-brand-lockup" aria-label="LocalLeaf">
               <svg class="logo-build" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
                 <path

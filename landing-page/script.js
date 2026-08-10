@@ -20,6 +20,8 @@ const aiCaption = document.querySelector("[data-ai-caption]");
 const previewDots = [...document.querySelectorAll("[data-preview-dot]")];
 const aiDots = [...document.querySelectorAll("[data-ai-dot]")];
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const heroMotion = document.querySelector("[data-hero-motion]");
+const heroImage = document.querySelector("[data-hero-image]");
 
 const previewStates = [
   {
@@ -82,6 +84,42 @@ let ticking = false;
 let lenisFrame = 0;
 
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+
+function initHeroMotion() {
+  if (!heroMotion || !heroImage) return;
+
+  let fallbackTimer = 0;
+
+  const settle = () => {
+    window.clearTimeout(fallbackTimer);
+    heroImage.removeEventListener("animationend", settle);
+    heroMotion.classList.add("is-motion-settled");
+  };
+
+  const reveal = async () => {
+    try {
+      await heroImage.decode();
+    } catch {
+      // The browser load path remains a safe fallback when decode is unavailable.
+    }
+
+    heroMotion.classList.add("is-ready");
+
+    if (prefersReducedMotion.matches) {
+      settle();
+      return;
+    }
+
+    heroImage.addEventListener("animationend", settle, { once: true });
+    fallbackTimer = window.setTimeout(settle, 1600);
+  };
+
+  prefersReducedMotion.addEventListener?.("change", (event) => {
+    if (event.matches) settle();
+  });
+
+  reveal();
+}
 
 function currentTheme() {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -311,6 +349,7 @@ prefersReducedMotion.addEventListener?.("change", () => {
 
 updateThemeToggle();
 updateThemeImages();
+initHeroMotion();
 setPreview(0);
 setAiSlide(0, { forceImage: true, animate: false });
 updateOnScroll();
