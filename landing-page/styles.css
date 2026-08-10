@@ -493,6 +493,35 @@ a {
   color: #6f6f6b;
 }
 
+:root[data-theme="dark"] .hero,
+:root[data-theme="dark"] .hero-backdrop {
+  background: #0d0f0e;
+}
+
+:root[data-theme="dark"] .hero {
+  color: #f5f1ec;
+}
+
+:root[data-theme="dark"] .hero .brand-line,
+:root[data-theme="dark"] .hero h1,
+:root[data-theme="dark"] .hero .download-button.secondary {
+  color: #f5f1ec;
+}
+
+:root[data-theme="dark"] .hero .download-button.secondary {
+  border-color: #343a36;
+  background: rgba(20, 24, 21, 0.92);
+}
+
+:root[data-theme="dark"] .hero .download-button.secondary:hover {
+  border-color: #4b534e;
+  background: #171c18;
+}
+
+:root[data-theme="dark"] .hero .release-note {
+  color: #aaa49d;
+}
+
 .hero-brand-lockup {
   margin-bottom: 22px;
 }
@@ -2250,6 +2279,10 @@ details p {
     background: rgba(245, 243, 237, 0.94);
     font-size: 0.78rem;
     line-height: 1.4;
+  }
+
+  :root[data-theme="dark"] .hero .release-note {
+    background: rgba(13, 15, 14, 0.92);
   }
 
   .logo-build {

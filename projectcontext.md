@@ -299,7 +299,7 @@ Integrated verification for this follow-up: `PMG_DISABLE_TELEMETRY=true pmg npm 
 
 ### 2026-07-11 Awwwards variant product-capture refresh
 
-Cloudflare handoff: the six experiments are publicly deployed as the Direct Upload Pages project `localleaf-landing-lab`. The stable showcase is `https://localleaf-landing-lab.pages.dev/`, with experiments at `/variant-1/` through `/variant-6/`. The index and all six stable routes returned HTTP 200 after deployment.
+Cloudflare handoff: the six experiments were previously deployed as the Direct Upload Pages project `localleaf-landing-lab`. At the user's request, that Pages project was permanently deleted on 2026-08-10. Cloudflare now lists no Pages projects for the deployment account, and the former showcase plus all `/variant-1/` through `/variant-6/` routes were verified offline.
 
 - All six explorations under `temp/awwwards-variants/variant-1/` through `variant-6/` now use variant-local current LocalLeaf product captures rather than stale shared app screenshots. Each direction chooses the mode that fits its design: Variant 1 and Variant 4 use light captures; Variants 3, 5, and 6 use dark captures; Variant 2 retains both because its real theme toggle swaps every product portrayal coherently.
 - Variant 3's Compile Current hero uses current dark Host, Session, and Editor captures plus `assets/compile-current-product-v3-dark.png`, a built-in GPT Image composite created from those exact current dark screens. Its Host, Link, Approve, and Compile chapters now reveal progressively with transform/opacity choreography as the desktop horizontal current advances; mobile cards reveal individually through IntersectionObserver. Reduced-motion renders every chapter immediately.
@@ -384,3 +384,9 @@ Release validation: `PMG_DISABLE_TELEMETRY=true pmg npm test` rebuilt the browse
 - The background and hero copy enter once after the image decodes. Motion is limited to transform and opacity; `animationend` plus a bounded fallback settles the layer to `animation: none`, `transform: none`, and `will-change: auto`. Reduced motion renders the final frame immediately.
 - Desktop uses the source composition's quiet cream field for the hero copy. Mobile repositions the same source asset, stacks the existing download actions, and gives the release note a compact cream backing for stable contrast.
 - Browser QA passed at 1536x1024 and 390x844 with zero overflow, broken images, console errors, or warnings. Dark-theme foreground containment and runtime reduced-motion behavior also pass. Evidence and the blocking report are in `landing-page/design-qa.md`; the local preview is served from `http://127.0.0.1:8765/` during handoff.
+
+### 2026-08-10 dark moss hero companion
+
+- Dark mode now uses a true companion raster, `landing-page/assets/hero-moss-dark.jpg`, generated from the exact light hero composition with only lighting and palette changed. It retains the 1536x1024 framing and weighs 152 KB.
+- The existing `data-light` / `data-dark` theme-image mechanism swaps the hero source, so initial persisted theme and runtime theme-toggle changes both select the correct artwork without adding another theme system.
+- Dark hero text, secondary buttons, backing surfaces, and the mobile release note use explicit dark-theme contrast tokens. Desktop 1536x1024 and mobile 390x844 checks report zero overflow, broken images, console errors, or warnings.

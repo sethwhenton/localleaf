@@ -6,11 +6,13 @@
 - Production asset: `E:\Programming\Overleaf clone\landing-page\assets\hero-moss.webp`
 - Desktop implementation: `E:\Programming\Overleaf clone\output\playwright\landing-moss-desktop.png`
 - Mobile implementation: `E:\Programming\Overleaf clone\output\playwright\landing-moss-mobile.png`
+- Dark desktop implementation: `E:\Programming\Overleaf clone\output\playwright\landing-moss-dark-desktop.png`
+- Dark mobile implementation: `E:\Programming\Overleaf clone\output\playwright\landing-moss-dark-mobile.png`
 - Full-view comparison: `E:\Programming\Overleaf clone\output\playwright\landing-moss-comparison.png`
 - Desktop viewport and pixels: 1536 x 1024 CSS px, device scale factor 1, 1536 x 1024 screenshot.
 - Mobile viewport and pixels: 390 x 844 CSS px, device scale factor 1, 390 x 844 screenshot.
 - Source pixels: 1536 x 1024. The desktop comparison uses identical pixel dimensions; no density normalization was required.
-- State: light theme, hero entrance settled. Dark-theme token containment and reduced-motion behavior were checked separately.
+- State: light and dark themes, hero entrance settled. Theme-image switching and reduced-motion behavior were checked separately.
 
 ## Findings
 
@@ -19,6 +21,7 @@
 - Spacing and layout rhythm: the desktop copy remains in the source image's quiet field and the moss mass anchors the right and lower edges. Mobile stacks the existing download actions above the moss without overflow.
 - Colors and visual tokens: the source cream and moss palette is preserved. Hero foreground and secondary actions remain explicitly readable in both site themes.
 - Image quality and asset fidelity: the exact approved moss image is used as an optimized 139 KB WebP. Desktop uses the source crop; mobile repositions the same asset without stretching or substituting artwork.
+- Dark image quality and fidelity: the 152 KB dark companion preserves the same 1536 x 1024 composition, negative space, silhouettes, crop, and moss detail. Only lighting and palette change; no CSS tint or filter is used.
 - Copy and content: all restored homepage copy, platform downloads, release note, navigation, and subsequent sections remain unchanged.
 - Motion: the background and copy enter once using transform and opacity. After `animationend` (with a bounded fallback), animation is removed, transform becomes `none`, and `will-change` returns to `auto`. Reduced motion renders the final frame immediately.
 
@@ -31,6 +34,7 @@
 ## Interaction and browser checks
 
 - Primary download links remain present and point to the existing latest-release URLs.
+- The existing theme toggle switches the hero source from `hero-moss.webp` to `hero-moss-dark.jpg`; the dark asset completes at 1536px natural width and theme state remains persisted by the existing mechanism.
 - Desktop and mobile snapshots expose the expected hero, navigation, preview, flow, AI, Q&A, and final download content.
 - Desktop scroll width equals its 1536px viewport; mobile scroll width equals its 390px viewport.
 - Broken images: 0.
